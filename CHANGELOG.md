@@ -1091,6 +1091,15 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **The home page and README say what March is for.** The home page now leads with what
+  the compiler checks (authority, resource use, protocols, memory reuse) and adds a "What
+  you can build" section. It no longer claims "Rust-like speed" or "no pauses": the wording
+  is "no tracing garbage-collection pauses", and the tree-transform table shows March with
+  reuse disabled beside the other languages. The hero's code tabs are now one short example
+  per check (authority, actors, resources, protocols, failures, memory, contracts), some
+  running programs and some ending in the compiler's own message. The README is shorter,
+  opens with a capability-checked actor program, and links to the site for the language
+  tour and tool reference.
 - **Every cookbook "run" button runs.** 54 of the 151 March blocks on the cookbook and
   "Coming from" pages failed when run in the sidebar REPL: they used a value from an earlier
   block, had a placeholder body, used `1_000_000` (March has no digit separators), or need a

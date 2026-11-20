@@ -11,17 +11,17 @@ permalink: /
 
 # March
 
-**ML's types. Capabilities for every effect. BEAM-style actors, compiled to native code.**
+**Functional programming for systems that can't afford surprises.**
 
-March is a statically typed functional language for programs built from actors. It takes message passing and supervision from the BEAM and algebraic data types from ML, and compiles the result to a native binary through LLVM. Memory is managed by [Perceus reference counting with in-place reuse]({{ site.baseurl }}/docs/memory-model/), so there is no garbage collector and no pauses, and functional code runs at Rust-like speed.
+March is a statically typed functional language that compiles to native code, with actors, explicit [capabilities]({{ site.baseurl }}/docs/capabilities/) and checked communication protocols. The compiler checks what code may touch, how components talk to each other, and where memory goes. Memory is managed by [Perceus reference counting with in-place reuse]({{ site.baseurl }}/docs/memory-model/), so there are no tracing garbage-collection pauses.
 
-Safety is the compiler's job, not the test suite's. Side effects are part of the type: a module declares the [capabilities]({{ site.baseurl }}/docs/capabilities/) it needs, so what any piece of code can touch is visible in its signature, bounded by what `main` was granted, and auditable across every dependency you pull in. [Linear types]({{ site.baseurl }}/docs/linear-types/) make a resource that is used out of order, twice, or never a compile error. [Refinement types]({{ site.baseurl }}/docs/refinement-types/) reject a value a function cannot accept before it runs. A message protocol is checked on both sides, a crashed actor is restarted the way you declared, and a running node [takes new code without a restart]({{ site.baseurl }}/docs/hot-code-reload/).
+March checks more than types and function signatures. Side effects are part of the type: a module declares the capabilities it needs, so what any piece of code can touch is visible in its signature, bounded by what `main` was granted, and auditable across every dependency you pull in. [Linear types]({{ site.baseurl }}/docs/linear-types/) make a resource that is used out of order, twice, or never a compile error. [Refinement types]({{ site.baseurl }}/docs/refinement-types/) reject a value a function cannot accept before it runs. A message protocol is checked on both sides, a crashed actor is restarted the way you declared, and a running node [takes new code without a restart]({{ site.baseurl }}/docs/hot-code-reload/).
 
 ---
 
-## What makes March different
+## Catch more mistakes before your program runs
 
-### The whole program is bounded by `main`'s signature
+### Give code only the authority it needs
 
 `main`'s capability parameter is the program's grant, and everything the program can
 reach has to fit under it: every helper, every stdlib call, every dependency. Declare
@@ -52,7 +52,7 @@ the declaration is honest against the code it actually emits, so a dependency th
 reads `/etc/passwd` behind a `needs IO.Console` fails your build without the
 publisher's cooperation. See [Capabilities]({{ site.baseurl }}/docs/capabilities/).
 
-### Three safety layers on one function
+### Make invalid resource use a compile error
 
 Capabilities say *what resources* code may touch. Linear types and typestate say *how
 many times, and in what order*, a resource is used. Refinement types say *with what
@@ -84,7 +84,35 @@ A module without `needs IO.FileRead` cannot call `open`. Reading from a handle a
 with the failing predicate quoted back. See
 [Safety by Construction]({{ site.baseurl }}/docs/safety-by-construction/).
 
-### Typed protocols, for two parties or twenty
+### Write immutable code. Reuse memory.
+
+March uses **Perceus reference counting**: memory is freed deterministically, with no tracing collector and no collection pauses. When a value has exactly one owner, the compiler goes further and rewrites it in place instead of freeing it and allocating a replacement (**FBIP**, Functional But In-Place). You write ordinary pattern matching and recursion; there is nothing to annotate.
+
+```march
+-- Each node is rewritten in place when the tree has one owner
+fn inc_leaves(t : Tree) : Tree do
+  match t do
+    Leaf(n)    -> Leaf(n + 1)
+    Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
+  end
+end
+```
+
+Reuse depends on ownership, so March shows you when it happens. `march --why-copies` lists each place where sharing forced a copy, and `@[no_alloc]` makes an allocation in a function a build error, so a later edit cannot quietly bring one back.
+
+On a depth-20 binary tree (1M leaves), 100 passes of `inc_leaves`, median of 10 runs:
+
+| | Time | Allocations per pass |
+|---|---|---|
+| **March, reuse on** | **579 ms** | 0 (after pass 1) |
+| March, reuse disabled | 3842 ms | 2M |
+| Elixir (BEAM) | 2369 ms | 2M |
+| OCaml (`ocamlopt`) | 3670 ms | 2M |
+| Rust (`rustc -O`, `Box`) | 4902 ms | 2M |
+
+This measures in-place reuse against allocation, not March against those languages in general: the other programs build a fresh tree each pass, and none mutates in place. March is slower than Rust and OCaml on the fib, binary-trees and list-ops benchmarks in the same table. The benchmark is [`bench/tree_transform.march`](https://github.com/march-language/march/blob/main/bench/tree_transform.march); the numbers are from [`bench/RESULTS.md`](https://github.com/march-language/march/blob/main/bench/RESULTS.md) (2026-07-24). See the [Memory Model]({{ site.baseurl }}/docs/memory-model/) and [What One Owner Is Worth]({{ site.baseurl }}/docs/one-owner/).
+
+### Define a conversation once. Check every participant.
 
 Write a conversation once, from the point of view of the whole system. For two parties
 the compiler checks that each side's view is the dual of the other's. Mark the protocol
@@ -111,7 +139,7 @@ say which roles may crash and what the conversation does then. See
 [Session Types]({{ site.baseurl }}/docs/session-types/) and
 [Choreography]({{ site.baseurl }}/docs/choreography/).
 
-### Deploy to a running node, and only what it is allowed to do
+### Update a running system without starting over
 
 `forge deploy hot` ships just the functions that changed into a live process. Actors
 keep running; one with a changed state shape finishes the messages it already has on
@@ -134,9 +162,9 @@ Grant it, and the node still has the last word: a node whose policy forbids
 `IO.FileWrite` rejects the activation and rolls the batch back, whoever signed it. See
 [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/).
 
-### Actors with supervision trees
+### Isolate failures, not just state
 
-March's concurrency model is the actor model: share-nothing, message-passing processes, as on the BEAM. Actors are first-class: spawn them, monitor them, and organize them into supervision trees that automatically restart failed processes.
+March's concurrency model is the actor model: share-nothing, message-passing processes, as on the BEAM. Actors are first-class: spawn them, monitor them, and organize them into supervision trees that automatically restart failed processes. A [bounded mailbox]({{ site.baseurl }}/docs/overload-resilience/) pushes back on its producer instead of growing without limit.
 
 ```march
 actor Counter do
@@ -172,29 +200,15 @@ end
 
 The type system enforces actor isolation: you cannot accidentally share mutable state between processes. A spawned actor's handlers count against `main`'s grant like any other code, so a program granted only the console cannot smuggle a file write into a handler. See [Actors]({{ site.baseurl }}/docs/actors/) and [Supervision]({{ site.baseurl }}/docs/supervision/).
 
-### Perceus reference counting + FBIP
+---
 
-March uses **Perceus reference counting**: deterministic memory management with no stop-the-world GC pauses. But the real story is **FBIP (Functional But In-Place)**: when a value has exactly one owner, March rewrites it in-place instead of freeing and reallocating. Recursive tree transformations, list maps, and structural recursion patterns run with **zero heap allocations** after the initial build.
+## What you can build
 
-```march
--- This runs with zero allocations on each recursive call (FBIP fires automatically)
-fn inc_leaves(t : Tree) : Tree do
-  match t do
-    Leaf(n)    -> Leaf(n + 1)
-    Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
-  end
-end
-```
+**Long-running native services.** Isolated actors, supervision, bounded mailboxes and backpressure, with typed protocols between components and [clustering]({{ site.baseurl }}/docs/clustering/), [hot deploy]({{ site.baseurl }}/docs/hot-code-reload/) and [live inspection]({{ site.baseurl }}/docs/observe/) for a node that stays up. Start from the [overload guide]({{ site.baseurl }}/docs/overload-resilience/) or the [multi-host lab]({{ site.baseurl }}/docs/lab/).
 
-On a depth-20 binary tree (1M leaves), 100 passes of a transformation like this:
+**Parsers and other code that rewrites structured data.** Algebraic data types and pattern matching for the transformation, in-place reuse for the cost, and refinements and allocation contracts for the invariants. See [Parsing]({{ site.baseurl }}/docs/parsing/) and [What One Owner Is Worth]({{ site.baseurl }}/docs/one-owner/).
 
-| | Time |
-|---|---|
-| C (`malloc`/`free`) | 8.8 s |
-| Rust (`Box`) | 9.5 s |
-| **March (FBIP)** | **1.3 s** |
-
-March wins not because C is slow, but because FBIP eliminates 200M allocator calls entirely. The benchmark is [`bench/tree_transform.march`](https://github.com/march-language/march/blob/main/bench/tree_transform.march); current numbers are in [`bench/RESULTS.md`](https://github.com/march-language/march/blob/main/bench/RESULTS.md). See the [Memory Model]({{ site.baseurl }}/docs/memory-model/).
+**Programs that run dependencies and workers under a grant.** Each component gets the capabilities you hand it and no others, and [`forge audit`]({{ site.baseurl }}/docs/capability-audit/) shows what a dependency update newly reaches. The compile-time checks are not a sandbox on their own: the OS sandbox is opt-in, and the [threat model]({{ site.baseurl }}/docs/capability-threat-model/) says what is and is not covered.
 
 ---
 

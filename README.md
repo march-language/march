@@ -1,129 +1,115 @@
 # March
 
-March is a statically-typed functional language in the ML/Elixir family. It compiles to native binaries via LLVM.
+A statically typed functional language for native, concurrent applications.
+
+March combines ML-style types and pattern matching with isolated actors, explicit
+capabilities, and checked communication protocols. It compiles to native binaries through
+LLVM and manages memory with Perceus reference counting and automatic in-place reuse.
+
+[Getting Started](https://march-lang.org/docs/getting-started/) ·
+[Documentation](https://march-lang.org/) ·
+[Try it in the browser](https://march-lang.org/docs/playground/) ·
+[Examples](https://march-lang.org/docs/examples/)
+
+## Why March?
+
+- **Explicit authority.** A module declares the capabilities it needs, and `main`'s
+  capability parameter is a ceiling on the whole program, dependencies included.
+  [Capabilities](https://march-lang.org/docs/capabilities/)
+- **Concurrency with guarantees.** Share-nothing actors under supervision trees, with bounded
+  mailboxes and backpressure. A protocol is written once and the compiler checks every
+  participant, across processes and machines.
+  [Actors](https://march-lang.org/docs/actors/) ·
+  [Choreography](https://march-lang.org/docs/choreography/)
+- **Functional code that reuses memory.** When a value has one owner, the compiler rewrites it
+  in place instead of allocating a replacement. `march --why-copies` shows where sharing
+  forced a copy, and `@[no_alloc]` makes an allocation a build error.
+  [Memory model](https://march-lang.org/docs/memory-model/)
+- **Stronger contracts.** Linear types, typestate, and refinement types checked by an SMT
+  solver catch resource and value errors before the program runs.
+  [Safety by Construction](https://march-lang.org/docs/safety-by-construction/)
+- **Native deployment.** `march --compile` produces an executable; `forge` builds, tests,
+  cross-compiles, deploys to a running node, and inspects it.
+  [Tooling](https://march-lang.org/docs/tooling/)
+
+## An example
+
+An actor, a module that declares what it touches, and a `main` that is granted the console
+and nothing else:
 
 ```march
-mod Greet do
+mod Chat do
+  needs IO.Console
 
-fn greet(name : String) : String do
-  "Hello, " ++ name ++ "!"
-end
+  actor Room do
+    state { members : List(String) }
+    init  { members: [] }
 
-fn main() : Unit do
-  println(greet("world"))
-end
+    on Enter(name : String) do
+      { state with members: Cons(name, state.members) }
+    end
 
+    on Say(from : String, text : String) do
+      state.members |> List.each(fn m -> println("${m} sees ${from}: ${text}"))
+      state
+    end
+  end
+
+  fn main(cap : Cap(IO.Console)) : () do
+    let room = spawn(Room)
+    send(room, Enter("alice"))
+    send(room, Enter("bob"))
+    send(room, Say("alice", "hello!"))
+    run_until_idle()
+  end
 end
 ```
 
-## Features
+The grant covers the actor's handlers too. Add `file_write("chat.log", text)` to the `Say`
+handler and the build fails, naming the path from `main`:
 
-**Type system**
-- Hindley-Milner inference with bidirectional checking at function boundaries; annotations are optional except where inference fails
-- Algebraic data types with pattern matching
-- Records with functional update syntax (`{ r with field: value }`)
-- Polymorphic functions monomorphized at compile time (no boxing overhead)
-- Linear and affine types for ownership, safe mutation, and actor message-passing isolation
-- Refinement types checked by an SMT solver (z3): `{Int | _ > 0}`, set measures over collections (`elts`, `keys`, `card`), and abstract refinements, so `List.filter`, `List.partition`, `Deque.filter` and friends keep what their predicate proves; element facts flow through lambdas, local functions, tuple components and relational returns (`List({Int | _ < n})`), and a demand on a fold's result is checked as the accumulator's invariant
-- Capabilities: effects are values (`Cap(IO.FileRead)`), declared with `needs` and checked as a ceiling on the whole program
+```
+`main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite`
+(reached from `main`: main → Room → Room_Say). The grant is a ceiling on the WHOLE
+program — declaring `needs IO.FileWrite` does not raise it.
+```
 
-**Syntax**
-- `fn name(x, y) do ... end`: named functions
-- `fn x -> x + 1` / `fn (x, y) -> expr`: lambdas
-- `let x = expr`: block-scoped bindings, no `in`
-- `match expr do Pat -> body end`: pattern matching
-- `if cond do e1 else e2 end`: conditionals
-- `x |> f |> g`: pipe operator
-- `mod Name do ... end`: modules
-- `--` line comments, `{- -}` nested block comments
-- Multi-head functions (Elixir-style): consecutive `fn` clauses grouped automatically
-- `when` guards on function heads and match branches
+These checks happen at compile time and are not a sandbox on their own. The
+[capability threat model](https://march-lang.org/docs/capability-threat-model/) says what
+is guaranteed, what is assumed, and what the opt-in OS sandbox adds.
 
-**Backend**
-- Compiles to LLVM IR, linked to native binaries via `clang`, or to `.wasm` via `--target wasm64-wasi`
-- Cross-compiles Linux binaries (`linux/amd64`, `linux/arm64`) from any host via `zig cc`, Go's `GOOS=linux` style
-- Perceus reference counting, giving deterministic memory management: no tracing collector and no collection pauses, though freeing a large structure is inline work proportional to its size, at a point you control
-- **FBIP (Functional But In-Place)**: when the reference count on a pattern-matched value is 1, destructured nodes are reused in-place rather than freed and reallocated (see below)
-- Escape analysis promotes allocations to the stack where possible
-- Defunctionalization: closures compiled to structs + dispatch, no indirect call overhead
-- Tree-walking interpreter available for fast iteration
-
-**Concurrency**
-- Actor model: share-nothing message passing, `spawn`, `send`, `kill`, `is_alive`
-- Actor state updated via record spread: `{ state with count: state.count + 1 }`
-- Structured concurrency via `Task`: `Task.async`, `Task.await`, `Task.race`, `Task.any`, `Task.all_settled`, `Task.scope`
-- Cancellation tokens: `task_cancel_token_new`, `task_cancel`, `task_is_cancelled`, `task_spawn_with_cancel`, `task_cancel_by_id`
-
-**Distribution**
-- Choreographies: an `@[endpoints] protocol` is one global description of an interaction, projected to a typed endpoint API for every role, so a role that sends the wrong message or skips a step is a compile error
-- `ClusterNode`: SWIM membership, one authenticated connection pair per peer, a global name registry, cross-node monitors, and node certificates
-- `SessionNode` runs a choreography's roles on separate nodes; an actor can host a role
-- Topology apps and `forge deploy`: place roles on pools in `topology.toml`, then roll a build out pool by pool
-- Hot code reload: each actor, task and session keeps the code epoch it started under, and state migrates in order
-
-**Operating a running node**
-- `forge shell`: a REPL connected to a live node, which can spawn the program's own actors
-- `forge observe`, `forge top`, `forge diagnose`: actors, mailboxes, crash dumps and leak checks on a running node
-- `Trace`: bounded tracing of boundary calls and actor events; `WHICH` / `SOURCE` show which code a node is running
-
-## FBIP: Functional But In-Place
-
-One of March's most distinctive performance features is **FBIP (Functional But In-Place)**, derived from the [Perceus reference counting paper](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/). March code that recursively transforms a uniquely-owned data structure reuses its memory in place, with no allocation on the reuse path and no annotations.
-
-### How it works
-
-Every heap-allocated value has a reference count. When the Perceus compiler pass inserts `DecRC` before a match branch body and finds a downstream allocation of the same constructor shape, it replaces the `DecRC + alloc` pair with a single conditional `EReuse` node:
-
-- **RC == 1 (unique owner)**: write the new tag and fields directly into the old allocation. Return the same pointer. Zero allocator calls.
-- **RC > 1 (shared)**: decrement the count, allocate fresh. Correct behavior for shared data.
-
-No source-level annotations are needed. The compiler derives this entirely from liveness and shape analysis.
-
-### Example: tree transformation
+## In-place reuse
 
 ```march
 type Tree = Leaf(Int) | Node(Tree, Tree)
 
 fn inc_leaves(t : Tree) : Tree do
   match t do
-    Leaf(n)    -> Leaf(n + 1)         -- rewrites the Leaf in-place when RC=1
-    Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))  -- rewrites the Node in-place when RC=1
+    Leaf(n)    -> Leaf(n + 1)
+    Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
   end
 end
 ```
 
-With FBIP active, after the initial tree is built, every subsequent pass of `inc_leaves` does **zero heap allocations**: it rewrites the tree's nodes in-place.
+When the tree has one owner, each node is rewritten in place; when it is shared, the
+function allocates as usual. No annotations are involved.
 
-### Benchmark: `bench/tree_transform.march`
-
-Depth-20 binary tree (1,048,576 leaves), 100 passes of `inc_leaves`. Median of 10 runs,
-Apple M3 Max, `--opt 2`, from [`bench/RESULTS.md`](bench/RESULTS.md) (2026-07-24):
+Depth-20 tree (1,048,576 leaves), 100 passes of `inc_leaves`. Median of 10 runs, Apple M3
+Max, `--opt 2`, from [`bench/RESULTS.md`](bench/RESULTS.md) (2026-07-24):
 
 | Implementation | Median | Allocations per pass |
 |---|---|---|
-| Rust (`rustc -O`, `Box`) | 4902 ms | 2 × 2^20 = 2M |
-| OCaml (`ocamlopt`) | 3670 ms | 2 × 2^20 = 2M |
-| Elixir (BEAM) | 2369 ms | 2 × 2^20 = 2M |
-| **March (FBIP)** | **579 ms** | 0 (after pass 1) |
+| **March, reuse on** | **579 ms** | 0 (after pass 1) |
+| March, reuse disabled | 3842 ms | 2M |
+| Elixir (BEAM) | 2369 ms | 2M |
+| OCaml (`ocamlopt`) | 3670 ms | 2M |
+| Rust (`rustc -O`, `Box`) | 4902 ms | 2M |
 
 Read this as in-place reuse against allocation, not as March against those languages in
 general. The Rust, OCaml and Elixir programs (`bench/rust/`, `bench/ocaml/`, `bench/elixir/`)
 build a fresh tree every pass; a Rust version that mutates through `&mut`, or a C version
 that reuses nodes, is not benchmarked. On the other workloads in the same table March is
-behind: fib(40), binary-trees(15) and list-ops(1M) are all faster in Rust or OCaml. With FBIP
-reuse disabled (a regression fixed 2026-07-24) this benchmark took 3842 ms, slower than OCaml.
-
-### What patterns benefit
-
-FBIP fires automatically on any function that:
-
-1. Consumes a uniquely-owned value via pattern match (RC == 1)
-2. Returns a new value of the same constructor as the matched arm
-3. Does not retain the original value alongside the result
-
-This covers `map` over lists, any tree traversal/transformation, and most structural recursion patterns. Functions that alias the original correctly take the RC > 1 fallback path, which allocates fresh.
-
-For the full technical description (including how `shape_matches` works, the TIR `EReuse` node, and the LLVM codegen for the conditional reuse) see the language reference (`specs/lang/index.md`) and the compiler-internals reference (`specs/impl/index.md`).
+behind: fib(40), binary-trees(15) and list-ops(1M) are all faster in Rust or OCaml.
 
 ## Quick start
 
@@ -306,199 +292,22 @@ You get a dynamically-linked **glibc** binary (min glibc 2.31) that runs on main
 dune runtest
 ```
 
-## Development workflow
+## More
 
-`forge watch` reruns a build, test run, or program on every source change; it
-watches `lib/`, `src/`, `test/`, `config/`, and `forge.toml`:
+The language reference, guides and tool documentation live at
+[march-lang.org](https://march-lang.org/):
 
-```bash
-forge watch          # rebuild on change (default)
-forge watch test     # rerun the test suite on change
-forge watch run      # rerun the program on change
-forge watch --clear --interval 200
-```
-
-It never exits on a build/test failure; it reports and keeps watching. Ctrl-C stops it.
-
-`forge bench` compiles and runs every benchmark under `bench/` (each `bench/*.march`
-is a standalone program), built at `--opt 2`, reporting wall-clock times:
-
-```bash
-forge bench            # run all
-forge bench tree       # only benchmarks whose name contains "tree"
-forge bench --json     # machine-readable timings for CI tracking
-```
-
-## Releasing a package
-
-```bash
-forge version                # print the current version
-forge version patch          # 1.2.3 -> 1.2.4 (rewrites [package].version)
-forge version minor --tag    # bump, commit, and tag vX.Y.Z (needs a clean tree)
-forge release                # clean tree -> build -> test -> bump + tag
-forge release build --tar    # a self-contained bundle with a bin/<app> launcher
-```
-
-`forge fmt --check` and `forge lint` (which exits non-zero on errors) round out the CI checks.
-
-```bash
-forge licenses               # list each dependency and its declared license
-forge licenses --strict      # non-zero if any dependency has no license
-forge build --frozen         # CI: fail if forge.lock is out of date (don't re-resolve)
-```
-
-## AI assistant support
-
-March ships a portable Claude Code skill, `spec-search`, that full-text
-searches the language reference and design docs (`specs/lang/`,
-`specs/impl/`, `specs/features/`) via a bundled SQLite FTS5 index; no
-network access, no dependency on the compiler repo being checked out in
-whatever project you're working in:
-
-```bash
-git clone https://github.com/march-language/march.git
-mkdir -p ~/.claude/skills
-cp -R march/.claude/skills/spec-search ~/.claude/skills/spec-search
-```
-
-Once installed at `~/.claude/skills/spec-search/`, it's available to Claude
-in any project on the machine. See [docs/tooling.md](docs/tooling.md#ai-assistant-search--spec-search-claude-skill)
-for query syntax and how to refresh the index after a compiler update.
-
-## Language tour
-
-### Values and bindings
-
-```march
-let x = 42
-let greeting = "hello"
-let flag = true
-```
-
-### Functions
-
-```march
-fn add(x : Int, y : Int) : Int do
-  x + y
-end
-
--- Lambdas
-let double = fn x -> x * 2
-let add = fn (x, y) -> x + y
-```
-
-### Algebraic data types
-
-```march
-type Shape = Circle(Float) | Rect(Float, Float) | Point
-
-fn area(s : Shape) : Float do
-  match s do
-    Circle(r)    -> 3.14159 *. r *. r
-    Rect(w, h)   -> w *. h
-    Point        -> 0.0
-  end
-end
-```
-
-### Records
-
-```march
-type Point = { x : Int, y : Int }
-
-let p = { x: 3, y: 4 }
-
--- Field access
-let px = p.x
-
--- Functional update (returns a new record)
-let q = { p with x: 10 }
-```
-
-### Pattern matching
-
-```march
-fn describe(n : Int) : String do
-  match n do
-    0 -> "zero"
-    1 -> "one"
-    _ -> "many"
-  end
-end
-```
-
-### Higher-order functions
-
-```march
-fn double_all(f : Int -> Int, lst : List(Int)) : List(Int) do
-  match lst do
-    Nil        -> Nil
-    Cons(h, t) -> Cons(f(h), double_all(f, t))
-  end
-end
-
-let doubled = double_all(fn x -> x * 2, my_list)
-```
-
-### Option and Result
-
-```march
-fn safe_div(a : Int, b : Int) : Option(Int) do
-  if b == 0 do None else Some(a / b) end
-end
-
-match safe_div(10, 2) do
-  None    -> println("error")
-  Some(n) -> println(int_to_string(n))
-end
-```
-
-### Actors
-
-```march
-actor Counter do
-  state { value : Int }
-  init  { value: 0 }
-
-  on Increment(n : Int) do
-    { state with value: state.value + n }
-  end
-
-  on Report() do
-    println(int_to_string(state.value))
-    state
-  end
-end
-
-fn main() : Unit do
-  let c = spawn(Counter)
-  send(c, Increment(10))
-  send(c, Increment(5))
-  let _ = send(c, Report())
-end
-```
-
-### Pipe operator
-
-```march
-let result =
-  List.range(1, 10)
-  |> List.filter(fn x -> x % 2 == 0)
-  |> List.map(fn x -> x * x)
-  |> List.sum_int
-```
-
-## Built-in functions
-
-| Function | Type | Description |
-|---|---|---|
-| `println(s)` | `String -> Unit` | Print with newline |
-| `print(s)` | `String -> Unit` | Print without newline |
-| `int_to_string(n)` | `Int -> String` | Format integer |
-| `float_to_string(f)` | `Float -> String` | Format float |
-| `bool_to_string(b)` | `Bool -> String` | Format boolean |
-| `string_length(s)` | `String -> Int` | String length |
-| `++` | `String -> String -> String` | String concatenation |
+- [Language tour](https://march-lang.org/docs/tour/) and the
+  [type system](https://march-lang.org/docs/types/)
+- [Session types](https://march-lang.org/docs/session-types/),
+  [clustering](https://march-lang.org/docs/clustering/) and
+  [hot code reload](https://march-lang.org/docs/hot-code-reload/)
+- [`forge` reference](https://march-lang.org/docs/tooling/): watch mode, benchmarks,
+  releases, dependency and license audits, cross-compilation, the JavaScript backend, and
+  the `spec-search` skill for AI assistants
+- [LSP and editors](https://march-lang.org/docs/lsp/)
+- [Supported platforms](https://march-lang.org/docs/platforms/), including the experimental
+  WebAssembly targets
 
 ## Project layout
 
