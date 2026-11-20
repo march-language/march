@@ -29,6 +29,59 @@ let expand_paths paths =
     else [p]
   ) paths
 
+(** The [.march] files under [dir], recursively, that are not test files:
+    fixtures and helpers the test modules use. *)
+let rec find_helper_files dir =
+  List.sort compare (Array.to_list (Sys.readdir dir))
+  |> List.concat_map (fun entry ->
+    let path = Filename.concat dir entry in
+    if Sys.file_exists path && Sys.is_directory path then find_helper_files path
+    else if Filename.check_suffix entry ".march" && not (is_test_file entry) then [path]
+    else [])
+
+let real p = try Unix.realpath p with Unix.Unix_error _ -> p
+
+(** [path] relative to [dir] (both made real), or [None] when it is not under it. *)
+let relative_to dir path =
+  let d = real dir and p = real path in
+  let dl = String.length d in
+  if String.length p > dl + 1 && String.sub p 0 dl = d && p.[dl] = '/'
+  then Some (String.sub p (dl + 1) (String.length p - dl - 1))
+  else None
+
+(** When [requested] names only some of [test_dir]'s test files, the compiled
+    run should not see the rest: every [.march] file on MARCH_LIB_PATH is
+    loaded and [--test] runs every test it loaded, so naming one file used to
+    compile and run the whole suite.  This stages, in [stage_dir] (emptied
+    first), a symlink to each requested test file and to every helper (a
+    non-test [.march] file) at its path relative to [test_dir], and answers
+    the staged entry for the first requested file.  [None]: run [test_dir] as
+    it is (every test file requested, or one outside [test_dir]). *)
+let stage_selected_tests ~test_dir ~stage_dir (requested : string list) : string option =
+  if requested = [] || not (Sys.file_exists test_dir && Sys.is_directory test_dir) then None
+  else
+    let all = List.map real (find_test_files test_dir) in
+    let rels = List.map (relative_to test_dir) requested in
+    let wanted = List.sort_uniq compare (List.map real requested) in
+    if List.exists Option.is_none rels
+       || List.length wanted >= List.length all
+       || not (List.for_all (fun w -> List.mem w all) wanted) then None
+    else begin
+      let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote stage_dir)) in
+      let link rel =
+        let target = Filename.concat stage_dir rel in
+        let rec mkdirs d =
+          if not (Sys.file_exists d) then begin mkdirs (Filename.dirname d); Unix.mkdir d 0o755 end in
+        mkdirs (Filename.dirname target);
+        if not (Sys.file_exists target) then Unix.symlink (real (Filename.concat test_dir rel)) target;
+        target
+      in
+      let entries = List.map (fun r -> link (Option.get r)) rels in
+      List.iter (fun h -> Option.iter (fun r -> ignore (link r)) (relative_to test_dir h))
+        (find_helper_files test_dir);
+      Some (List.hd entries)
+    end
+
 let find_test_dir () =
   let test_dir_of_root root = Filename.concat root "test" in
   match Project.load () with
@@ -312,7 +365,16 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
          test dir so all test files are resolved as imports.
          For multi-file test suites, the convention is that test files live in
          test/ and the compiler auto-discovers them via MARCH_LIB_PATH. *)
-      let test_dir = Filename.concat proj.Project.root "test" in
+      let full_test_dir = Filename.concat proj.Project.root "test" in
+      (* Named files that are only part of the suite: compile and run just
+         those (plus test/'s helpers), not every test module test/ holds. *)
+      let staged =
+        stage_selected_tests ~test_dir:full_test_dir
+          ~stage_dir:(Filename.concat proj.Project.root ".march/build/test-selected")
+          test_files in
+      let test_dir = match staged with
+        | Some _ -> Filename.concat proj.Project.root ".march/build/test-selected"
+        | None -> full_test_dir in
       let lib_path_with_test =
         if Sys.file_exists test_dir
         then Printf.sprintf "%sMARCH_LIB_PATH=%s:%s "
@@ -330,7 +392,7 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
         else lib_path_env
       in
       (* Use first test file as entry; MARCH_LIB_PATH provides the rest. *)
-      let entry = List.hd test_files in
+      let entry = match staged with Some e -> e | None -> List.hd test_files in
       (* Link the same FFI shims as `forge build` so native tests that call
          into [[ffi]] code (e.g. the sqlite shim) don't fail at link time. *)
       match Cmd_build.ffi_flags_full proj with
