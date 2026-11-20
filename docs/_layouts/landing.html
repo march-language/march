@@ -6,7 +6,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>March — Functional Native Language</title>
-  <meta name="description" content="A statically typed functional language for programs built from actors: ML types, capabilities for every effect, BEAM-style actors, compiled to native code with no garbage collector.">
+  <meta name="description" content="A statically typed functional language that compiles to native code, with actors, explicit capabilities and checked communication protocols. Memory is reference counted and reused in place, with no tracing garbage collector.">
   <link rel="icon" href="{{ site.baseurl }}/assets/logo.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -123,7 +123,7 @@
     }
     .m-hero-badge-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
     .m-hero-h1 {
-      font-family: 'Lora', Georgia, serif; font-size: 56px; line-height: 1.08;
+      font-family: 'Lora', Georgia, serif; font-size: 50px; line-height: 1.08;
       font-style: italic; letter-spacing: -0.025em; color: var(--text); margin-bottom: 24px;
     }
     .m-hero-p { font-size: 17px; line-height: 1.78; color: var(--text-muted); max-width: 490px; margin-bottom: 40px; }
@@ -152,11 +152,11 @@
       border-bottom: 1px solid var(--border); gap: 6px; overflow-x: auto;
     }
     .m-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-    .m-code-tabs { margin-left: 8px; display: flex; gap: 4px; flex: 1; overflow-x: auto; scrollbar-width: none; }
+    .m-code-tabs { margin-left: 8px; display: flex; gap: 3px; flex: 1; overflow-x: auto; scrollbar-width: none; }
     .m-code-tabs::-webkit-scrollbar { display: none; }
     .m-tab {
       font-family: 'JetBrains Mono', monospace; font-size: 10px;
-      padding: 3px 10px; border-radius: 100px; border: 1px solid var(--border);
+      padding: 3px 6px; border-radius: 100px; border: 1px solid var(--border);
       background: transparent; color: var(--text-faint); cursor: pointer;
       letter-spacing: 0.02em; white-space: nowrap; flex-shrink: 0;
     }
@@ -193,6 +193,10 @@
       gap: 1px; background: var(--border); border: 1px solid var(--border);
       border-radius: 8px; overflow: hidden;
     }
+    .m-build-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .m-build-grid .m-feature-p { margin-bottom: 0; }
+    .m-feature-p a { color: var(--text); text-decoration: none; border-bottom: 1px solid var(--accent-border); }
+    .m-feature-p a:hover { color: var(--accent); border-bottom-color: var(--accent); }
     .m-feature-card { background: var(--bg); padding: 40px; }
     .m-feature-label {
       font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--accent);
@@ -368,6 +372,7 @@
     /* RESPONSIVE */
     @media (max-width: 900px) {
       .m-hero-inner { grid-template-columns: minmax(0, 1fr); gap: 36px; }
+      .m-build-grid { grid-template-columns: minmax(0, 1fr); }
       .m-hero-h1 { font-size: 40px; }
     }
     @media (max-width: 768px) {
@@ -468,13 +473,14 @@
         <span class="m-hero-badge-dot"></span>
         Early Access · v0.6.0
       </div>
-      <h1 class="m-hero-h1">ML types.<br>Effects as capabilities.<br>Actors, compiled native.</h1>
+      <h1 class="m-hero-h1">Functional programming for systems that can't afford surprises.</h1>
       <p class="m-hero-p">
-        March is a statically typed functional language for programs built from actors. It takes
-        message passing and supervision from the BEAM and algebraic data types from ML, and compiles
-        the result to a native binary through LLVM. Memory is managed by
+        March is a statically typed functional language that compiles to native code, with
+        actors, explicit <a href="{{ site.baseurl }}/docs/capabilities/">capabilities</a> and checked
+        communication protocols. The compiler checks what code may touch, how components talk to
+        each other, and where memory goes. Memory is managed by
         <a href="{{ site.baseurl }}/docs/memory-model/">Perceus reference counting with in-place reuse</a>,
-        so there is no garbage collector and no pauses, and functional code runs at Rust-like speed.
+        so there are no tracing garbage-collection pauses.
       </p>
       <div class="m-ctas">
         <a href="{{ site.baseurl }}/docs/getting-started/" class="m-btn-primary">Read the Docs</a>
@@ -499,9 +505,9 @@
 <section class="m-features">
   <div class="m-features-inner">
     <p class="m-section-label">What makes March different</p>
-    <h2 class="m-section-h2">Safety is the compiler's job, not the test suite's.</h2>
+    <h2 class="m-section-h2">Catch more mistakes before your program runs.</h2>
     <p class="m-section-lead">
-      Side effects are part of the type: a module declares the
+      March checks more than types and function signatures. Side effects are part of the type: a module declares the
       <a href="{{ site.baseurl }}/docs/capabilities/">capabilities</a> it needs, so what any piece of
       code can touch is visible in its signature, bounded by what <code>main</code> was granted, and
       auditable across every dependency you pull in.
@@ -517,8 +523,8 @@
     <div class="m-feature-grid">
       <!-- GRANT -->
       <div class="m-feature-card">
-        <p class="m-feature-label">Capabilities</p>
-        <h3 class="m-feature-h3">The whole program is bounded by <code>main</code></h3>
+        <p class="m-feature-label">Authority</p>
+        <h3 class="m-feature-h3">Give code only the authority it needs</h3>
         <p class="m-feature-p"><code>main</code>'s capability parameter is the program's grant. Everything it reaches has to fit under it: every helper, every stdlib call, every dependency. Reach past it and the build fails, naming the chain that got there.</p>
         <pre class="m-feature-pre"><code id="grant-code"></code></pre>
       </div>
@@ -526,45 +532,18 @@
       <!-- SAFETY LAYERS -->
       <div class="m-feature-card">
         <p class="m-feature-label">Three layers, one function</p>
-        <h3 class="m-feature-h3">What, in what order, with what values</h3>
+        <h3 class="m-feature-h3">Make invalid resource use a compile error</h3>
         <p class="m-feature-p">Capabilities say what resources code may touch. Linear types and typestate say how many times, and in what order, a resource is used. Refinement types say with what values a function may be called. They are independent, they compose on the same function, and all three fire at compile time.</p>
         <pre class="m-feature-pre"><code id="layers-code"></code></pre>
-      </div>
-
-      <!-- PROTOCOLS -->
-      <div class="m-feature-card">
-        <p class="m-feature-label">Protocols</p>
-        <h3 class="m-feature-h3">Typed conversations, two parties or twenty</h3>
-        <p class="m-feature-p">Write the conversation once. Each role gets a typed module, so a send out of turn, a second receive, or a role that stops halfway does not compile; a runner connects the roles over the network, each its own program on its own machine.</p>
-        <pre class="m-feature-pre"><code id="proto-code"></code></pre>
-      </div>
-
-      <!-- HOT DEPLOY -->
-      <div class="m-feature-card">
-        <p class="m-feature-label">Hot deploy</p>
-        <h3 class="m-feature-h3">New code into a running node, gated by what it may do</h3>
-        <p class="m-feature-p"><code>forge deploy hot</code> ships only the functions that changed; actors keep their state and migrate it in place. A patch that reaches for authority the running version did not have stops until you grant it by name, and the node's own policy can still refuse it.</p>
-        <pre class="m-feature-pre"><code id="deploy-code"></code></pre>
-      </div>
-
-      <!-- CONCURRENCY -->
-      <div class="m-feature-card">
-        <p class="m-feature-label">Concurrency</p>
-        <h3 class="m-feature-h3">Actor model, isolated and supervised</h3>
-        <p class="m-feature-p">Share-nothing message-passing actors with supervision trees. A mutable buffer cannot be sent in a message, and process-global state such as a Vault table needs <code>IO.Mut</code>, so shared mutable state shows up in a module's signature.</p>
-        <div class="m-code-wrap">
-          <pre class="m-feature-pre"><code id="actor-code"></code></pre>
-          <button class="m-try-btn" onclick="tryACTOR()" title="Try in REPL"><svg width="13" height="11" viewBox="0 0 13 11" fill="none" aria-hidden="true"><polyline points="1,1.5 4.5,5.5 1,9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="6.5" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>try</button>
-        </div>
       </div>
 
       <!-- PERFORMANCE — flip card -->
       <div class="m-perf-card" id="perf-card">
         <div class="m-perf-inner" id="perf-inner">
           <div class="m-perf-face">
-            <p class="m-feature-label">Performance</p>
-            <h3 class="m-feature-h3">Zero-allocation recursive transforms</h3>
-            <p class="m-feature-p">FBIP rewrites uniquely-owned data in place, so transforms like this allocate nothing on the reuse path. The functional-style rewrite is automatic; no unsafe code required.</p>
+            <p class="m-feature-label">Memory</p>
+            <h3 class="m-feature-h3">Write immutable code. Reuse memory.</h3>
+            <p class="m-feature-p">When a value has one owner, the compiler rewrites it in place instead of allocating a replacement, so a transform like this allocates nothing on the reuse path. No annotations are needed. <code>march --why-copies</code> lists where sharing forced a copy, and <code>@[no_alloc]</code> turns an allocation in a hot function into a build error.</p>
             <div class="m-code-wrap">
               <pre class="m-feature-pre"><code id="fbip-code"></code></pre>
               <button class="m-try-btn" onclick="event.stopPropagation();tryFBIP()" title="Try in REPL"><svg width="13" height="11" viewBox="0 0 13 11" fill="none" aria-hidden="true"><polyline points="1,1.5 4.5,5.5 1,9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="6.5" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>try</button>
@@ -574,7 +553,7 @@
           <div class="m-perf-face m-perf-back">
             <p class="m-feature-label">Benchmark</p>
             <h3 class="m-feature-h3" style="font-size:20px; margin-bottom:8px;">tree-transform(depth=20, 100 passes)</h3>
-            <p class="m-feature-p" style="font-size:13px; margin-bottom:20px;">After pass 1, March allocates nothing — every node rewritten in-place. The OCaml, Rust and Elixir versions build a fresh tree each pass, so this measures in-place reuse against allocation, not March against hand-written mutation. Median of 10, Apple M3 Max, <code style="font-family:'JetBrains Mono',monospace;font-size:11px;">--opt 2</code>, from <a href="https://github.com/march-language/march/blob/main/bench/RESULTS.md" onclick="event.stopPropagation()">bench/RESULTS.md</a> (2026-07-24). March is slower on fib, binary-trees and list-ops there.</p>
+            <p class="m-feature-p" style="font-size:13px; margin-bottom:20px;">After pass 1, March allocates nothing — every node rewritten in-place. The OCaml, Rust and Elixir versions build a fresh tree each pass, so this measures in-place reuse against allocation, not March against hand-written mutation. Median of 10, Apple M3 Max, <code style="font-family:'JetBrains Mono',monospace;font-size:11px;">--opt 2</code>, from <a href="https://github.com/march-language/march/blob/main/bench/RESULTS.md" onclick="event.stopPropagation()">bench/RESULTS.md</a> (2026-07-24). March is slower on fib, binary-trees and list-ops there. The same March program with reuse disabled took 3842 ms.</p>
             <table class="m-bench-table">
               <thead><tr>
                 <th>Language</th><th>Median</th><th>Allocs/pass</th>
@@ -591,6 +570,58 @@
         </div>
       </div>
 
+      <!-- PROTOCOLS -->
+      <div class="m-feature-card">
+        <p class="m-feature-label">Protocols</p>
+        <h3 class="m-feature-h3">Define a conversation once. Check every participant.</h3>
+        <p class="m-feature-p">Write the conversation once. Each role gets a typed module, so a send out of turn, a second receive, or a role that stops halfway does not compile; a runner connects the roles over the network, each its own program on its own machine.</p>
+        <pre class="m-feature-pre"><code id="proto-code"></code></pre>
+      </div>
+
+      <!-- HOT DEPLOY -->
+      <div class="m-feature-card">
+        <p class="m-feature-label">Hot deploy</p>
+        <h3 class="m-feature-h3">Update a running system without starting over</h3>
+        <p class="m-feature-p"><code>forge deploy hot</code> ships only the functions that changed; actors keep their state and migrate it in place. A patch that reaches for authority the running version did not have stops until you grant it by name, and the node's own policy can still refuse it.</p>
+        <pre class="m-feature-pre"><code id="deploy-code"></code></pre>
+      </div>
+
+      <!-- CONCURRENCY -->
+      <div class="m-feature-card">
+        <p class="m-feature-label">Concurrency</p>
+        <h3 class="m-feature-h3">Isolate failures, not just state</h3>
+        <p class="m-feature-p">Share-nothing actors under supervision trees: a crashed actor is restarted the way you declared, and a <a href="{{ site.baseurl }}/docs/overload-resilience/">bounded mailbox</a> pushes back on its producer instead of growing without limit. A mutable buffer cannot be sent in a message, and process-global state such as a Vault table needs <code>IO.Mut</code>, so shared mutable state shows up in a module's signature.</p>
+        <div class="m-code-wrap">
+          <pre class="m-feature-pre"><code id="actor-code"></code></pre>
+          <button class="m-try-btn" onclick="tryACTOR()" title="Try in REPL"><svg width="13" height="11" viewBox="0 0 13 11" fill="none" aria-hidden="true"><polyline points="1,1.5 4.5,5.5 1,9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="6.5" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>try</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- BUILD -->
+<section class="m-features">
+  <div class="m-features-inner">
+    <p class="m-section-label">What you can build</p>
+    <h2 class="m-section-h2">Where the checks pay for themselves.</h2>
+    <div class="m-feature-grid m-build-grid">
+      <div class="m-feature-card">
+        <p class="m-feature-label">Concurrent services</p>
+        <h3 class="m-feature-h3">Long-running native services</h3>
+        <p class="m-feature-p">Isolated actors, supervision, bounded mailboxes and backpressure, with typed protocols between components and <a href="{{ site.baseurl }}/docs/clustering/">clustering</a>, <a href="{{ site.baseurl }}/docs/hot-code-reload/">hot deploy</a> and <a href="{{ site.baseurl }}/docs/observe/">live inspection</a> for a node that stays up. Start from the <a href="{{ site.baseurl }}/docs/overload-resilience/">overload guide</a> or the <a href="{{ site.baseurl }}/docs/lab/">multi-host lab</a>.</p>
+      </div>
+      <div class="m-feature-card">
+        <p class="m-feature-label">Parsers and transformations</p>
+        <h3 class="m-feature-h3">Code that rewrites structured data</h3>
+        <p class="m-feature-p">Algebraic data types and pattern matching for the transformation, in-place reuse for the cost, and refinements and allocation contracts for the invariants. See <a href="{{ site.baseurl }}/docs/parsing/">Parsing</a> and <a href="{{ site.baseurl }}/docs/one-owner/">What One Owner Is Worth</a>.</p>
+      </div>
+      <div class="m-feature-card">
+        <p class="m-feature-label">Third-party code</p>
+        <h3 class="m-feature-h3">Dependencies and workers under a grant</h3>
+        <p class="m-feature-p">Each component gets the capabilities you hand it and no others, and <a href="{{ site.baseurl }}/docs/capability-audit/"><code>forge audit</code></a> shows what a dependency update newly reaches. The compile-time checks are not a sandbox on their own: the OS sandbox is opt-in, and the <a href="{{ site.baseurl }}/docs/capability-threat-model/">threat model</a> says what is and is not covered.</p>
+      </div>
     </div>
   </div>
 </section>
@@ -745,103 +776,125 @@ function syntaxHL(code, dark) {
 
 // ─── Code content ─────────────────────────────────────────────────────────────
 const HERO_EXAMPLES = [
-  { label: 'Actors', learn: '/docs/actors/', code: `actor Counter do
-  state { count : Int }
-  init  { count: 0 }
+  { label: 'Authority', learn: '/docs/capabilities/', code: `actor Logger do
+  state { n : Int }
+  init  { n: 0 }
 
-  on Increment(n : Int) do
-    { state with count: state.count + n }
-  end
-
-  on Get() do
-    println("count: " ++ int_to_string(state.count))
+  on Log(msg : String) do
+    println(msg)
+    file_write("app.log", msg)
     state
   end
 end
 
-fn main() : Unit do
+fn main(cap : Cap(IO.Console)) do
+  send(spawn(Logger), Log("started"))
+end
+
+-- ! main is granted Cap(IO.Console), but
+-- ! the program reaches IO.FileWrite
+-- ! (main → Logger → Logger_Log).` },
+  { label: 'Actors', learn: '/docs/actors/', code: `actor Counter do
+  state { count : Int }
+  init  { count: 0 }
+
+  on Inc(n : Int) do { count: state.count + n } end
+
+  on Show() do
+    println(int_to_string(state.count))
+    state
+  end
+end
+
+fn main() do
   let c = spawn(Counter)
-  send(c, Increment(10))
-  send(c, Increment(5))
-  send(c, Get())      -- prints "count: 15"
+  send(c, Inc(10))
+  send(c, Inc(5))
+  send(c, Show())       -- prints 15
   run_until_idle()
 end` },
-  { label: 'Linear Types', learn: '/docs/linear-types/', code: `always_linear type DbConn = DbConn(Int)
+  { label: 'Resources', learn: '/docs/linear-types/', code: `always_linear type Conn = Conn(Int)
 
-fn query_users(conn : DbConn)
-    : (List(String), DbConn) do
-  Db.exec(conn, "SELECT name FROM users")
+fn close(c : Conn) : () do
+  match c do Conn(_) -> () end
 end
 
-fn with_db(path : String) : List(String) do
-  let conn = Db.open(path)       -- acquired
-  let (rows, conn2) = query_users(conn)
-  Db.close(conn2)                -- consumed
-  rows
-end` },
-  { label: 'Capabilities', learn: '/docs/capability-audit/', code: `-- Every module declares the authority it holds — here, file reads.
--- The value isn't the label. It's that nothing widens it unseen.
-mod ImageThumb do
-  needs IO.FileRead
+fn main() do
+  let c = Conn(5432)
+  close(c)
+  close(c)
+end
 
-  fn thumbnail(path : String) : Bytes do
-    File.read(path) |> Image.scale(128)
+-- ! The linear value \`c\` is used more than
+-- ! once here. Linear values must be consumed
+-- ! exactly once.` },
+  { label: 'Protocols', learn: '/docs/session-types/', code: `protocol Echo do
+  Client -> Server : Int
+  Server -> Client : Int
+end
+
+fn main() do
+  let (client, server) = Chan.new(Echo)
+  let client = Chan.send(client, 42)
+  let (n, server) = Chan.recv(server)
+  let server = Chan.send(server, n + 1)
+  let (reply, client) = Chan.recv(client)
+  Chan.close(server)
+  Chan.close(client)
+  println(int_to_string(reply))   -- 43
+end
+
+-- Each step is checked against Echo. A send
+-- out of turn does not compile.` },
+  { label: 'Failures', learn: '/docs/supervision/', code: `actor Worker do
+  state { done : Int }
+  init  { done: 0 }
+  on Job(n : Int) do
+    if n < 0 do panic("bad job") else
+      { done: state.done + 1 }
+    end
   end
 end
 
--- A dependency ships an update. Did its authority change?
---   $ forge audit
---   ! image-thumb — now ALSO needs: IO.Network
---   1 dependency is asking for capabilities it did not have.
---
--- Not a vuln-database lookup — a diff of what code can touch.` },
-  { label: 'Property Tests', learn: '/docs/property-testing/', code: `-- Checked with 100s of randomly generated inputs
-test "reverse is involutive" do
-  Check.all(Gen.list(Gen.int(-50, 50)), fn xs ->
-    List.reverse(List.reverse(xs)) == xs
-  )
-end
-
-test "sort is idempotent" do
-  Check.all(Gen.list(Gen.int(-50, 50)), fn xs ->
-    let s = List.sort(xs)
-    List.sort(s) == s
-  )
-end` },
-  { label: '~H Sigil', learn: '/docs/sigils/', code: `-- ~H compiles HTML templates; interpolations are auto-escaped
-fn render_user(u : User) : IOList do
-  ~H"""
-  <li class="user-row">
-    <strong>\${u.name}</strong>
-    <span class="email">\${u.email}</span>
-  </li>
-  """
-end
-
-fn dashboard(users : List(User)) : IOList do
-  let items = Html.list(users, render_user)
-  ~H"""
-  <h1>Users (\${int_to_string(List.length(users))})</h1>
-  <ul class="user-list">\${items}</ul>
-  """
-end` },
-  { label: 'Error Handling', learn: '/docs/tour/#result-propagation-with-let', code: `-- let? chains Results; each Err short-circuits
-fn load(path : String) : Result(Config, String) do
-  let? src  = File.read(path)
-  let? toml = Toml.parse(src)
-  let? port = Toml.get_int(toml, "port")
-  Ok({ port: port })
-end
-
--- with adds a custom else handler
-fn fetch(id : Int) : Result(User, String) do
-  with Ok(row)  <- Db.query("users", id),
-       Ok(user) <- User.from_row(row) do
-    Ok(user)
-  else
-    Err(e) -> Err("fetch: " ++ e)
+actor Pool do
+  state { worker : Int }
+  init  { worker: 0 }
+  supervise do
+    strategy one_for_one
+    max_restarts 5 within 30
+    Worker worker
   end
-end` },
+end
+
+-- Job(-1) crashes Worker. Pool restarts it
+-- with fresh state, and the next job runs.` },
+  { label: 'Memory', learn: '/docs/memory-model/', code: `type Tree = Leaf(Int) | Node(Tree, Tree)
+
+-- Reads as building a new tree. Runs as an
+-- in-place update when the tree has one owner.
+@[no_alloc]
+fn inc(t : Tree) : Tree do
+  match t do
+    Leaf(n)    -> Leaf(n + 1)
+    Node(l, r) -> Node(inc(l), inc(r))
+  end
+end
+
+-- @[no_alloc] is checked by the compiler: an
+-- edit that makes inc allocate fails the build.` },
+  { label: 'Contracts', learn: '/docs/refinement-types/', code: `fn pages(items : Int,
+         per : {Int | _ > 0}) : Int do
+  (items + per - 1) / per
+end
+
+fn main() do
+  pages(120, 0)
+end
+
+-- ! argument \`per\` of \`pages\` does not
+-- ! satisfy precondition \`_ > 0\`.
+-- ! Running \`pages(120, 0)\` panics:
+-- ! division by zero.` },
 ];
 
 const FBIP = `-- FBIP: 0 allocs after pass 1
