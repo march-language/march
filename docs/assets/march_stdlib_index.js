@@ -165,6 +165,7 @@ window.marchModuleIndex = {
    "file": "channel_socket.march",
    "unavailable": "it needs network sockets",
    "uses": [
+    "Authority",
     "Channel",
     "HttpServer",
     "Map",
@@ -627,6 +628,7 @@ window.marchModuleIndex = {
    "file": "http_server.march",
    "unavailable": "it needs network sockets",
    "uses": [
+    "Authority",
     "HttpAcme",
     "HttpClient",
     "IO",
