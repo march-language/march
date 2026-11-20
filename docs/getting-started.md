@@ -257,6 +257,6 @@ Curious about March's compile-time safety guarantees? These go beyond a standard
 - [Refinement Types](refinement-types.md): value predicates (`{Int | _ >= 0}`) checked by an SMT solver
 - [Capabilities](capabilities.md): IO permissions tracked in the type system
 - [Safety by Construction](safety-by-construction.md): how these layers compose on one function
-- [Memory Model](memory-model.md): why March has no garbage collector or pauses
+- [Memory Model](memory-model.md): why March has no tracing garbage collector and no stop-the-world pauses
 
 Coming from another language? [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md).
