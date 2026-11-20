@@ -88,8 +88,16 @@ let display_short : (string, string) Hashtbl.t = Hashtbl.create 16
 (** While set, [display] prints every identity in full. *)
 let qualified_display : bool ref = ref false
 
+(** Identities of user variants named like a BASE type (a builtin such as
+    `List`/`Option`/`Result`, or a stdlib variant): the short name keeps
+    meaning the base type outside the declaring module, so the declaration
+    must never claim the bare key in a scope's type table.  For the current
+    check only. *)
+let base_shadow_tbl : (string, unit) Hashtbl.t = Hashtbl.create 16
+
 let reset () =
   Hashtbl.reset refs;
+  Hashtbl.reset base_shadow_tbl;
   Hashtbl.reset user_reserved_refs;
   current_entry := "";
   Hashtbl.reset arity_tbl;
@@ -123,6 +131,10 @@ let with_qualified_display (f : unit -> 'a) : 'a =
   end
 
 let is_identity (s : string) : bool = Hashtbl.mem arity_tbl s
+
+(** True iff the identity [s] is a user variant's whose short name is a base
+    type's ([base_shadow_tbl]). *)
+let shadows_base (s : string) : bool = Hashtbl.mem base_shadow_tbl s
 
 let arity_of (s : string) : int option = Hashtbl.find_opt arity_tbl s
 
@@ -283,6 +295,8 @@ let compute ~(is_stdlib : A.span -> bool) ?(base = fun (_ : string) -> false)
           Hashtbl.replace refs n.A.span id;
           Hashtbl.replace arity_tbl id arity;
           Hashtbl.replace short_tbl id short;
+          if forced_at path short && id <> short then
+            Hashtbl.replace base_shadow_tbl id ();
           if path = "" && id <> short && not (is_reserved short) then
             Hashtbl.replace display_short id short
         | _ -> ()) decls_at;

@@ -1267,6 +1267,28 @@ let test_build = ref false
 let lookup_var  name env = StrMap.find_opt name env.vars
 let lookup_type name env = StrMap.find_opt name env.types
 
+(** [types] with the type declared as [name] registered at [arity]: under its
+    bare name and, when it has one, its nominal identity
+    ([Typecheck_nominal.decl_identity]).  A user variant named like a base
+    type ([Typecheck_nominal.shadows_base]: a top-level or nested `type List`,
+    `type Result`) is registered under its identity only.  The bare name stays
+    the base type's: every reference the lexical rule does not send to the
+    user's declaration (a builtin signature, a lazily loaded stdlib module, an
+    enclosing module that declares no such type) means the base type, and
+    letting the declaration claim the bare key gave each of those the user's
+    arity ("`List` expects 0 type argument(s) but got 1").  A base name with
+    no bare entry to keep (a reserved handle name such as `Process`) is
+    registered bare as before. *)
+let add_decl_type (name : March_ast.Ast.name) (arity : int) (types : int StrMap.t)
+  : int StrMap.t =
+  let short = name.March_ast.Ast.txt in
+  let id = Typecheck_nominal.decl_identity name in
+  let types =
+    if id <> short && Typecheck_nominal.shadows_base id && StrMap.mem short types
+    then types
+    else StrMap.add short arity types in
+  if id = short then types else StrMap.add id arity types
+
 (** The keys of [Typecheck_builtins.builtin_types], installed by that module
     when it loads (it depends on this one).  Read by [canon_type_name]. *)
 let builtin_type_keys : (string, unit) Hashtbl.t = Hashtbl.create 64

@@ -11062,7 +11062,7 @@ let cancel_token_rc_src = {|mod CancelTok do
     println(to_string(task_is_cancelled(b)))
     println(to_string(task_is_cancelled(b)))
     let other = task_cancel_token_new()
-    let t = task_spawn_with_cancel(fn _ -> 42, other)
+    let t = Authority.must(Task.async_cancellable(fn () -> 42, other))
     println(to_string(task_is_cancelled(other)))
     println(to_string(task_await(t)))
     println(to_string(task_is_cancelled(other)))
@@ -14580,6 +14580,112 @@ let test_builtin_named_user_type_compiled () =
                            beside the builtins" opt)
           (builtin_named_user_type_expected ^ "\nEXIT:0") run_out)
     [0; 2]
+
+(* ── A user type named like a builtin ADT, beside the builtin ──────────────
+   Three ways the builtin and a same-named user variant used to meet:
+   - a top-level `type List` with `derive Eq` claimed the bare `List` in the
+     typechecker's type table, so every builtin `List(a)` it did not resolve
+     to the user's declaration (generated code, stdlib signatures) "expects 0
+     type argument(s) but got 1"
+     (specs/progress/2026-11-16-toplevel-type-list-breaks-generated-code.md);
+   - a nested `type Result` exported its bare name over the builtin's, so
+     `Result(Int, String)` in the enclosing module was rejected
+     (specs/progress/2026-11-16-nested-type-named-like-builtin-leaks-to-parent-scope.md);
+   - interpreted, a top-level `type Option`'s derived `show` took over the
+     builtin `Option`'s dispatch slot, so `to_string(Some(1))` panicked
+     (specs/progress/2026-11-16-interp-user-option-show-captures-builtin.md).
+   Each program runs interpreted and compiled at --opt 0 and 2. *)
+let builtin_shadow_list_src = {|mod Main do
+  needs IO.Console
+  type List = Link(Int, List) | End
+  derive Show, Eq for List
+  fn total(l : List, acc : Int) : Int do
+    match l do
+      End -> acc
+      Link(n, rest) -> total(rest, acc + n)
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let l = Link(1, Link(2, Link(3, End)))
+    println(int_to_string(total(l, 0)))
+    println(to_string(l))
+    println(to_string(l == End))
+    println(to_string(l == Link(1, Link(2, Link(3, End)))))
+    println(to_string([1, 2]))
+    println(to_string([1, 2] == [1, 2]))
+    println(to_string(List.head_opt([4])))
+  end
+end
+|}
+
+let builtin_shadow_list_expected =
+  "6\nLink(1, Link(2, Link(3, End)))\nfalse\ntrue\n[1, 2]\ntrue\nSome(4)"
+
+let builtin_shadow_nested_result_src = {|mod Main do
+  needs IO.Console
+  mod Inner do
+    type Result = Won(Int) | Lost
+    derive Show for Result
+    fn won(n : Int) : Result do Won(n) end
+  end
+  fn main(c : Cap(IO.Console)) do
+    println(to_string(Inner.won(3)))
+    let r : Result(Int, String) = Ok(1)
+    println(to_string(r))
+    let e : Result(Int, String) = Err("no")
+    println(to_string(e))
+  end
+end
+|}
+
+let builtin_shadow_nested_result_expected = "Won(3)\nOk(1)\nErr(no)"
+
+let builtin_shadow_option_src = {|mod Main do
+  needs IO.Console
+  type Option = Has(Int) | Nada
+  derive Show, Eq for Option
+  fn main(c : Cap(IO.Console)) do
+    println(to_string(Has(3)))
+    println(to_string(Nada))
+    println(to_string(Has(3) == Has(3)))
+    println(to_string(List.head_opt([1])))
+    println(to_string(List.head_opt([1]) == Some(1)))
+    println(to_string(string_to_int("x")))
+  end
+end
+|}
+
+let builtin_shadow_option_expected = "Has(3)\nNada\ntrue\nSome(1)\ntrue\nNone"
+
+let check_builtin_shadow_program ~name ~src ~expected =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) (name ^ ": interpreter") expected interp_out;
+  List.iter (fun opt ->
+      let bin = Filename.concat tmp (Printf.sprintf "%s_o%d" name opt) in
+      match compile_march_or_skip
+              ~cmd_prefix:(Printf.sprintf "cd %s && MARCH_VERIFY_TIR=1 " (Filename.quote project_root))
+              ~extra_args:(Printf.sprintf "--opt %d" opt) ~main_exe ~bin ~src () with
+      | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+      | Some bin ->
+        let run_out = read_cmd_output
+            (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+        Alcotest.(check string) (Printf.sprintf "%s: compiled --opt %d" name opt)
+          (expected ^ "\nEXIT:0") run_out)
+    [0; 2]
+
+let test_builtin_shadow_toplevel_list () =
+  check_builtin_shadow_program ~name:"march_shadow_list"
+    ~src:builtin_shadow_list_src ~expected:builtin_shadow_list_expected
+
+let test_builtin_shadow_nested_result () =
+  check_builtin_shadow_program ~name:"march_shadow_nested_result"
+    ~src:builtin_shadow_nested_result_src ~expected:builtin_shadow_nested_result_expected
+
+let test_builtin_shadow_option_show () =
+  check_builtin_shadow_program ~name:"march_shadow_option"
+    ~src:builtin_shadow_option_src ~expected:builtin_shadow_option_expected
 
 (* ── Payload atoms (`:ok(n)`) compiled ─────────────────────────────────────
    Every atom has the one type `Atom`, but a payload atom (`:ok(7)`) is a heap
@@ -22183,6 +22289,12 @@ let codegen_suites =
       ( "builtin_named_user_type_codegen", [
           Alcotest.test_case "user type named like a builtin ADT keeps its identity" `Quick
             test_builtin_named_user_type_compiled;
+          Alcotest.test_case "top-level `type List` + derive Eq keeps the builtin List" `Quick
+            test_builtin_shadow_toplevel_list;
+          Alcotest.test_case "nested `type Result` does not hide the builtin outside" `Quick
+            test_builtin_shadow_nested_result;
+          Alcotest.test_case "top-level `type Option` derive Show leaves the builtin's" `Quick
+            test_builtin_shadow_option_show;
         ] );
       ( "payload_atom_codegen", [
           Alcotest.test_case "payload atoms match, show and compare compiled" `Quick

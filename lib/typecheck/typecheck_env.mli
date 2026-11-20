@@ -334,6 +334,12 @@ val test_build : bool ref
 val lookup_var :
   StrMap.key -> env -> Typecheck_types.scheme option
 val lookup_type : StrMap.key -> env -> int option
+
+(** [types] with a type declaration registered at its arity, under its bare
+    name and its nominal identity; a user variant named like a base type is
+    registered under its identity only, so the bare name stays the base
+    type's. *)
+val add_decl_type : March_ast.Ast.name -> int -> int StrMap.t -> int StrMap.t
 (* Keys of [Typecheck_builtins.builtin_types], installed when that module
    loads; [canon_type_name] never rewrites one. *)
 val builtin_type_keys : (string, unit) Hashtbl.t
