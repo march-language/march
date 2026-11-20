@@ -11062,7 +11062,7 @@ let cancel_token_rc_src = {|mod CancelTok do
     println(to_string(task_is_cancelled(b)))
     println(to_string(task_is_cancelled(b)))
     let other = task_cancel_token_new()
-    let t = task_spawn_with_cancel(fn _ -> 42, other)
+    let t = Authority.must(Task.async_cancellable(fn () -> 42, other))
     println(to_string(task_is_cancelled(other)))
     println(to_string(task_await(t)))
     println(to_string(task_is_cancelled(other)))
@@ -14607,13 +14607,13 @@ let builtin_shadow_list_src = {|mod Main do
   end
   fn main(c : Cap(IO.Console)) do
     let l = Link(1, Link(2, Link(3, End)))
-    print_line(int_to_string(total(l, 0)))
-    print_line(to_string(l))
-    print_line(to_string(l == End))
-    print_line(to_string(l == Link(1, Link(2, Link(3, End)))))
-    print_line(to_string([1, 2]))
-    print_line(to_string([1, 2] == [1, 2]))
-    print_line(to_string(List.head_opt([4])))
+    println(int_to_string(total(l, 0)))
+    println(to_string(l))
+    println(to_string(l == End))
+    println(to_string(l == Link(1, Link(2, Link(3, End)))))
+    println(to_string([1, 2]))
+    println(to_string([1, 2] == [1, 2]))
+    println(to_string(List.head_opt([4])))
   end
 end
 |}
@@ -14629,11 +14629,11 @@ let builtin_shadow_nested_result_src = {|mod Main do
     fn won(n : Int) : Result do Won(n) end
   end
   fn main(c : Cap(IO.Console)) do
-    print_line(to_string(Inner.won(3)))
+    println(to_string(Inner.won(3)))
     let r : Result(Int, String) = Ok(1)
-    print_line(to_string(r))
+    println(to_string(r))
     let e : Result(Int, String) = Err("no")
-    print_line(to_string(e))
+    println(to_string(e))
   end
 end
 |}
@@ -14645,12 +14645,12 @@ let builtin_shadow_option_src = {|mod Main do
   type Option = Has(Int) | Nada
   derive Show, Eq for Option
   fn main(c : Cap(IO.Console)) do
-    print_line(to_string(Has(3)))
-    print_line(to_string(Nada))
-    print_line(to_string(Has(3) == Has(3)))
-    print_line(to_string(List.head_opt([1])))
-    print_line(to_string(List.head_opt([1]) == Some(1)))
-    print_line(to_string(string_to_int("x")))
+    println(to_string(Has(3)))
+    println(to_string(Nada))
+    println(to_string(Has(3) == Has(3)))
+    println(to_string(List.head_opt([1])))
+    println(to_string(List.head_opt([1]) == Some(1)))
+    println(to_string(string_to_int("x")))
   end
 end
 |}
