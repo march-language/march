@@ -41,8 +41,13 @@ CORE = [
 ]
 
 # Read at startup by the Tetris live compiler (js/march_browser_compile.ml), which
-# loads its own fixed list from march_stdlib.js.
-COMPILE_EXTRA = ["dom.march", "hash_map.march", "bytes.march", "random.march"]
+# loads its own fixed list from march_stdlib.js. iolist..dir are the capability
+# wrappers it needs now that the raw builtins behind them are stdlib-only: the
+# Tetris seed reads the clock through System.now and the error playground's
+# programs reach File.write.
+COMPILE_EXTRA = ["dom.march", "hash_map.march", "bytes.march", "random.march",
+                 "iolist.march", "io.march", "seq.march", "process.march",
+                 "system.march", "file.march", "dir.march"]
 
 # Modules that cannot work in a browser, and why. Whole-module only: a module that is
 # mostly pure but has a few native helpers (Seq, Csv, Env, System) stays loadable and

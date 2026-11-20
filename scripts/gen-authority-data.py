@@ -256,8 +256,8 @@ def must(rc, out, what, want=0):
 
 # The one line of the lab app the dependency replaces: Probe formatting its reading.
 PROBE_LINE = ('      let line = "live " ++ int_to_string(live_allocs()) ++ "\\nat " ++ '
-              'int_to_string(unix_time_ms()) ++ "\\n"\n')
-PROBE_CALL = "      let line = Gauge.line(live_allocs(), unix_time_ms())\n"
+              'int_to_string(Authority.must(System.now_ms())) ++ "\\n"\n')
+PROBE_CALL = "      let line = Gauge.line(live_allocs(), Authority.must(System.now_ms()))\n"
 
 
 def use_dependency(app):

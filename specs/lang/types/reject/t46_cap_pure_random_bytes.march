@@ -1,4 +1,8 @@
 -- EXPECT-ERROR: which has side effects
+-- (Since ocap phase 4 the raw builtin is stdlib-only, so this program also
+-- draws `stdlib_internal`; it pins the call-level rule, which stdlib-spanned
+-- code still reaches. A user program reaches the operation through
+-- `Crypto.random_bytes`, rejected by the module and grant checks.)
 -- Capabilities widening, Task 5 (F2 fix) -- `cap pure` (`check_pure_module`,
 -- `typecheck.ml:6581`), the REJECT side for the RNG source: a `cap pure`
 -- module whose body calls the REAL effectful builtin `random_bytes`
@@ -7,7 +11,7 @@
 -- DO NOT EXIST as builtins) and MISSED the real `random_bytes` -- so this
 -- program typechecked with exit 0 (UNSOUND). The F2 fix derives `pure_banned`
 -- from `builtin_cap_table`, so `random_bytes` is now banned. `random_bytes :
--- Int -> Bytes` is total, so `: Bytes` is a correct signature and the ONLY
+-- Int -> Bytes` is total, so `: Bytes` is a correct signature and the pure
 -- rejection is `check_pure_module`'s own: `` `gen` in `mod LeakyPure`
 -- (declared `cap pure`) calls `random_bytes`, which has side effects. `` (A
 -- WARNING-level Check 1b body-scan diagnostic -- "requires `Cap(IO.Random)`"

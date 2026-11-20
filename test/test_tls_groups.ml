@@ -42,7 +42,7 @@ mod TlsGroupsProbe do
   needs IO.Mut
 
   fn env_or(name, dflt) do
-    match process_env(name) do
+    match Authority.must(Process.env(name)) do
     Some(s) -> s
     None -> dflt
     end
@@ -142,7 +142,7 @@ mod TlsGroupsProbe do
       Err(e) -> Authority.ignore(println("C4 FAIL handshake " ++ Tls.error_to_string(e)))
       Ok(conn) ->
         let t0 = sys_uptime_ms()
-        let _reader = task_spawn(fn _ ->
+        let _reader = Task.async(fn () ->
           let r = Tls.read(conn, 16)
           let took = sys_uptime_ms() - t0
           let what = match r do

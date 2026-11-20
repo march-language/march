@@ -61,7 +61,7 @@ mod DrainInitKilledC do
         if ClusterNode.await_members(h, 2, 120000) do () else panic("node-c: never joined") end
         Topology.drain_on_signal(h, 1000, 4000)
         let done = Authority.must(Vault.new("traffic"))
-        let _ = List.map(List.range(0, 8), fn _ -> task_spawn(fn _ -> traffic(c, h, done)))
+        let _ = List.map(List.range(0, 8), fn _ -> Task.async(fn () -> traffic(c, h, done)))
         -- The drain exits the process.
         idle()
     end

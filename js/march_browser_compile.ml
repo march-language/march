@@ -30,6 +30,17 @@ let browser_stdlib_files = [
   "string.march";
   "array.march";
   "dom.march";
+  (* The capability wrappers, now that the raw builtins behind them are
+     stdlib-only: the Tetris seed reads the clock through System.now, and the
+     error playground's programs reach File.write. System and File pull in
+     IO, Process, Seq and Dir. *)
+  "iolist.march";
+  "io.march";
+  "seq.march";
+  "process.march";
+  "system.march";
+  "file.march";
+  "dir.march";
 ]
 
 (** Parse and desugar a stdlib source string, returning its decl list.
@@ -149,8 +160,15 @@ let check_source source =
            March_ast.Ast.mod_decls =
              stdlib_decls @ user_mod.March_ast.Ast.mod_decls }
        in
+       (* `march --check` turns on the front-end capability ceiling
+          (bin/main.ml, [cap_strict_ceiling]); without it a stdlib-mediated
+          use (`File.write`, now that the raw builtins are stdlib-only) gets
+          no `needs` diagnostic here. Off again for marchCompileToJs. *)
+       March_typecheck.Typecheck.cap_strict_ceiling := true;
        let errctx, _type_map, _env =
-         March_typecheck.Typecheck.check_module_full merged in
+         Fun.protect
+           ~finally:(fun () -> March_typecheck.Typecheck.cap_strict_ceiling := false)
+           (fun () -> March_typecheck.Typecheck.check_module_full merged) in
        List.iter (March_errors.Errors.report errctx)
          (List.rev desugar_errors.March_errors.Errors.diagnostics);
        let visible (d : March_errors.Errors.diagnostic) =

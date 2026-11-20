@@ -58,9 +58,9 @@ mod ClusterApRetryB do
         println("Client: " ++ int_to_string(ok) ++ " of 4 sessions served")
         -- The two slots of node-a's offer held, node-a is full; node-c
         -- still refuses: nowhere to go.
-        let held1 = task_spawn(fn _ -> session(c, h, 98))
+        let held1 = Authority.must(Task.async(fn () -> session(c, h, 98)))
         sleep_ms(500)
-        let held2 = task_spawn(fn _ -> session(c, h, 99))
+        let held2 = Authority.must(Task.async(fn () -> session(c, h, 99)))
         sleep_ms(1000)
         let _ = session(c, h, 5)
         let _ = task_await_unwrap(held1) + task_await_unwrap(held2)

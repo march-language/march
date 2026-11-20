@@ -21,6 +21,6 @@ mod Main do
     end
   end
   fn main(c : Cap(IO.Console)) do
-    print_line(B.describe(A.make()))
+    IO.puts(B.describe(A.make()))
   end
 end

@@ -63,7 +63,7 @@ mod TcpRecvEagainAfterPark do
       Err(e) -> panic("port: " ++ Socket.error_message(e))
     end
 
-    let server = task_spawn(fn _ -> do
+    let server = Authority.must(Task.async(fn () -> do
       let c = match Socket.accept(listener) do
         Ok(s) -> s
         Err(e) -> panic("accept: " ++ Socket.error_message(e))
@@ -72,7 +72,7 @@ mod TcpRecvEagainAfterPark do
       sleep_ms(300)
       let _ = Socket.close(c)
       unsent
-    end)
+    end))
 
     let fd = match Authority.must(Socket.connect("127.0.0.1", port)) do
       Ok(f) -> f
@@ -81,9 +81,9 @@ mod TcpRecvEagainAfterPark do
 
     -- Eight readers on ONE socket: every byte wakes all of them, seven find
     -- nothing there, and each of those seven is a post-park EAGAIN.
-    let readers = List.map(List.range(0, 8), fn _ -> task_spawn(fn _ -> drain(fd, 80, 0, 0)))
+    let readers = List.map(List.range(0, 8), fn _ -> Task.async(fn () -> drain(fd, 80, 0, 0)))
     let tally = List.fold_left(readers, (0, 0), fn (acc, t) ->
-      let (g, b) = task_await_unwrap(t)
+      let (g, b) = task_await_unwrap(Authority.must(t))
       let (ag, ab) = acc
       (ag + g, ab + b))
     let unsent = task_await_unwrap(server)

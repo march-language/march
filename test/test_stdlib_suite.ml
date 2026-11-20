@@ -5858,7 +5858,7 @@ let test_compiled_pmap_matches_map () =
     \    let xs = List.range(0, 2000)\n\
     \    let map_ok = List.pmap(xs, fn x -> x * x) == List.map(xs, fn x -> x * x)\n\
     \    let flt_ok = List.pfilter(xs, fn x -> x % 2 == 0) == List.filter(xs, fn x -> x % 2 == 0)\n\
-    \    if map_ok && flt_ok do () else process_exit(1) end\n\
+    \    if map_ok && flt_ok do () else Authority.ignore(Process.exit(1)) end\n\
     \  end\n\
      end\n";
   close_out oc;
@@ -7474,7 +7474,7 @@ let test_crypto_hmac_sha256_bytes_typecheck () =
   let src = {|mod Test do
   needs IO.Random
     fn go() do
-      base64_encode(hmac_sha256_bytes(random_bytes(4), random_bytes(8)))
+      base64_encode(hmac_sha256_bytes(Authority.must(Crypto.random_bytes(4)), Authority.must(Crypto.random_bytes(8))))
     end
   end|} in
   let errors = typecheck src in
@@ -8590,7 +8590,7 @@ let test_crypto_stdlib_base64_roundtrip () =
   let env = eval_with_crypto {|mod Test do
   needs IO.Random
     fn f() do
-      let b = random_bytes(12)
+      let b = Authority.must(Crypto.random_bytes(12))
       let enc = Crypto.base64_encode(b)
       match Crypto.base64_decode(enc) do
       Ok(_)  -> "ok"
@@ -10655,7 +10655,7 @@ let test_compiled_recursive_closure_capture () =
     \    go(1, 0)\n\
     \  end\n\
     \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
-    \    if f(11) == 11 do () else process_exit(1) end\n\
+    \    if f(11) == 11 do () else Authority.ignore(Process.exit(1)) end\n\
     \  end\n\
      end\n";
   close_out oc;
@@ -10705,7 +10705,7 @@ let test_compiled_p12_type_preserving_alias () =
     "mod P12Regress do\n\
     \  needs IO.Process\n\
     \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
-    \    if List.length(List.range(0, 5)) == 5 do () else process_exit(1) end\n\
+    \    if List.length(List.range(0, 5)) == 5 do () else Authority.ignore(Process.exit(1)) end\n\
     \  end\n\
      end\n";
   close_out oc;
@@ -10739,7 +10739,7 @@ let test_compiled_sortby_heap_capturing_comparator () =
     \    let data = List.range(0, 5)\n\
     \    let cmp = fn (a : Int, b : Int) ->\n\
     \      List.length(List.filter(data, fn x -> x == a)) > 0\n\
-    \    if List.length(List.sort_by(xs, cmp)) == 98 do () else process_exit(1) end\n\
+    \    if List.length(List.sort_by(xs, cmp)) == 98 do () else Authority.ignore(Process.exit(1)) end\n\
     \  end\n\
      end\n";
   close_out oc;
@@ -10969,8 +10969,10 @@ let test_compiled_file_dir_err_are_real_fileerrors () =
   output_string oc "  end\nend\n";
   close_out oc;
   let split out = String.split_on_char '\n' out |> List.map String.trim in
+  (* --stdlib-source: builtin-level, it pins the raw file_*/dir_* builtins,
+     which since ocap phase 4 only a stdlib-spanned program may call. *)
   let (interp_rc, interp_out) =
-    run_capture_rc (Printf.sprintf "%s %s" (Filename.quote main_exe) (Filename.quote src)) in
+    run_capture_rc (Printf.sprintf "%s --stdlib-source %s" (Filename.quote main_exe) (Filename.quote src)) in
   Alcotest.(check int) "interpreter runs the file_*/dir_* failure program cleanly" 0 interp_rc;
   let interp_lines = split interp_out in
   Alcotest.(check int) "interpreter printed one line per case"
@@ -10986,7 +10988,7 @@ let test_compiled_file_dir_err_are_real_fileerrors () =
        | Some i -> String.sub line 0 i
        | None -> line)) cases interp_lines;
   let bin = Filename.concat tmp "filedirerrbin" in
-  match compile_march_or_skip ~main_exe ~bin ~src () with
+  match compile_march_or_skip ~extra_args:"--stdlib-source" ~main_exe ~bin ~src () with
   | None -> ()  (* legitimate, counted skip: no clang on PATH *)
   | Some bin ->
     let (run_rc, compiled_out) = run_capture_rc (Filename.quote bin) in
@@ -11280,8 +11282,8 @@ let test_compiled_toml_section_4keys () =
     \  needs IO.Process\n\
     \  pfn check(opt, want) : Unit do\n\
     \    match opt do\n\
-    \      Some(s) -> if s == want do () else process_exit(1) end\n\
-    \      None -> process_exit(1)\n\
+    \      Some(s) -> if s == want do () else Authority.ignore(Process.exit(1)) end\n\
+    \      None -> Authority.ignore(Process.exit(1))\n\
     \    end\n\
     \  end\n\
     \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
@@ -11294,9 +11296,9 @@ let test_compiled_toml_section_4keys () =
     \            check(Toml.get_str(pkg, \"k2\"), \"v2\")\n\
     \            check(Toml.get_str(pkg, \"k3\"), \"v3\")\n\
     \            check(Toml.get_str(pkg, \"k4\"), \"v4\")\n\
-    \          None -> process_exit(1)\n\
+    \          None -> Authority.ignore(Process.exit(1))\n\
     \        end\n\
-    \      Err(_) -> process_exit(1)\n\
+    \      Err(_) -> Authority.ignore(Process.exit(1))\n\
     \    end\n\
     \  end\n\
      end\n";
@@ -11351,7 +11353,7 @@ let test_compiled_record_field_poly_mono () =
     \  end\n\
     \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
     \    let conn = { hdrs : Cons((\"ct\", \"boundaryval\"), Nil) }\n\
-    \    if run(conn) == \"--boundaryval\" do () else process_exit(1) end\n\
+    \    if run(conn) == \"--boundaryval\" do () else Authority.ignore(Process.exit(1)) end\n\
     \  end\n\
      end\n";
   close_out oc;
@@ -11416,11 +11418,11 @@ let test_compiled_record_put_large_even_int () =
       \  end\n\
       \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
       \    let one = record_put(record_from_list([(\"a\", 1)]), \"a\", 4096)\n\
-      \    if get_i(one, \"a\") == 4096 do () else process_exit(1) end\n\
+      \    if get_i(one, \"a\") == 4096 do () else Authority.ignore(Process.exit(1)) end\n\
       \    let n = 20000\n\
       \    let expected = 3 * n * (n + 1) / 2 + 2 * n\n\
-      \    if go(n, 0) == expected do () else process_exit(2) end\n\
-      \    if go2(n, 0) == expected do () else process_exit(3) end\n\
+      \    if go(n, 0) == expected do () else Authority.ignore(Process.exit(2)) end\n\
+      \    if go2(n, 0) == expected do () else Authority.ignore(Process.exit(3)) end\n\
       \  end\n\
        end\n";
     close_out oc;
@@ -11698,7 +11700,7 @@ let role_manifest_src ?(serve = false) ~uses_save () =
   end
 
   pfn save(n : Int) : () do
-    let _ = file_write("/tmp/n", int_to_string(n))
+    let _ = File.write("/tmp/n", int_to_string(n))
     ()
   end
 
@@ -12046,7 +12048,7 @@ let migrate_msg_tally_src ~v2 =
      else "")
   ^ "  fn main(_io : Cap(IO)) do\n\
   \    let t = spawn(Tally)\n\
-  \    let _ = task_spawn(fn _ -> feed(t, 0))\n\
+  \    let _ = Task.async(fn () -> feed(t, 0))\n\
   \    println(\"tally started\")\n\
   \    sleep_ms(30000)\n\
   \  end\n\
@@ -12382,11 +12384,13 @@ let test_hcr_manifest_actor_handler_caps_populated () =
    field held the whole-artifact cap UNION (dominated by the linked stdlib,
    ~11 caps, app-invariant), not that function's own inferred caps. This
    fixture has two functions with DISJOINT own-cap requirements — `handle`
-   only calls `println` (IO.Console), `writer` only calls `file_write`
+   only calls `println` (IO.Console), `writer` only calls `File.write`
    (IO.FileWrite) — and asserts the manifest gives each its OWN caps
    separately. Before the fix, both would show `caps=IO.Console,IO.FileWrite`
    (or worse, the full ~11-cap stdlib union); the fix must show `handle` with
-   ONLY IO.Console and `writer` with ONLY IO.FileWrite. *)
+   ONLY IO.Console and `writer` with ONLY IO.FileWrite. (`writer` called the
+   raw `file_write` until ocap phase 4 made it stdlib-only; a gated builtin's
+   entry point is charged to its caller's closure the same way.) *)
 let hcr_manifest_disjoint_caps_fixture_src =
   "mod M do\n\
   \  needs IO.Console, IO.FileWrite\n\
@@ -12395,7 +12399,7 @@ let hcr_manifest_disjoint_caps_fixture_src =
   \    x\n\
   \  end\n\
   \  fn writer(path : String) : Int do\n\
-  \    let _ = file_write(path, \"data\")\n\
+  \    let _ = File.write(path, \"data\")\n\
   \    0\n\
   \  end\n\
   \  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do\n\
@@ -13372,7 +13376,7 @@ let test_compiled_helper_name_collision () =
     \    end end\n\
     \  end\n\
     \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
-    \    if go(0, 5) == 0 do () else process_exit(1) end\n\
+    \    if go(0, 5) == 0 do () else Authority.ignore(Process.exit(1)) end\n\
     \  end\n\
      end\n";
   close_out oc;
@@ -13414,8 +13418,8 @@ let test_compiled_toplevel_fn_shadows_hof_param () =
     \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
     \    match f([1, 2, 3]) do\n\
     \      Cons(a, Cons(b, Cons(c, Nil))) ->\n\
-    \        if a == 2 && b == 3 && c == 4 do () else process_exit(1) end\n\
-    \      _ -> process_exit(1)\n\
+    \        if a == 2 && b == 3 && c == 4 do () else Authority.ignore(Process.exit(1)) end\n\
+    \      _ -> Authority.ignore(Process.exit(1))\n\
     \    end\n\
     \  end\n\
      end\n";
@@ -13456,7 +13460,7 @@ let test_compiled_builtin_first_class_value () =
     \    f(s)\n\
     \  end\n\
     \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
-    \    if apply1(string_length, \"hello\") == 5 do () else process_exit(1) end\n\
+    \    if apply1(string_length, \"hello\") == 5 do () else Authority.ignore(Process.exit(1)) end\n\
     \  end\n\
      end\n";
   close_out oc;
@@ -13503,7 +13507,7 @@ let test_compiled_vault_scalar_roundtrip () =
     Vault.set(tn, "n", 4242)
     let b = Vault.get(tb, "b") |> unwrap_or(false)
     let n = Vault.get(tn, "n") |> unwrap_or(0)
-    if b && n == 4242 do () else process_exit(1) end
+    if b && n == 4242 do () else Authority.ignore(Process.exit(1)) end
   end
 end
 |};
@@ -13544,7 +13548,7 @@ let test_compiled_vault_ns_get_missing_namespace () =
   fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do
     match Authority.must(Vault.ns_get("never_written_ns_xyz", "k")) do
       None -> ()
-      Some(_) -> process_exit(1)
+      Some(_) -> Authority.ignore(Process.exit(1))
     end
   end
 end
@@ -13607,7 +13611,7 @@ let vault_update_src =
     Vault.set(ts, "s", "ab")
     Vault.update(ts, "s", fn s -> s ++ "!")
     let s = Vault.get(ts, "s") |> unwrap_or("")
-    if n == 3 && s == "ab!" do () else process_exit(1) end
+    if n == 3 && s == "ab!" do () else Authority.ignore(Process.exit(1)) end
   end
 end
 |}
@@ -13686,7 +13690,7 @@ let test_compiled_string_to_int_overflow_is_none () =
     \      is_val(\"4611686018427387903\", 4611686018427387903) &&\n\
     \      is_val(\"-4611686018427387904\", int_min) &&\n\
     \      is_val(\"42\", 42)\n\
-    \    if ok do () else process_exit(1) end\n\
+    \    if ok do () else Authority.ignore(Process.exit(1)) end\n\
     \  end\n\
      end\n";
   close_out oc;
@@ -13729,7 +13733,7 @@ let test_compiled_aliased_arg_no_double_free () =
     \    let plen = match pair do (p, q) -> List.length(p) + List.length(q) end\n\
     \    if BigInt.to_string(sq) == \"49\" && plen == 4\n\
     \       && BigInt.to_string(s3) != \"0\"\n\
-    \    do () else process_exit(1) end\n\
+    \    do () else Authority.ignore(Process.exit(1)) end\n\
     \  end\n\
      end\n";
   close_out oc;
@@ -13826,9 +13830,9 @@ let test_interp_http_server_idle_client_does_not_block_others () =
       \    conn |> HttpServer.text(200, \"hello\")\n\
       \  end\n\
       \  fn main(_cap_netlisten : Cap(IO.NetListen)) do\n\
-      \    HttpServer.new(%d)\n\
+      \    Authority.must(HttpServer.new(%d)\n\
       \    |> HttpServer.plug(router)\n\
-      \    |> HttpServer.listen()\n\
+      \    |> HttpServer.listen())\n\
       \  end\n\
        end\n" port);
     close_out oc;
@@ -13971,9 +13975,9 @@ let test_interp_http_server_idle_websocket_does_not_block_others () =
       \    end\n\
       \  end\n\
       \  fn main(_cap_netlisten : Cap(IO.NetListen), _cap_websocket : Cap(IO.WebSocket)) do\n\
-      \    HttpServer.new(%d)\n\
+      \    Authority.must(HttpServer.new(%d)\n\
       \    |> HttpServer.plug(router)\n\
-      \    |> HttpServer.listen()\n\
+      \    |> HttpServer.listen())\n\
       \  end\n\
        end\n" port);
     close_out oc;

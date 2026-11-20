@@ -93,7 +93,7 @@ mod HcrSessionB do
     init  { started: 0 }
     -- Identical in both versions: never activated by the deploy.
     on Go(c : Cap(IO), h : Cap(ClusterNode.Live)) do
-      let _ = task_spawn(fn _ -> do
+      let _ = Task.async(fn () -> do
         Buy.session(c, h)
         0
       end)
@@ -124,7 +124,7 @@ mod HcrSessionB do
   end
 
   pfn drive(d : Pid(DriverState), c : Cap(IO), h : Cap(ClusterNode.Live), until : Int) : () do
-    if unix_time_ms() >= until do ()
+    if Authority.must(System.now_ms()) >= until do ()
     else
       let _ = send(d, Go(c, h))
       sleep_ms(150)
@@ -159,7 +159,7 @@ mod HcrSessionB do
         if offered(h, 60000) do () else panic("node-b: never saw the Shop offer") end
         let d = spawn(Driver)
         println("node-b: driving")
-        drive(d, c, h, unix_time_ms() + Authority.must(Env.get_int("HCR_DRIVE_MS", 12000)))
+        drive(d, c, h, Authority.must(System.now_ms()) + Authority.must(Env.get_int("HCR_DRIVE_MS", 12000)))
         settle(30000)
         summary()
         -- Linger so the scenario can read this node's reload counters.

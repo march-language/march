@@ -55,7 +55,7 @@ mod CertRotateA do
   pfn shop(s : Cap(Session.Live), st : Order_Shop.Entry, stop : String) : Order_Shop.Yield do
     Order_Shop.recv_Item(s, st, fn (n, st1) ->
       let old = Vault.get_or(flags(), "old_not_after", 0)
-      if old > 0 && unix_time_ms() / 1000 > old + 1 do
+      if old > 0 && Authority.must(System.now_ms()) / 1000 > old + 1 do
         once("outlived", "session still running after " ++ other() ++ "'s old certificate expired")
       else () end
       if Authority.must(File.exists(stop)) do Order_Shop.close(s, Order_Shop.choose_done(s, st1, n))

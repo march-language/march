@@ -245,7 +245,7 @@ let test_task_spawn_out_of_scope () =
   accepts "task_spawn"
     (program {|
 fn in_task(a : Acc) : Int do
-  task_await_unwrap(task_spawn(fn _ -> push(a, 4)))
+  task_await_unwrap(Authority.must(Task.async(fn () -> push(a, 4))))
 end|} {|  let a = acc_new()
   let _ = in_task(a)
   println(int_to_string(finish(a)))|})

@@ -164,10 +164,10 @@ mod HostedProtocolChange do
         -- Three old-version sessions, each parked after its hello.
         let gate : Vault(Int) = Authority.must(Vault.new("hpc_gate"))
         let olds = List.map(Cons(1, Cons(2, Cons(3, Nil))), fn n ->
-          let t = task_spawn(fn _ -> do
+          let t = Authority.must(Task.async(fn () -> do
             session(c, h, "hold-v1", n, gate)
             0
-          end)
+          end))
           wait_until("hello " ++ int_to_string(n), fn _ -> Topology.running(h) >= n, 10000)
           sleep_ms(200)
           t)

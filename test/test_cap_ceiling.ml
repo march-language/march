@@ -286,9 +286,15 @@ end
    | exception Not_found ->
      Alcotest.failf "diagnostic no longer names the offending module:\n%s" out)
 
-(* Route 3: a builtin handed out as a VALUE and invoked indirectly. *)
+(* Route 3: a builtin handed out as a VALUE and invoked indirectly. Since
+   ocap phase 4 the raw builtin is stdlib-only, so the route is closed before
+   the ceiling: naming `file_read` at all is a typecheck error. (Its entry
+   point `File.read` as a value is caught by `--check`'s ceiling but not by
+   the compiled TIR ceiling:
+   specs/todos/2026-11-17-ocap-tir-ceiling-misses-function-values.md.) *)
 let test_builtin_as_value_route () =
-  rejects "builtin passed as a value"
+  rejects_at_typecheck "builtin passed as a value"
+    ~expect:"`file_read` is internal to the standard library"
     {|
 mod CeilValue do
   needs IO.Console
@@ -388,7 +394,7 @@ mod CeilDeepOkay do
     mod DeeplyNested do
       needs IO.FileWrite
       fn write_it(data : String) : Bool do
-        match file_write("/tmp/ceil_deep_ok", data) do
+        match Authority.must(File.write("/tmp/ceil_deep_ok", data)) do
           Ok(_)  -> true
           Err(_) -> false
         end
@@ -796,7 +802,7 @@ mod CeilImpl do
   end
   impl Save(Thing) do
     fn persist(_t) do
-      match file_write("/tmp/ceil_impl_out", "d") do
+      match Authority.must(File.write("/tmp/ceil_impl_out", "d")) do
         Ok(_) -> ()
         Err(_) -> ()
       end

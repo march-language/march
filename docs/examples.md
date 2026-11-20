@@ -141,8 +141,8 @@ Lightweight tasks: spawn, await, chained results, and fan-out patterns using the
 ```march
 -- Two independent tasks, combined on await
 fn two_tasks() : Int do
-  let t1 = task_spawn(fn x -> collatz(27, 0))
-  let t2 = task_spawn(fn x -> collatz(871, 0))
+  let t1 = Authority.must(Task.async(fn () -> collatz(27, 0)))
+  let t2 = Authority.must(Task.async(fn () -> collatz(871, 0)))
   task_await_unwrap(t1) + task_await_unwrap(t2)
 end
 ```
@@ -158,8 +158,8 @@ fn par_sum(lo : Int, hi : Int, threshold : Int) : Int do
   if hi - lo <= threshold do sum_range(lo, hi)
   else do
     let mid   = lo + (hi - lo) / 2
-    let left  = task_spawn(fn x -> par_sum(lo, mid, threshold))
-    let right = task_spawn(fn x -> par_sum(mid + 1, hi, threshold))
+    let left  = Authority.must(Task.async(fn () -> par_sum(lo, mid, threshold)))
+    let right = Authority.must(Task.async(fn () -> par_sum(mid + 1, hi, threshold)))
     task_await_unwrap(left) + task_await_unwrap(right)
   end
   end
@@ -251,9 +251,9 @@ fn router(conn) do
 end
 
 fn main() do
-  HttpServer.new(8080)
+  Authority.must(HttpServer.new(8080)
   |> HttpServer.plug(router)
-  |> HttpServer.listen()
+  |> HttpServer.listen())
 end
 ```
 
@@ -265,14 +265,14 @@ Three streaming patterns: print chunks as they arrive, byte counting without buf
 
 ```march
 fn print_chunk(chunk) do
-  print("[chunk " ++ String.from_int(String.byte_size(chunk)) ++ " bytes]")
-  print(chunk)
+  Authority.ignore(IO.write("[chunk " ++ String.from_int(String.byte_size(chunk)) ++ " bytes]"))
+  Authority.ignore(IO.write(chunk))
 end
 
 fn stream_demo(client) do
   match HttpClient.stream_get(client, "http://httpbin.org/stream/5", print_chunk) do
-  Ok((status, _, _)) -> print("Status: " ++ String.from_int(status))
-  Err(_)             -> print("Error!")
+  Ok((status, _, _)) -> Authority.ignore(IO.write("Status: " ++ String.from_int(status)))
+  Err(_)             -> Authority.ignore(IO.write("Error!"))
   end
 end
 ```

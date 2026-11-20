@@ -51,12 +51,12 @@ mod LabApp do
     -- Every node writes `$HOME/lab-probe` every 5 s: its live heap objects
     -- and when it counted them (the lab's soak samples it).
     fn start(home : String) : () do
-      let _ = task_spawn(fn _ -> probe_loop(home))
+      let _ = Task.async(fn () -> probe_loop(home))
       ()
     end
 
     pfn probe_loop(home : String) : Int do
-      let line = "live " ++ int_to_string(live_allocs()) ++ "\nat " ++ int_to_string(unix_time_ms()) ++ "\n"
+      let line = "live " ++ int_to_string(live_allocs()) ++ "\nat " ++ int_to_string(Authority.must(System.now_ms())) ++ "\n"
       let _ = Authority.must(File.write(home ++ "/lab-probe.tmp", line))
       let _ = Authority.must(File.rename(home ++ "/lab-probe.tmp", home ++ "/lab-probe"))
       sleep_ms(5000)
@@ -179,8 +179,8 @@ mod LabApp do
       let stats = home ++ "/lab-stats"
       Probe.start(home)
       let d = start_driver()
-      let _ = task_spawn(fn _ -> drive(d, node, home ++ "/lab-traffic"))
-      let _ = task_spawn(fn _ -> report(stats))
+      let _ = Task.async(fn () -> drive(d, node, home ++ "/lab-traffic"))
+      let _ = Task.async(fn () -> report(stats))
       { stats: stats }
     end
 
@@ -270,7 +270,7 @@ mod LabApp do
       state { started : Int }
       init  { started: 0 }
       on Go(node : Cap(ClusterNode.Live)) do
-        let _ = task_spawn(fn _ -> do
+        let _ = Task.async(fn () -> do
           session(node)
           0
         end)
@@ -333,7 +333,7 @@ mod LabApp do
       let l = last()
       let lines = List.map(List.sort_by(Vault.keys(t), fn (a, b) -> a < b), fn k -> k ++ " " ++ int_to_string(Vault.get_or(t, k, 0)))
       let reasons = List.map(List.sort_by(Vault.keys(l), fn (a, b) -> a < b), fn k -> "last_" ++ k ++ " " ++ Vault.get_or(l, k, ""))
-      let body = "at " ++ int_to_string(unix_time_ms()) ++ "\n" ++ String.join(List.append(lines, reasons), "\n") ++ "\n"
+      let body = "at " ++ int_to_string(Authority.must(System.now_ms())) ++ "\n" ++ String.join(List.append(lines, reasons), "\n") ++ "\n"
       let _ = Authority.must(File.write(path ++ ".tmp", body))
       let _ = Authority.must(File.rename(path ++ ".tmp", path))
       sleep_ms(1000)

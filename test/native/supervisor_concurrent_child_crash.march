@@ -80,7 +80,7 @@ mod SupervisorConcurrentChildCrash do
     let now_pid = child_int(sup, field)
     if now_pid != old && is_alive(Actor.pid_from_int(intro, now_pid)) do
       true
-    else if unix_time_ms() >= deadline do
+    else if Authority.must(System.now_ms()) >= deadline do
       false
     else
       sleep_ms(1)
@@ -100,7 +100,7 @@ mod SupervisorConcurrentChildCrash do
       let _ = poison(intro, sup, "b")
       let _ = poison(intro, sup, "c")
       let _ = poison(intro, sup, "d")
-      let deadline = unix_time_ms() + 20000
+      let deadline = Authority.must(System.now_ms()) + 20000
       let ra = await_restart(intro, sup, "a", a0, deadline)
       let rb = await_restart(intro, sup, "b", b0, deadline)
       let rc = await_restart(intro, sup, "c", c0, deadline)
@@ -112,7 +112,7 @@ mod SupervisorConcurrentChildCrash do
   -- Wait until the supervisor has taken Nap off its queue, i.e. is inside
   -- the handler.
   fn await_dequeued(sup, deadline) do
-    if mailbox_size(sup) == 0 || unix_time_ms() >= deadline do
+    if mailbox_size(sup) == 0 || Authority.must(System.now_ms()) >= deadline do
       0
     else
       sleep_ms(1)
@@ -130,7 +130,7 @@ mod SupervisorConcurrentChildCrash do
     let sup2 = spawn(Sup)
     let old_a = child_int(sup2, "a")
     send(sup2, Nap(500))
-    let _ = await_dequeued(sup2, unix_time_ms() + 20000)
+    let _ = await_dequeued(sup2, Authority.must(System.now_ms()) + 20000)
     kill(Actor.pid_from_int(intro, old_a))
     match Actor.call(sup2, GetReq, 20000) do
       Ok(a) ->

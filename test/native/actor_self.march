@@ -22,7 +22,8 @@ mod ActorSelf do
 
   pfn note(p) : () do
     let _ = p
-    print_line("handler holds its own pid")
+    IO.puts("handler holds its own pid")
+    ()
   end
 
   actor A do
@@ -38,6 +39,6 @@ mod ActorSelf do
     let p = spawn(A)
     send(p, Check())
     run_until_idle()
-    print_line("done")
+    IO.puts("done")
   end
 end

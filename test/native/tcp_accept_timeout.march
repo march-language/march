@@ -23,7 +23,7 @@ mod TcpAcceptTimeout do
       Ok(_) -> println("nobody dialed, yet accepted")
       Err(e) -> println("no client: " ++ Socket.error_message(e))
     end
-    let dialer = task_spawn(fn _ -> do
+    let dialer = Authority.must(Task.async(fn () -> do
       sleep_ms(100)
       match Authority.must(Socket.connect("127.0.0.1", port)) do
         Ok(s) ->
@@ -31,7 +31,7 @@ mod TcpAcceptTimeout do
           1
         Err(_) -> 0
       end
-    end)
+    end))
     match Socket.accept_timeout(l, 5000) do
       Ok(s) ->
         println("client accepted")

@@ -215,11 +215,11 @@ fn main(_cap_console : Cap(IO.Console), _cap_mut : Cap(IO.Mut), _cap_netlisten :
   println("  GET /_bastion      dev dashboard")
   println("  GET /static/**     priv/static/ file serving")
   println("")
-  HttpServer.new(4000)
+  Authority.must(HttpServer.new(4000)
   |> HttpServer.plug(fn conn -> BastionDev.request_timer(conn))
   |> HttpServer.plug(router)
   |> HttpServer.plug(fn conn -> BastionDev.inject_live_reload(conn))
-  |> HttpServer.listen()
+  |> HttpServer.listen())
 end
 
 end -- mod DemoApp

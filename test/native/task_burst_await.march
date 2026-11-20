@@ -30,8 +30,8 @@ mod TaskBurstAwait do
   -- Each task returns work(16)+i = 987 + i.  Sum over i=0..count-1.
   pfn round(count : Int) : Int do
     let ids = List.range(0, count)
-    let tasks = List.map(ids, fn i -> task_spawn(fn _ -> work(16) + i))
-    let results = List.map(tasks, fn t -> task_await_unwrap(t))
+    let tasks = List.map(ids, fn i -> Task.async(fn () -> work(16) + i))
+    let results = List.map(tasks, fn t -> task_await_unwrap(Authority.must(t)))
     List.fold_left(results, 0, fn (acc, r) -> acc + r)
   end
 

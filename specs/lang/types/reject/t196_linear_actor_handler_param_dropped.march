@@ -8,7 +8,7 @@ mod Main do
     state { n : Int }
     init  { n: 0 }
     on Take(s : S) do
-      print_line("ignored the resource")
+      IO.puts("ignored the resource")
       { state with n: state.n + 1 }
     end
   end

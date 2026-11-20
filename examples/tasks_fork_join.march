@@ -28,8 +28,8 @@ fn par_sum(lo : Int, hi : Int, threshold : Int) : Int do
   if hi - lo <= threshold do sum_range(lo, hi)
   else do
     let mid = lo + (hi - lo) / 2
-    let left  = task_spawn(fn x -> par_sum(lo, mid, threshold))
-    let right = task_spawn(fn x -> par_sum(mid + 1, hi, threshold))
+    let left  = Authority.must(Task.async(fn () -> par_sum(lo, mid, threshold)))
+    let right = Authority.must(Task.async(fn () -> par_sum(mid + 1, hi, threshold)))
     let l = task_await_unwrap(left)
     let r = task_await_unwrap(right)
     l + r end
@@ -61,8 +61,8 @@ fn max_collatz(lo : Int, hi : Int, threshold : Int) : Int do
     max_collatz_seq(lo, hi, 0)
   else
     let mid = lo + (hi - lo) / 2
-    let left  = task_spawn(fn x -> max_collatz(lo, mid, threshold))
-    let right = task_spawn(fn x -> max_collatz(mid + 1, hi, threshold))
+    let left  = Authority.must(Task.async(fn () -> max_collatz(lo, mid, threshold)))
+    let right = Authority.must(Task.async(fn () -> max_collatz(mid + 1, hi, threshold)))
     let l = task_await_unwrap(left)
     let r = task_await_unwrap(right)
     max_val(l, r)

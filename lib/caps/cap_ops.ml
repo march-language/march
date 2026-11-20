@@ -83,8 +83,8 @@ let table : (string * cls) list = [
   (* IO.Spawn *)
   ("task_spawn",             c ["Task.async"]);
   ("task_spawn_link",        c ["Task.async"]);
-  ("task_spawn_steal",       c ["Task.async"]);
-  ("task_spawn_with_cancel", c ["Task.async"]);
+  ("task_spawn_steal",       c ["Task.async_steal"]);
+  ("task_spawn_with_cancel", c ["Task.async_cancellable"]);
   ("get_work_pool",          Use);
   (* IO.Mut: opening a table by name is checked; using it is not *)
   ("vault_new",              c ["Vault.new"]);
@@ -102,9 +102,10 @@ let table : (string * cls) list = [
   ("vault_reap",             Use);
   ("vault_close",            Use);
   (* IO.Registry (ocap p2b): finding an actor by name and registering one are
-     opens.  Charged at compile time and judged against name scopes; the
-     run-time Authority.check (and a Result return) arrives with phase 4, so
-     the stdlib wrappers are allowlisted in test/test_cap_check_coverage.ml.
+     opens.  Charged at compile time and judged against name scopes; there is
+     no run-time Authority.check (or Result return) yet, so the stdlib
+     wrappers are allowlisted in test/test_cap_check_coverage.ml
+     (specs/todos/2026-11-19-ocap-registry-runtime-check.md).
      actor_whereis / actor_registered were already stdlib-only. *)
   ("actor_register",         c ~gated:false ["Actor.register"]);
   ("actor_unregister",       c ~gated:false ["Actor.unregister"]);
@@ -119,3 +120,27 @@ let gated =
       | (n, Checked { entry; gated = true }) -> Some (n, entry)
       | _ -> None)
     table
+
+let shadowed_by_stdlib = [ "println" ]
+
+let rename_differs = [
+  ("print_stderr", "`IO.warn` adds a newline");
+  ("task_spawn", "`Task.async` takes a zero-argument function");
+  ("task_spawn_link", "`Task.async` takes a zero-argument function and links nothing");
+  ("task_spawn_steal", "`Task.async_steal` takes a zero-argument function");
+  ("task_spawn_with_cancel", "`Task.async_cancellable` takes a zero-argument function");
+]
+
+let stdlib_only_hint name =
+  let hint =
+    match List.assoc_opt name gated with
+    | None | Some [] -> None
+    | Some [ e ] -> Some (Printf.sprintf "use `%s`" e)
+    | Some (e :: rest) ->
+      Some (Printf.sprintf "use `%s` (or %s)" e
+              (String.concat ", " (List.map (Printf.sprintf "`%s`") rest))) in
+  (* A row with no machine fix says why in the hint, so "use `IO.warn`"
+     does not read as a drop-in. *)
+  match hint, List.assoc_opt name rename_differs with
+  | Some h, Some why -> Some (Printf.sprintf "%s (%s)" h why)
+  | h, _ -> h

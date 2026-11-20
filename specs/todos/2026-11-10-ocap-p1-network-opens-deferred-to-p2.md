@@ -6,7 +6,9 @@ Task 10). Phase 1 made `Socket.connect`, `Socket.connect_timeout`,
 return `Result(Result(_, E), CapError)`. These still do neither:
 
 - ~~`Udp.open_with` (and `open`, `open_sharded`)~~ (done at the phase 2b merge,
-  2026-11-11: specs/progress/2026-11-11-ocap-p2b-merge-p1-wrapping.md), `Udp.resolve`;
+  2026-11-11: specs/progress/2026-11-11-ocap-p2b-merge-p1-wrapping.md),
+  ~~`Udp.resolve`~~ (done in ocap phase 4, 2026-11-19:
+  specs/progress/2026-11-19-ocap-p4-network-opens-checked.md);
   ~~`Udp.connect`, `Udp.send_batch`, `Udp.send_batch_connected`, `Udp.send_many`~~
   (not operations since ocap phase 2b Task 10, 2026-11-12: they act on a
   `Udp.UdpSocket` the caller holds, so their builtins left `builtin_cap_table`;
@@ -20,7 +22,10 @@ return `Result(Result(_, E), CapError)`. These still do neither:
 - `HttpTransport.connect`, `request`, `simple_get` (they now dial through the checked
   `Socket.connect`; a refusal is folded into `Refused(reason)` until they are re-typed) (and the private
   `request_plain`, `request_https_with_context` that dial), so `HttpClient.*`;
-- `HttpServer.listen`, `spawn_n`, `bind_host`, `plain_listener`.
+- ~~`HttpServer.listen`, `spawn_n`, `bind_host`, `plain_listener`~~ (done in ocap
+  phase 4, 2026-11-19: they check `IO.NetListen` and return
+  `Result(T, CapError)`; `plain_listener` only records a port, which `listen` and
+  `spawn_n` check; specs/progress/2026-11-19-ocap-p4-network-opens-checked.md).
 
 Why deferred: every one of them opens a handle (a UDP socket, a TLS context, an
 HTTP connection, a listener) that ocap phase 2 re-types as an opaque handle, and
@@ -44,3 +49,16 @@ returns `Result(Result(Handle, E), CapError)` by the owner's strict rule
 `PathRefused`, which move to the outer `CapError` (`ByModNeeds`).
 test/test_cap_check_coverage.ml lists them with this file as the reason; its
 allowlist rows go when they are done.
+
+Status after ocap phase 4 (2026-11-19): the `HttpServer` opens and
+`Udp.resolve` are checked operations returning `Result(T, CapError)`
+(nested, `Result(Result(UdpAddr, UdpError), CapError)`, only for
+`Udp.resolve`: the `HttpServer` opens had no inner error type), and their
+allowlist rows are gone (specs/progress/2026-11-19-ocap-p4-network-opens-checked.md).
+What stays open here is only the re-typing of the dials that already check:
+`HttpTransport.connect`/`request`/`simple_get` (so `HttpClient.*`, about 200
+call sites) and `Tls.https_get` still return their single Result and fold a
+refusal into `Refused(reason)` / `TlsHandshakeFailed`; re-typing them to
+`Result(Result(_, E), CapError)` (and moving `HttpError`'s `OutOfScope`,
+`MethodRefused`, `PathRefused` to the outer `CapError`) is deferred past
+phase 4 (decision 7 of specs/plans/2026-11-15-ocap-p4-runtime-plan.md).

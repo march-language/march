@@ -13,6 +13,6 @@ mod Main do
     end
   end
   fn main(c : Cap(IO.Console)) do
-    print_line(int_to_string(mine(List.find([1, 2], fn x -> x > 1))))
+    IO.puts(int_to_string(mine(List.find([1, 2], fn x -> x > 1))))
   end
 end

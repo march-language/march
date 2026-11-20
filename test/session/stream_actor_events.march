@@ -57,10 +57,10 @@ mod StreamActorEvents do
     on DeliverP(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
       match Stream_Prod.resume(state.parked, from, msg, ep) do
         Got_More(_b, st) ->
-          print_line("Prod got More")
+          IO.puts("Prod got More")
           { state with parked: step_prod(s, st, state.next), next: state.next + 1 }
         Got_Done(_b, st) ->
-          print_line("Prod got Done")
+          IO.puts("Prod got Done")
           { state with parked: Stream_Prod.finish(s, st) }
       end
     end
@@ -68,7 +68,7 @@ mod StreamActorEvents do
 
   -- At the loop head Prod sends, then awaits the offer.
   pfn step_prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Parked_Prod do
-    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    IO.puts("Prod sends Item(" ++ int_to_string(next) ++ ")")
     Stream_Prod.await_more_done(s, Stream_Prod.send_Msg_Prod_Cons_1(s, st, next))
   end
 
@@ -82,7 +82,7 @@ mod StreamActorEvents do
     on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
       match Stream_Cons.resume(state.parked, from, msg, ep) do
         Got_Msg_Prod_Cons_1(n, st) ->
-          print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+          IO.puts("Cons got Item(" ++ int_to_string(n) ++ ")")
           -- The step reads the actor's own state: this is what the event API
           -- is for.
           if state.budget > 1 do
@@ -118,7 +118,7 @@ mod StreamActorEvents do
   end
 
   fn main(c : Cap(IO)) do
-    let t = Session.in_process_with(fn line -> print_line(line))
+    let t = Session.in_process_with(fn line -> Authority.ignore(IO.puts(line)))
     let s = Session.attach(c, t.ops)
     let pc = spawn(ConsActor)
     let pp = spawn(ProdActor)

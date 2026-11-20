@@ -3,15 +3,15 @@ exit: 1
 
 expected `B.Note` but got `A.Note`. [type_mismatch]
 
-24 |     print_line(B.describe(A.make()))
-                               ^^^^^^^^
+24 |     IO.puts(B.describe(A.make()))
+                            ^^^^^^^^
 
     This is argument #1 of `B.describe`, its parameter `n`.
 
     the expected type comes from here:
 
-24 |     print_line(B.describe(A.make()))
-                    ^^^^^^^^^^^^^^^^^^^^
+24 |     IO.puts(B.describe(A.make()))
+                 ^^^^^^^^^^^^^^^^^^^^
     run `march --explain type_mismatch`
 
 

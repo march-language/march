@@ -5,9 +5,23 @@ exit: 1
 
 Remove the `needs` line, and move the code that needs it to a module without `cap pure`.
 
-22 |   needs IO.FileWrite
+26 |   needs IO.FileWrite
        ^^^^^^^^^^^^^^^^^^
 
+
+
+-- PROGRAM ---------------- errors/pure_violation_1.march
+
+`file_write` is internal to the standard library; use `File.write`. [stdlib_internal]
+
+30 |     file_write(path, contents)
+         ^^^^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+30 -     file_write(path, contents)
+30 +     Authority.must(File.write(path, contents))
 
 
 -- CONTRACT --------------- errors/pure_violation_1.march
@@ -16,7 +30,7 @@ Remove the `needs` line, and move the code that needs it to a module without `ca
 
 Use pure functions (no IO, spawn, vault, clock, or random ops) in a `cap pure` module.
 
-26 |     file_write(path, contents)
+30 |     file_write(path, contents)
          ^^^^^^^^^^
 
 
@@ -25,7 +39,7 @@ Use pure functions (no IO, spawn, vault, clock, or random ops) in a `cap pure` m
 
 expected `Result((), String)` but got `Result((), FileError)`. [type_mismatch]
 
-26 |     file_write(path, contents)
+30 |     file_write(path, contents)
          ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     This is the declared return type of `write`.
@@ -35,8 +49,11 @@ expected `Result((), String)` but got `Result((), FileError)`. [type_mismatch]
 
     the expected type comes from here:
 
-25 |   fn write(path : String, contents : String) : Result(Unit, String) do
+29 |   fn write(path : String, contents : String) : Result(Unit, String) do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     run `march --explain type_mismatch`
 
 
+
+after fix: exit 1
+`mod LeakyPure` (declared `cap pure`) declares `needs IO.FileWrite`, but a pure module cannot hold a capability: `needs` exists only to admit side effects, directly or through a stdlib wrapper such as `File.read` or `DateTime.now`. [pure_violation]

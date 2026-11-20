@@ -2051,8 +2051,10 @@ let test_show_user_impl () =
 
 let test_println_polymorphic_typecheck () =
   (* Verify that a user-defined fn println(x) using show can accept any Show type,
-     matching the behaviour of the prelude's polymorphic println. *)
-  let ctx = typecheck {|mod Test do
+     matching the behaviour of the prelude's polymorphic println.  The raw
+     `print` is stdlib-only since ocap phase 4; this is about println's
+     typing, so the gate is lifted around it. *)
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod Test do
   needs IO.Console
     fn println(x) do
       print(show(x))
@@ -2062,7 +2064,7 @@ let test_println_polymorphic_typecheck () =
       println(42)
       println(true)
     end
-  end|} in
+  end|}) in
   Alcotest.(check bool) "polymorphic println accepts Show types" false (has_errors ctx)
 
 let test_hash_builtin_int () =
@@ -5562,14 +5564,14 @@ let test_zero_arg_unit_call_returns_result () =
 (* GREEN-STAYS-GREEN guard: the pre-existing thunk idiom `fn _ -> body`
    (a 1-arg discard, the shape task_spawn's callback expects) is unaffected. *)
 let test_discard_arg_thunk_still_accepts () =
-  let ctx = typecheck {|mod Main do
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod Main do
   needs IO.Console
     needs IO.Spawn
     fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
       let _t = task_spawn(fn _ -> 42)
       println("spawned")
     end
-  end|} in
+  end|}) in
   Alcotest.(check bool) "task_spawn(fn _ -> 42) still accepted"
     false (has_errors ctx)
 
@@ -6811,7 +6813,7 @@ let test_endpoints_check_linear_in_protocols () =
   done;
   Buffer.add_string b "  fn main(c : Cap(IO)) do\n";
   for i = 0 to n - 1 do
-    Buffer.add_string b (Printf.sprintf "    print_line(int_to_string(run%d(c)))\n" i)
+    Buffer.add_string b (Printf.sprintf "    println(int_to_string(run%d(c)))\n" i)
   done;
   Buffer.add_string b "    ()\n  end\nend\n";
   let (_project_root, main_exe, src, tmp) =
@@ -10391,14 +10393,18 @@ let test_cap_pure_file_read_error () =
   end|} in
   Alcotest.(check bool) "cap pure + file_read (real builtin): error" true (has_errors ctx)
 
-(* `random_bytes : Int -> Bytes` — total, so `: Bytes` is type-correct. *)
+(* `random_bytes : Int -> Bytes` — total, so `: Bytes` is type-correct.
+   The raw builtin is stdlib-only since ocap phase 4, so the gate is lifted
+   here and the assertion names `cap pure`'s own call-level error (the gate's
+   `stdlib_internal` would satisfy a bare `has_errors`). *)
 let test_cap_pure_random_bytes_error () =
-  let ctx = typecheck {|mod Pure do
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod Pure do
   needs IO.Random
     cap pure
     fn gen() : Bytes do random_bytes(16) end
-  end|} in
-  Alcotest.(check bool) "cap pure + random_bytes (real builtin): error" true (has_errors ctx)
+  end|}) in
+  Alcotest.(check bool) "cap pure + random_bytes (real builtin): error" true
+    (has_error_with ctx "calls `random_bytes`, which has side effects")
 
 let test_cap_no_extern_regular_fn_ok () =
   let ctx = typecheck {|mod Safe do
@@ -10453,13 +10459,13 @@ let test_cap_deterministic_unix_time_ms_error () =
    left to inference here — annotating it `Result(String, String)` would
    fail with a genuine (and unrelated to this test) type mismatch. *)
 let test_cap_deterministic_file_read_ok () =
-  let ctx = typecheck {|mod Det do
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod Det do
   needs IO.FileRead
     cap deterministic
     fn load(path : String) do
       file_read(path)
     end
-  end|} in
+  end|}) in
   Alcotest.(check bool) "cap deterministic + file_read: no error (weaker than pure)"
     false (has_errors ctx)
 
@@ -11730,9 +11736,9 @@ let test_cap_body_missing_filewrite () =
 
 (* Module without `needs` that calls random_bytes — body-scan emits warning. *)
 let test_cap_body_missing_random () =
-  let ctx = typecheck {|mod Gen do
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod Gen do
     fn token() do random_bytes(16) end
-  end|} in
+  end|}) in
   Alcotest.(check bool) "random_bytes without needs: body-scan ERROR" true
     (has_error_with ctx "IO.Random")
 
@@ -14007,7 +14013,7 @@ let test_grant_violation_names_the_user_module () =
 let test_grant_full_io_accepts_everything () =
   (* `needs IO` is Check 1's requirement for the Cap(IO) SIGNATURE — the
      established entry-point convention (test/native/main_cap_io.march). *)
-  let ctx = typecheck {|mod GrantFull do
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod GrantFull do
     needs IO
     fn main(cap : Cap(IO)) : () do
       match file_write("/tmp/grant_f", "d") do
@@ -14015,7 +14021,7 @@ let test_grant_full_io_accepts_everything () =
         Err(_) -> Authority.ignore(println("e"))
       end
     end
-  end|} in
+  end|}) in
   Alcotest.(check bool) "Cap(IO) grants everything" false (has_errors ctx)
 
 let test_grant_absent_is_ambient () =
@@ -14041,7 +14047,7 @@ let test_grant_absent_is_ambient () =
      parameters, and with neither it is the module's `needs` line, which is
      a declaration, not ambience.  A module that declares nothing still
      grants nothing. *)
-  let ctx = typecheck {|mod GrantLegacy do
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod GrantLegacy do
     needs IO.Console
     needs IO.FileWrite
     fn main() : () do
@@ -14050,7 +14056,7 @@ let test_grant_absent_is_ambient () =
         Err(_) -> Authority.ignore(println("e"))
       end
     end
-  end|} in
+  end|}) in
   Alcotest.(check bool)
     "with no clause and no Cap parameter, the module's needs line is the grant"
     false (has_errors ctx);
@@ -14153,7 +14159,7 @@ let test_fn_grant_multi_cap_params_union () =
      source-shape regression pin that several concrete `Cap(P)` parameters on
      one signature still typecheck together now that no per-function ceiling
      reads them. *)
-  let ctx = typecheck {|mod FnGrantMulti do
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod FnGrantMulti do
     needs IO.Console
     needs IO.FileWrite
     fn both(c : Cap(IO.Console), w : Cap(IO.FileWrite), msg : String) : () do
@@ -14165,7 +14171,7 @@ let test_fn_grant_multi_cap_params_union () =
     fn main() : () do
       ()
     end
-  end|} in
+  end|}) in
   Alcotest.(check bool) "every parameter's capability counts toward the grant"
     false (has_errors ctx)
 
@@ -14174,7 +14180,7 @@ let test_fn_grant_polymorphic_cap_param_is_no_gate () =
      typed).  It names no lattice point, so it grants nothing and must create
      no discharge point — otherwise every narrowing helper would be refused
      for reaching capabilities it only forwards. *)
-  let ctx = typecheck {|mod FnGrantPoly do
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod FnGrantPoly do
     needs IO
     fn forward(c : Cap(a)) : Cap(a) do
       c
@@ -14188,7 +14194,7 @@ let test_fn_grant_polymorphic_cap_param_is_no_gate () =
     fn main() : () do
       ()
     end
-  end|} in
+  end|}) in
   Alcotest.(check bool) "a Cap(a) parameter creates no discharge point"
     false (has_errors ctx)
 
@@ -14230,7 +14236,7 @@ let test_fn_grant_full_io_accepts_untraceable_invocation () =
     false (has_errors ctx)
 
 let test_fn_grant_dead_code_is_not_charged () =
-  let ctx = typecheck {|mod FnGrantDead do
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod FnGrantDead do
     needs IO.Console
     needs IO.FileWrite
     fn never_called() : () do
@@ -14246,7 +14252,7 @@ let test_fn_grant_dead_code_is_not_charged () =
     fn main() : () do
       ()
     end
-  end|} in
+  end|}) in
   Alcotest.(check bool) "a capability the function does not reach costs nothing"
     false (has_errors ctx)
 
@@ -14378,7 +14384,7 @@ let test_cap_param_does_not_force_threading () =
      `Cap(IO)` included — hence `needs IO` alongside the narrower needs
      `handle` uses; that requirement is unrelated to and unweakened by this
      task, see the module ceiling assertion in the next test. *)
-  let ctx = typecheck {|mod NoThread do
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod NoThread do
     needs IO.Console
     needs IO.FileWrite
     needs IO
@@ -14392,7 +14398,7 @@ let test_cap_param_does_not_force_threading () =
     fn main(cap : Cap(IO)) : () do
       handle(cap_narrow(cap), "x")
     end
-  end|} in
+  end|}) in
   Alcotest.(check bool)
     "a Cap parameter does not impose a per-function ceiling"
     false (has_errors ctx)
@@ -14473,7 +14479,7 @@ let test_main_unknown_cap_path_still_rejected () =
     end|})
 
 let test_main_grant_is_the_union_of_its_cap_params () =
-  let ctx = typecheck {|mod StageDUnion do
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod StageDUnion do
     needs IO.Console
     needs IO.Spawn
     fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn)) : () do
@@ -14481,7 +14487,7 @@ let test_main_grant_is_the_union_of_its_cap_params () =
       let _t = task_spawn(fn _ -> println("worker"))
       ()
     end
-  end|} in
+  end|}) in
   Alcotest.(check bool) "a program reaching both granted caps is accepted"
     false (has_errors ctx)
 

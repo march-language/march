@@ -18,7 +18,7 @@ mod Main do
   needs IO.Console
 
 pfn show_it(x) do
-  print(to_string(x))
+  IO.write(to_string(x))
 end
 
 fn call_with_list(callback) do

@@ -19,7 +19,7 @@ mod CapMockActor do
     state { n : Int }
     init  { n: 0 }
     on Say(s : String) do
-      print_line("A:" ++ s)
+      IO.puts("A:" ++ s)
       { state with n: state.n + 1 }
     end
   end
@@ -27,7 +27,7 @@ mod CapMockActor do
   fn main(c : Cap(IO.Console)) do
     let outside = spawn(Logger)
     let mock = cap_impl(c, { cap_ops_empty(c) with
-      print_line: Some(fn s -> print("MOCK[" ++ s ++ "]\n")) })
+      print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) })
     with_cap(mock, fn _ -> do
       let inside = spawn(Logger)
       send(inside, Say("in"))

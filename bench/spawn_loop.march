@@ -11,7 +11,7 @@ mod SpawnLoop do
 pfn go(i : Int, n : Int, acc : Int) : Int do
   if i >= n do acc
   else do
-    let t = task_spawn(fn _ -> i % 7)
+    let t = Authority.must(Task.async(fn () -> i % 7))
     go(i + 1, n, acc + task_await_unwrap(t))
   end end
 end

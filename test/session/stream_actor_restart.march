@@ -94,10 +94,10 @@ mod StreamActorRestart do
           Vault.set(handlers, ekey(ep), handler)
           ep
         end,
-        close: fn ep -> print_line("close " ++ int_to_string(ep)),
+        close: fn ep -> Authority.ignore(IO.puts("close " ++ int_to_string(ep))),
         fail: fn (_ep, why) -> panic(why),
         on_cancel: fn (ep, _h) -> ep,
-        leave: fn (ep, why) -> print_line("leave " ++ int_to_string(ep) ++ ": " ++ why),
+        leave: fn (ep, why) -> Authority.ignore(IO.puts("leave " ++ int_to_string(ep) ++ ": " ++ why)),
         on_crash: fn (ep, _r, _h) -> ep,
         -- D27: this transport never drains, so a loop-head receive is a
         -- plain suspend and a drain handler is never called.
@@ -145,20 +145,20 @@ mod StreamActorRestart do
 
   -- ── the endpoints, identical to the function-hosted fixture ────────────
   pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Yield do
-    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    IO.puts("Prod sends Item(" ++ int_to_string(next) ++ ")")
     let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
     Stream_Prod.offer_more_done(s, st1,
       fn (_b, st2) ->
-        print_line("Prod got More")
+        IO.puts("Prod got More")
         prod(s, st2, next + 1),
       fn (_b, st2) ->
-        print_line("Prod got Done")
+        IO.puts("Prod got Done")
         Stream_Prod.close(s, st2))
   end
 
   pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1, budget : Int) : Stream_Cons.Yield do
     Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
-      print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+      IO.puts("Cons got Item(" ++ int_to_string(n) ++ ")")
       if budget > 1 do
         let st2 = Stream_Cons.choose_more(s, st1, true)
         cons(s, st2, budget - 1)
@@ -215,7 +215,7 @@ mod StreamActorRestart do
     route_one(owners, handlers, pending)
     let pc2 = spawn(Ep)
     own(owners, 2, pc2)
-    print_line("-- Cons actor replaced --")
+    IO.puts("-- Cons actor replaced --")
     route(owners, handlers, pending)
   end
 

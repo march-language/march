@@ -31,19 +31,19 @@ mod RRBBench do
     let t0 = System.monotonic_time()
     let seq_sum = RRB.fold_left(v, 0, fn (acc, x) -> acc + x)
     let t1 = System.monotonic_time()
-    print("seq_sum=" ++ int_to_string(seq_sum) ++ "  seq_fold_left: " ++ int_to_string(t1 - t0) ++ "ms")
+    IO.write("seq_sum=" ++ int_to_string(seq_sum) ++ "  seq_fold_left: " ++ int_to_string(t1 - t0) ++ "ms")
 
     -- 2. Parallel sum via Parallel.psum
     let t2 = System.monotonic_time()
     let par_sum = Parallel.psum(v)
     let t3 = System.monotonic_time()
-    print("par_sum=" ++ int_to_string(par_sum) ++ "  psum: " ++ int_to_string(t3 - t2) ++ "ms")
+    IO.write("par_sum=" ++ int_to_string(par_sum) ++ "  psum: " ++ int_to_string(t3 - t2) ++ "ms")
 
     -- 3. preduce: square then sum in one parallel pass
     let t4 = System.monotonic_time()
     let par_reduce_sum = Parallel.preduce(v, 0, fn x -> x * x, fn (a, b) -> a + b)
     let t5 = System.monotonic_time()
-    print("par_reduce_sum=" ++ int_to_string(par_reduce_sum) ++ "  preduce: " ++ int_to_string(t5 - t4) ++ "ms")
+    IO.write("par_reduce_sum=" ++ int_to_string(par_reduce_sum) ++ "  preduce: " ++ int_to_string(t5 - t4) ++ "ms")
 
     -- 4. Parallel map (small n=1000 to avoid O(n^2) list-push cost)
     let n2 = 1000
@@ -52,7 +52,7 @@ mod RRBBench do
     let sq = Parallel.pmap(v2, fn x -> x * x)
     let par_map_sum = RRB.fold_left(sq, 0, fn (acc, x) -> acc + x)
     let t7 = System.monotonic_time()
-    print("par_map_sum=" ++ int_to_string(par_map_sum) ++ "  pmap+fold (n=1000): " ++ int_to_string(t7 - t6) ++ "ms")
+    IO.write("par_map_sum=" ++ int_to_string(par_map_sum) ++ "  pmap+fold (n=1000): " ++ int_to_string(t7 - t6) ++ "ms")
   end
 
 end

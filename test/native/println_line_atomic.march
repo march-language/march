@@ -38,10 +38,10 @@ mod Main do
   end
 
   fn main(cap: Cap(IO)) do
-    let t1 = task_spawn(fn _ -> spew("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 300))
-    let t2 = task_spawn(fn _ -> spew("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", 300))
-    let t3 = task_spawn(fn _ -> spew("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", 300))
-    let t4 = task_spawn(fn _ -> spew("DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", 300))
+    let t1 = Authority.must(Task.async(fn () -> spew("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 300)))
+    let t2 = Authority.must(Task.async(fn () -> spew("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", 300)))
+    let t3 = Authority.must(Task.async(fn () -> spew("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", 300)))
+    let t4 = Authority.must(Task.async(fn () -> spew("DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", 300)))
     let _ = task_await(t1)
     let _ = task_await(t2)
     let _ = task_await(t3)

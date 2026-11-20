@@ -9,7 +9,7 @@ mod Main do
     let a = G.S(1)
     let x = G.step(a)
     let y = G.step(a)
-    print_line(int_to_string(x + y))
+    IO.puts(int_to_string(x + y))
   end
   mod G do
     always_linear type S = S(Int)

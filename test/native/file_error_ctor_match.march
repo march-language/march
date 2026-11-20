@@ -1,5 +1,5 @@
 -- Application code can branch on a file error's CONSTRUCTOR, on both backends.
--- The file_*/dir_* builtins denote the canonical bare `FileError`
+-- The file_*/dir_* builtins (behind File.read / Dir.list) denote the canonical bare `FileError`
 -- (stdlib/file.march's `ptype` inside `mod File`); a cross-module constructor
 -- used to register a QUALIFIED parent type (`File.FileError`), which could
 -- never unify with it, so `Err(File.NotFound(p))` was unmatchable and a bare
@@ -32,7 +32,7 @@ mod FileErrorCtorMatch do
   end
 
   fn main(_cap : Cap(IO)) do
-    println(classify(file_read("/nonexistent/zzz")))
-    println(dir_kind(dir_list("/nonexistent/zzz")))
+    println(classify(Authority.must(File.read("/nonexistent/zzz"))))
+    println(dir_kind(Authority.must(Dir.list("/nonexistent/zzz"))))
   end
 end

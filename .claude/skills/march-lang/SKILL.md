@@ -842,9 +842,9 @@ fn router(conn) do
 end
 
 fn main() do
-  HttpServer.new(8080)
+  Authority.must(HttpServer.new(8080)
   |> HttpServer.plug(router)
-  |> HttpServer.listen()
+  |> HttpServer.listen())
 end
 end
 ```
@@ -874,9 +874,9 @@ pfn par_sum(t : Tree, depth : Int, threshold : Int) : Int do
   Node(l, r) ->
     if depth >= threshold do sum(l) + sum(r)
     else
-      let tl = task_spawn(fn () -> par_sum(l, depth + 1, threshold))
-      let tr = task_spawn(fn () -> par_sum(r, depth + 1, threshold))
-      task_await_unwrap(tl) + task_await_unwrap(tr)
+      let tl = Authority.must(Task.async(fn () -> par_sum(l, depth + 1, threshold)))
+      let tr = Authority.must(Task.async(fn () -> par_sum(r, depth + 1, threshold)))
+      Task.await_unwrap(tl) + Task.await_unwrap(tr)
     end
   end
 end
@@ -1026,7 +1026,8 @@ Directly callable without module qualification (built into the evaluator).
 
 | Builtin | Description |
 |---------|-------------|
-| `print(x)` / `println(x)` | Print; `println` returns `Result((), CapError)` |
+| `println(x)` | Print a line; returns `Result((), CapError)` |
+| `IO.write(s)` / `IO.puts(s)` / `IO.warn(s)` | Write (no newline) / line / stderr line; each returns `Result((), CapError)`. The raw `print`, `print_line`, `print_stderr` builtins are stdlib-only |
 | `print_int(n)` / `print_float(f)` | Typed print |
 | `read_line()` | Read from stdin |
 | `tap(x)` | Print and return |
@@ -1082,13 +1083,13 @@ leaves it (`Escapes`). A handle never leaves its node: a message type holding on
 
 | Builtin | Description |
 |---------|-------------|
-| `task_spawn(f)` | Spawn task |
+| `Task.async(fn () -> e)` | Spawn task; returns `Result(Task(a), CapError)` (the raw `task_spawn*` builtins are stdlib-only) |
 | `task_await(t)` | Await result |
 | `task_await_unwrap(t)` | Await and unwrap |
 | `task_poll(t)` | Non-blocking: `None` while running, else `Some(task_await(t))` (`Task.poll`) |
 | `task_yield()` | Yield scheduler |
-| `task_spawn_steal(f)` | Work-stealing spawn |
-| `task_spawn_link(f)` | Linked task spawn |
+| `Task.async_steal(pool, fn () -> e)` | Work-stealing spawn |
+| `Task.async_cancellable(fn () -> e, token)` | Cancellable spawn |
 
 ### Network / TLS
 
@@ -1111,24 +1112,28 @@ The raw descriptor builtins (`tcp_*`, `udp_*`, `tls_*`, `file_open`, `process_sp
 | `hmac_sha256(key, data)` | HMAC-SHA256 |
 | `pbkdf2_sha256(pass, salt, iter, len)` | PBKDF2 |
 | `base64_encode(data)` / `base64_decode(s)` | Base64 |
-| `random_bytes(n)` | Secure random bytes |
-| `uuid_v4()` | Generate UUID v4 |
+| `Crypto.random_bytes(n)` | Secure random bytes; returns `Result(Bytes, CapError)` (raw `random_bytes` is stdlib-only) |
+| `UUID.v4()` | Generate UUID v4; returns `Result(UUID, CapError)` |
 | `md5(data)` | MD5 hash |
 
 ### System
 
 | Builtin | Description |
 |---------|-------------|
-| `unix_time()` | Current Unix timestamp |
+| `System.now()` / `System.now_ms()` | Current Unix time (s / ms); returns `Result(_, CapError)` |
 | `sys_uptime_ms()` | Uptime in ms |
 | `sys_heap_bytes()` | Heap memory usage |
 | `sys_cpu_count()` | CPU count |
 | `sys_actor_count()` | Live actor count |
-| `process_env(name)` / `process_set_env(name, val)` | Env vars |
-| `process_cwd()` | Working directory |
-| `process_exit(code)` | Exit process |
-| `process_argv()` | Command-line args |
-| `process_spawn_sync(cmd, args)` | Spawn subprocess |
+| `Process.env(name)` / `Process.set_env(name, val)` | Env vars |
+| `Process.cwd()` | Working directory |
+| `Process.exit(code)` | Exit process |
+| `Process.argv()` | Command-line args |
+| `Process.run(cmd, args)` | Run a subprocess to completion |
+
+The raw `process_*`, `unix_time*` and `uuid_*` builtins are stdlib-only; each of the
+entry points above returns `Result(T, CapError)` (wrap in `Authority.must(...)` for the
+plain value).
 
 ### Utility
 

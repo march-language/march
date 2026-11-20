@@ -97,7 +97,7 @@ let server_src = {|mod HttpNativeE2e do
   end
 
   fn port_from_env() do
-    match process_env("MARCH_TEST_HTTP_PORT") do
+    match Authority.must(Process.env("MARCH_TEST_HTTP_PORT")) do
     Some(s) ->
       match string_to_int(s) do
       Some(n) -> n
@@ -110,11 +110,11 @@ let server_src = {|mod HttpNativeE2e do
   fn main(_cap_netlisten : Cap(IO.NetListen), _cap_process : Cap(IO.Process)) do
     let port = port_from_env()
     if port == 0 do
-      process_exit(2)
+      Authority.ignore(Process.exit(2))
     else
-      HttpServer.new(port)
+      Authority.must(HttpServer.new(port)
       |> HttpServer.plug(router)
-      |> HttpServer.listen()
+      |> HttpServer.listen())
     end
   end
 

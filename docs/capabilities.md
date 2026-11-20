@@ -373,7 +373,8 @@ hint: add these to the module body —
 
 The error above is easy to over-read. What it covers:
 
-- It catches a **direct** call to a capability builtin: `file_read(p)`.
+- It catches a **direct** call to a capability builtin: `file_read(p)` (since ocap phase 4
+  only stdlib code can make one; a user program's direct call is a `stdlib_internal` error).
 - It does **not** catch, on its own, the same operation routed through a stdlib
   wrapper: `File.read(p)`. That call is invisible to *this* check. It is caught
   by the **capability upper limit** instead.
@@ -408,7 +409,7 @@ suggest a missing `needs` line. The walk described here is the actual check, use
 everywhere on this page.)
 
 `log` and `log_error` below take no `Cap` parameter at all, and the write still
-succeeds. The compiler follows the call graph down to `file_write` and finds that
+succeeds. The compiler follows the call graph down to `File.write` and finds that
 the *module* `Logger` declares `needs IO.FileWrite`:
 
 ```march
@@ -417,8 +418,7 @@ mod Logger do
   needs IO.FileWrite
 
   fn log(msg : String) : Unit do
-    let _ = file_write("/var/log/app.log", msg)
-    ()
+    Authority.ignore(File.write("/var/log/app.log", msg))
   end
 
   fn log_error(msg : String) : Unit do
@@ -877,10 +877,13 @@ An operation is refused at run time when it lies outside the current
 authority: `main`'s request, narrowed by `--grant` or `MARCH_GRANT` at launch
 and by each function `needs` clause it runs under; see
 [Run-time authority](#run-time-authority). UDP sockets and TLS contexts are handles opened by a
-checked open (`Udp.open`, `Tls.client_ctx`). `HttpClient`, `HttpServer`,
-`Tls.https_get` and `Udp.resolve` still return their old types and move with
-run-time authority (ocap phase 4); `HttpClient` and `Tls.https_get` already
-dial through `Socket.connect`, so their target is checked like any connect.
+checked open (`Udp.open`, `Tls.client_ctx`). `HttpServer.listen`, `spawn_n` and
+`bind_host` check `IO.NetListen` (on the port, a `plain_listener` port, the bind
+address) and return `Result((), CapError)` / `Result(Int, CapError)`;
+`Udp.resolve` checks `IO.NetConnect` on its `host:port` and returns
+`Result(Result(UdpAddr, UdpError), CapError)`. `HttpClient` and `Tls.https_get`
+still return their old types, but dial through `Socket.connect`, so their
+target is checked like any connect and a refusal is folded into their error.
 
 <a id="run-time-authority"></a>
 ### Run-time authority: `--grant`, `MARCH_GRANT` and scoped function `needs`
@@ -891,8 +894,9 @@ launch narrowed by whoever starts the program, a function value called far from 
 was made. So every running program also has a **current authority**, and each capability
 operation is checked against it. It works the same in the interpreter, `--jit`, the
 REPL, a compiled binary and `--target js` (the JS target has no tasks or actors);
-`test/cap_conformance/` runs every rule below in each of the five where it applies (the
-JS target skips those that need tasks or actors).
+`test/cap_conformance/` runs each of its fixtures in every one of the five that can run
+it (the JS target skips those that need tasks or actors). Not every rule below has a
+fixture yet.
 
 **The launch.** A program starts with `main`'s request (see [The grant](#grant)): its
 `needs` clause and `Cap(...)` parameters, or the module's `needs` line when it has
@@ -943,6 +947,9 @@ intersection), checked from the innermost out, and a refusal names the innermost
 refused (`ByFnNeeds(f)` with `f`'s clause, or `ByLaunch` with the grant text). A function
 already running under its own frame (its self-recursive calls) enters nothing again, so a
 self tail call stays a loop. When the function returns, the caller's authority is back.
+A panic that unwinds out of a function and is caught (by a supervisor, a task join, a test
+runner) restores the authority in force where the catch was entered, so the unwound
+function's clause is not left in force.
 
 Path scopes compare whole segments lexically: a relative target is resolved against the
 current directory, `.` and `..` are folded, and `/srvx/y` is not inside `/srv/`. Symlinks
@@ -975,9 +982,15 @@ well under a microsecond; entering a frame is a few tens of nanoseconds. Functio
 that reach a capability operation, a spawn or another function value carry one more word,
 but only in a program that has at least one frame.
 
-**Not yet enforced at run time.** A direct call of a raw builtin (`file_read(p)`) bypasses
-the run-time check, though not the compile-time one; the network opens of `HttpServer`
-and `Udp.resolve` are not checked yet. Authority does not travel with a remote child
+**Raw builtins are stdlib-only.** A program cannot call a raw capability builtin
+(`file_read(p)`, `unix_time_ms(())`, `task_spawn(f)`) directly: the reference is a
+`stdlib_internal` error that names the stdlib entry point to call instead (`File.read`,
+`System.now_ms`, `Task.async`, `Crypto.random_bytes`), which runs the run-time check
+first. Where the entry point takes the same arguments, the error carries the whole
+replacement call as its fix: `file_read(p)` becomes `Authority.must(File.read(p))`, which
+panics on a refusal.
+
+**Not yet enforced at run time.** Authority does not travel with a remote child
 started on another node: the receiving node runs it under its own launch authority
 (`specs/todos/2026-11-17-ocap-cross-node-authority.md`). A module's own scoped `needs`
 line is checked at compile time only, except as the program's request when it is the
@@ -1673,7 +1686,7 @@ that is `None` when not overridden. `march --emit-io-ops` prints the shapes.
 ```march
 fn main(c : Cap(IO.Console)) do
   let mock = cap_impl(c, { cap_ops_empty(c) with
-    print_line: Some(fn s -> print("MOCK[" ++ s ++ "]\n")) })
+    print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) })
   with_cap(mock, fn _ -> code_under_test())
 end
 ```
@@ -1698,7 +1711,7 @@ intercepted behaves exactly as it does today.
 | Not interceptable | Why |
 |---|---|
 | Polymorphic builtins — all of `vault_*`, so `IO.Mut` entirely | A dictionary field would need rank-2 types |
-| `println`, `random_bytes` | Shadowed by a stdlib March function, so the builtin is dead — intercept the `print_line` it delegates to |
+| `println`, `random_bytes` | A program reaches these through a stdlib March function (`Prelude.println`, `Crypto.random_bytes`), not through the builtin, and the stdlib is not elaborated; `println` can be intercepted through the `print_line` it delegates to |
 | An actor whose handlers reach **more than one** capability | The capability is captured at the spawn site onto the actor's runtime metadata, and that carries one. An actor reaching two would need a record of them captured instead — additive, not yet built |
 | Functions used as values rather than called directly | Their arity cannot change |
 

@@ -134,7 +134,7 @@ mod UserList do
       { name: "Alice", email: "alice@example.com", admin: true },
       { name: "Bob", email: "bob@example.com", admin: false }
     ]
-    print(IOList.to_string(render(users)))
+    Authority.ignore(IO.write(IOList.to_string(render(users))))
   end
 end
 ```

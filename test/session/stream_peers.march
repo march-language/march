@@ -59,20 +59,20 @@ mod StreamPeers do
 
   -- ── the real Stream roles (test/session/in_process.march) ─────────────
   pfn prod(s : Cap(Session.Live), st : Stream_Prod.Entry, next : Int) : Stream_Prod.Yield do
-    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    IO.puts("Prod sends Item(" ++ int_to_string(next) ++ ")")
     let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
     Stream_Prod.offer_more_done(s, st1,
       fn (_b, st2) ->
-        print_line("Prod got More")
+        IO.puts("Prod got More")
         prod(s, st2, next + 1),
       fn (_b, st2) ->
-        print_line("Prod got Done")
+        IO.puts("Prod got Done")
         Stream_Prod.close(s, st2))
   end
 
   pfn cons(s : Cap(Session.Live), st : Stream_Cons.Entry, budget : Int) : Stream_Cons.Yield do
     Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
-      print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+      IO.puts("Cons got Item(" ++ int_to_string(n) ++ ")")
       if budget > 1 do
         cons(s, Stream_Cons.choose_more(s, st1, true), budget - 1)
       else
@@ -100,9 +100,9 @@ mod StreamPeers do
   -- ── the real Fan C and Logging I ───────────────────────────────────────
   pfn role_c(s : Cap(Session.Live), st : Fan_C.Entry) : Fan_C.Yield do
     Fan_C.recv_Number(s, st, fn (a, st1) ->
-      print_line("C: got " ++ int_to_string(a) ++ " from A")
+      IO.puts("C: got " ++ int_to_string(a) ++ " from A")
       Fan_C.recv_Second(s, st1, fn (b, st2) ->
-        print_line("C: got " ++ int_to_string(b) ++ " from B")
+        IO.puts("C: got " ++ int_to_string(b) ++ " from B")
         Fan_C.close(s, Fan_C.send_Verdict(s, st2, a + b == 16))))
   end
 
@@ -163,7 +163,7 @@ mod StreamPeers do
       end end
       t.drain(())
       let _ = if t.queued(()) > 0 do
-        print_line("seed " ++ int_to_string(seed) ++ " mode " ++ int_to_string(mode) ++ ": " ++ int_to_string(t.queued(())) ++ " left queued")
+        Authority.ignore(IO.puts("seed " ++ int_to_string(seed) ++ " mode " ++ int_to_string(mode) ++ ": " ++ int_to_string(t.queued(())) ++ " left queued"))
       else () end
       stream_seeds(c, tally, seed + 1, mode)
     end
@@ -196,63 +196,63 @@ mod StreamPeers do
   end
 
   fn main(c : Cap(IO)) do
-    print_line("-- scripted Cons against the real Prod")
+    IO.puts("-- scripted Cons against the real Prod")
     let t1 = Session.in_process()
     let s1 = Session.attach(c, t1.ops)
     let _ = Stream_Cons.script(s1, Stream_Cons.register(s1, 0), [
-      Stream_Cons.Expect_Msg_Prod_Cons_1(fn n -> print_line("script: Cons expected Item, got " ++ int_to_string(n))),
+      Stream_Cons.Expect_Msg_Prod_Cons_1(fn n -> Authority.ignore(IO.puts("script: Cons expected Item, got " ++ int_to_string(n)))),
       Stream_Cons.Choose_more(true),
-      Stream_Cons.Expect_Msg_Prod_Cons_1(fn n -> print_line("script: Cons expected Item, got " ++ int_to_string(n))),
+      Stream_Cons.Expect_Msg_Prod_Cons_1(fn n -> Authority.ignore(IO.puts("script: Cons expected Item, got " ++ int_to_string(n)))),
       Stream_Cons.Choose_done(false)
     ])
     let _ = prod(s1, Stream_Prod.register(s1, 0), 1)
     t1.drain(())
-    print_line("queued after: " ++ int_to_string(t1.queued(())))
+    IO.puts("queued after: " ++ int_to_string(t1.queued(())))
 
-    print_line("-- scripted Prod against the real Cons")
+    IO.puts("-- scripted Prod against the real Cons")
     let t2 = Session.in_process()
     let s2 = Session.attach(c, t2.ops)
     let _ = cons(s2, Stream_Cons.register(s2, 0), 2)
     let _ = Stream_Prod.script(s2, Stream_Prod.register(s2, 0), [
       Stream_Prod.Send_Msg_Prod_Cons_1(10),
-      Stream_Prod.Expect_More(fn b -> print_line("script: Prod expected More, got " ++ bool_to_string(b))),
+      Stream_Prod.Expect_More(fn b -> Authority.ignore(IO.puts("script: Prod expected More, got " ++ bool_to_string(b)))),
       Stream_Prod.Send_Msg_Prod_Cons_1(20),
-      Stream_Prod.Expect_Done(fn b -> print_line("script: Prod expected Done, got " ++ bool_to_string(b)))
+      Stream_Prod.Expect_Done(fn b -> Authority.ignore(IO.puts("script: Prod expected Done, got " ++ bool_to_string(b))))
     ])
     t2.drain(())
-    print_line("queued after: " ++ int_to_string(t2.queued(())))
+    IO.puts("queued after: " ++ int_to_string(t2.queued(())))
 
-    print_line("-- Fan: scripted A and B against the real C")
+    IO.puts("-- Fan: scripted A and B against the real C")
     let t3 = Session.in_process()
     let s3 = Session.attach(c, t3.ops)
     let _ = role_c(s3, Fan_C.register(s3, 0))
     let _ = Fan_A.script(s3, Fan_A.register(s3, 0), [
       Fan_A.Send_Number(7),
-      Fan_A.Expect_Verdict(fn ok -> print_line("script: A expected Verdict, got " ++ bool_to_string(ok)))
+      Fan_A.Expect_Verdict(fn ok -> Authority.ignore(IO.puts("script: A expected Verdict, got " ++ bool_to_string(ok))))
     ])
     let _ = Fan_B.script(s3, Fan_B.register(s3, 0), [ Fan_B.Send_Second(9) ])
     t3.drain(())
 
-    print_line("-- chaos: Stream, 50 seeds each way and both ways")
+    IO.puts("-- chaos: Stream, 50 seeds each way and both ways")
     let tally = Authority.must(Vault.new("stream_peers_tally"))
     stream_seeds(c, tally, 0, 0)
     stream_seeds(c, tally, 0, 1)
     stream_seeds(c, tally, 0, 2)
-    print_line("closes: " ++ int_to_string(count(tally, "close")) ++ " of 300, cancels: "
+    IO.puts("closes: " ++ int_to_string(count(tally, "close")) ++ " of 300, cancels: "
       ++ int_to_string(count(tally, "cancel")) ++ ", stalls: " ++ int_to_string(count(tally, "stalled")))
 
-    print_line("-- chaos: Fan, all three roles, 50 seeds")
+    IO.puts("-- chaos: Fan, all three roles, 50 seeds")
     let tally2 = Authority.must(Vault.new("stream_peers_tally_fan"))
     fan_seeds(c, tally2, 0)
-    print_line("closes: " ++ int_to_string(count(tally2, "close")) ++ " of 150, cancels: "
+    IO.puts("closes: " ++ int_to_string(count(tally2, "close")) ++ " of 150, cancels: "
       ++ int_to_string(count(tally2, "cancel")) ++ ", stalls: " ++ int_to_string(count(tally2, "stalled")))
 
-    print_line("-- chaos: Logging, C may crash, 50 seeds")
+    IO.puts("-- chaos: Logging, C may crash, 50 seeds")
     let tally3 = Authority.must(Vault.new("stream_peers_tally_logging"))
     logging_seeds(c, tally3, 0)
-    print_line("normal: " ++ int_to_string(count(tally3, "normal")) ++ ", crashed: " ++ int_to_string(count(tally3, "crashed"))
+    IO.puts("normal: " ++ int_to_string(count(tally3, "normal")) ++ ", crashed: " ++ int_to_string(count(tally3, "crashed"))
       ++ ", crash branches: " ++ int_to_string(count(tally3, "crash_branch")) ++ ", stalls: " ++ int_to_string(count(tally3, "stalled")))
-    let _ = if count(tally3, "normal") + count(tally3, "crashed") == 50 do print_line("every Logging session decided") else print_line("MISSING Logging sessions") end
+    let _ = if count(tally3, "normal") + count(tally3, "crashed") == 50 do IO.puts("every Logging session decided") else IO.puts("MISSING Logging sessions") end
     ()
   end
 end

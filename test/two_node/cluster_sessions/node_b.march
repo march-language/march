@@ -38,8 +38,8 @@ mod ClusterSessionsB do
       Ok(h) ->
         println("node-b: up")
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
-        let t1 = task_spawn(fn _ -> session(c, h, "s1"))
-        let t2 = task_spawn(fn _ -> session(c, h, "s2"))
+        let t1 = Authority.must(Task.async(fn () -> session(c, h, "s1")))
+        let t2 = Authority.must(Task.async(fn () -> session(c, h, "s2")))
         let ok = task_await_unwrap(t1) + task_await_unwrap(t2)
         println("B: sessions completed " ++ int_to_string(ok))
         ClusterNode.stop(h)

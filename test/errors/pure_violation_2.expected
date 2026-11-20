@@ -5,7 +5,7 @@ exit: 1
 
 Remove the `needs` line, and move the code that needs it to a module without `cap pure`.
 
-17 |   needs IO.Random
+21 |   needs IO.Random
        ^^^^^^^^^^^^^^^
 
 
@@ -16,8 +16,25 @@ Remove the `needs` line, and move the code that needs it to a module without `ca
 
 Use pure functions (no IO, spawn, vault, clock, or random ops) in a `cap pure` module.
 
-21 |     random_bytes(16)
+25 |     random_bytes(16)
          ^^^^^^^^^^^^
 
 
 
+-- PROGRAM ---------------- errors/pure_violation_2.march
+
+`random_bytes` is internal to the standard library; use `Crypto.random_bytes`. [stdlib_internal]
+
+25 |     random_bytes(16)
+         ^^^^^^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+25 -     random_bytes(16)
+25 +     Authority.must(Crypto.random_bytes(16))
+
+
+
+after fix: exit 1
+`mod LeakyPure` (declared `cap pure`) declares `needs IO.Random`, but a pure module cannot hold a capability: `needs` exists only to admit side effects, directly or through a stdlib wrapper such as `File.read` or `DateTime.now`. [pure_violation]

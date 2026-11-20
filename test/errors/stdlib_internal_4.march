@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: is internal to the standard library; use `IO.write`
+-- ocap phase 4 (Task 8): the raw capability builtins are stdlib-only. A
+-- direct call skips the `Authority.check` its stdlib entry point runs first,
+-- so the program must call the entry point instead. Where the entry point
+-- is a drop-in, the error carries the rewritten call as its fix, wrapped so
+-- it keeps the call's type: here `print(s)` becomes
+-- `Authority.ignore(IO.write(s))` (a value-returning call such as
+-- `file_read(p)` becomes `Authority.must(File.read(p))`).
+mod Main do
+  needs IO.Console
+
+  fn main(_c : Cap(IO.Console)) do
+    print("no newline")
+    println("")
+  end
+end

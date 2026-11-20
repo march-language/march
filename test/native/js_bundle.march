@@ -14,7 +14,7 @@ mod JsBundle do
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _p : Cap(IO.Process)) : Unit do
     println(greet())
-    if List.length(process_argv()) > 100 do
+    if List.length(Authority.must(Process.argv())) > 100 do
       match Js.Canvas.get_context(Js.Dom.body()) do
         Some(ctx) -> Js.Canvas.fill_rect(ctx, 0.0, 0.0, 1.0, 1.0)
         None -> ()

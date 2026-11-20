@@ -265,7 +265,7 @@ let impl_io_cap_test_build =
           (fun () -> typecheck {|mod App do
   needs IO.Console
   fn boot(c : Cap(IO.Console)) : Cap(IO.Console) do
-    cap_impl(c, { cap_ops_empty(c) with print_line: Some(fn s -> print(s)) })
+    cap_impl(c, { cap_ops_empty(c) with print_line: Some(fn _ -> ()) })
   end
 end|})
       in

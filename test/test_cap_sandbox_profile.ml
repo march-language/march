@@ -86,7 +86,7 @@ mod SbxDrift do
   needs IO.Console
   needs IO.FileWrite
   fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
-    match file_write("/tmp/sbx_drift_out", "d") do
+    match Authority.must(File.write("/tmp/sbx_drift_out", "d")) do
       Ok(_)  -> println("ok")
       Err(_) -> println("e")
     end
@@ -261,7 +261,7 @@ let test_module_level_let_widens_profile () =
 mod SbxLet do
   needs IO.Console
   needs IO.FileWrite
-  let touched = file_write("/tmp/sbx_let_out", "d")
+  let touched = File.write("/tmp/sbx_let_out", "d")
   fn main(_cap_console : Cap(IO.Console)) do
     println("hi")
   end
@@ -277,7 +277,7 @@ mod SbxNest do
   mod Inner do
     needs IO.FileWrite
     fn save() do
-      match file_write("/tmp/sbx_nest_out", "d") do
+      match Authority.must(File.write("/tmp/sbx_nest_out", "d")) do
         Ok(_) -> ()
         Err(_) -> ()
       end
@@ -302,7 +302,7 @@ mod SbxImpl do
   end
   impl Save(Thing) do
     fn persist(_t) do
-      match file_write("/tmp/sbx_impl_out", "d") do
+      match Authority.must(File.write("/tmp/sbx_impl_out", "d")) do
         Ok(_) -> ()
         Err(_) -> ()
       end

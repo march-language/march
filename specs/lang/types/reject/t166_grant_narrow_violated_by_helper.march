@@ -14,7 +14,7 @@ mod Main do
   needs IO.FileWrite
 
   fn greet(name : String) : () do
-    match file_write("/tmp/t166_out", name) do
+    match Authority.must(File.write("/tmp/t166_out", name)) do
       Ok(_)  -> Authority.ignore(println("hello " ++ name))
       Err(_) -> Authority.ignore(println("hello anyway"))
     end

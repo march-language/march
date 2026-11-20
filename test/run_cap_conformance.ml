@@ -6,7 +6,7 @@
       [-- GRANT:] with nothing after it exports the empty string, which every
       runtime reads as unset. Without the header [MARCH_GRANT] is unset.
     - [-- EXIT-ONLY]: compare only the exit status and the first line of
-      stderr (a launch error), not stdout.
+      stderr (a launch error), and require stdout to be empty.
     A fixture without headers runs under its own request (`main`'s needs ∪
     its Cap params, else the module's needs line). The program is run
 
@@ -87,6 +87,8 @@ let js_unsupported : (string * string) list = [
   ("file_refused", "the JS target has no `dir_list` or `dir_mkdir_p`");
   ("file_allowed", "the JS target has no `file_exists`");
   ("tls_https_get_refused", "the JS target has no TLS (`tls_client_ctx`)");
+  ("listen_refused", "the JS target has no HTTP server (`http_server_listen`) or UDP (`udp_resolve`)");
+  ("resolve_port_scoped", "the JS target has no UDP (`udp_resolve`)");
   ("capture_stored_in_record_list_vault", "the JS target has no tables (`vault_new`, `vault_get`)");
   ("spawn_mut_allowed", "the JS target has no tasks");
   ("actor_under_frame_restricted", "the JS target has no tasks");
@@ -341,6 +343,12 @@ let case name =
             if got <> expected then
               Alcotest.failf "%s (%s): expected\n%s\ngot\n%s\nstderr:\n%s"
                 name m expected got r.err;
+            (* A launch error stops the program before any of its code runs,
+               module-level `let`s included, so an [-- EXIT-ONLY] run
+               prints nothing on stdout. *)
+            if exit_only && r.out <> "" then
+              Alcotest.failf "%s (%s): a launch error, but the program printed:\n%s"
+                name m r.out;
             (* The REPL reports a failed prompt line on stderr and goes on
                to exit 0 at end of input, so where the expected stdout is
                empty (or a line was silently dropped) stdout alone would

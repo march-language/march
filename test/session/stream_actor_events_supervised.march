@@ -60,10 +60,10 @@ mod StreamActorEventsSupervised do
           Vault.set(handlers, ekey(ep), handler)
           ep
         end,
-        close: fn ep -> print_line("close " ++ int_to_string(ep)),
+        close: fn ep -> Authority.ignore(IO.puts("close " ++ int_to_string(ep))),
         fail: fn (_ep, why) -> panic(why),
         on_cancel: fn (ep, _h) -> ep,
-        leave: fn (ep, why) -> print_line("leave " ++ int_to_string(ep) ++ ": " ++ why),
+        leave: fn (ep, why) -> Authority.ignore(IO.puts("leave " ++ int_to_string(ep) ++ ": " ++ why)),
         on_crash: fn (ep, _r, _h) -> ep,
         -- D27: this transport never drains, so a loop-head receive is a
         -- plain suspend and a drain handler is never called.
@@ -88,10 +88,10 @@ mod StreamActorEventsSupervised do
     on DeliverP(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
       match Stream_Prod.resume(state.parked, from, msg, ep) do
         Got_More(_b, st) ->
-          print_line("Prod got More")
+          IO.puts("Prod got More")
           { state with parked: step_prod(s, st, state.next), next: state.next + 1 }
         Got_Done(_b, st) ->
-          print_line("Prod got Done")
+          IO.puts("Prod got Done")
           { state with parked: Stream_Prod.finish(s, st) }
       end
     end
@@ -99,7 +99,7 @@ mod StreamActorEventsSupervised do
 
   -- At the loop head Prod sends, then awaits the offer.
   pfn step_prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Parked_Prod do
-    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    IO.puts("Prod sends Item(" ++ int_to_string(next) ++ ")")
     Stream_Prod.await_more_done(s, Stream_Prod.send_Msg_Prod_Cons_1(s, st, next))
   end
 
@@ -113,7 +113,7 @@ mod StreamActorEventsSupervised do
     on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
       match Stream_Cons.resume(state.parked, from, msg, ep) do
         Got_Msg_Prod_Cons_1(n, st) ->
-          print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+          IO.puts("Cons got Item(" ++ int_to_string(n) ++ ")")
           -- The step reads the actor's own state: this is what the event API
           -- is for.
           if state.budget > 1 do
@@ -154,7 +154,7 @@ mod StreamActorEventsSupervised do
                 run_until_idle()
                 route(s, cp, cc, handlers, pending)
               _ ->
-                print_line("-- endpoint " ++ int_to_string(to) ++ ": its host was restarted and the parked session state is gone; abandoning --")
+                IO.puts("-- endpoint " ++ int_to_string(to) ++ ": its host was restarted and the parked session state is gone; abandoning --")
                 Session.close(s, from)
             end
         end
@@ -222,7 +222,7 @@ mod StreamActorEventsSupervised do
     route_one(s, cp, cc, handlers, pending)
     kill(pc)
     run_until_idle()
-    print_line("-- Cons host killed; supervisor restarted it --")
+    IO.puts("-- Cons host killed; supervisor restarted it --")
     route(s, cp, cc, handlers, pending)
   end
 end

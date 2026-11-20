@@ -5,7 +5,7 @@
  (modules test_helpers)
  (ocamlopt_flags (:standard -w -32-26-27))
  (ocamlc_flags   (:standard -w -32-26-27))
- (libraries march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_jit march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint march_refactor alcotest str unix threads.posix))
+ (libraries march_lexer march_parser march_ast march_desugar march_typecheck march_caps march_errors march_effects march_eval march_tir march_repl march_jit march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint march_refactor alcotest str unix threads.posix))
 
 ; ── Per-suite test libraries ──────────────────────────────────────────────
 (library
@@ -3895,7 +3895,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/process_handle_leak_probe.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_process_handle_leak_probe
+   (run %{exe:../bin/main.exe} --compile --opt 2 --stdlib-source -o native_process_handle_leak_probe
         native/process_handle_leak_probe.march)
    (with-stdout-to native_process_handle_leak_probe.out
         (system "./native_process_handle_leak_probe")))))
@@ -5334,8 +5334,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (setenv MARCH_RUNTIME_DIR ../runtime
    (progn
     (with-stdout-to native_uuid_v7_dns_parity_interp.out
-     (run %{exe:../bin/main.exe} native/uuid_v7_dns_parity.march))
-    (run %{exe:../bin/main.exe} --compile -o native_uuid_v7_dns_parity
+     (run %{exe:../bin/main.exe} --stdlib-source native/uuid_v7_dns_parity.march))
+    (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_uuid_v7_dns_parity
          native/uuid_v7_dns_parity.march)
     (with-stdout-to native_uuid_v7_dns_parity.out
          (system "./native_uuid_v7_dns_parity"))))))

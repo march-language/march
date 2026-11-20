@@ -71,7 +71,7 @@ mod SteadyStateRing do
   pfn spawn_siblings(k : Int, work : Int) : Unit do
     if k <= 0 do ()
     else do
-      let _t = task_spawn(fn x -> sib_loop(1000000000, work, 0))
+      let _t = Task.async(fn () -> sib_loop(1000000000, work, 0))
       spawn_siblings(k - 1, work)
     end
     end
@@ -79,7 +79,7 @@ mod SteadyStateRing do
 
   -- ── Steady-state loop ───────────────────────────────────────────────────
   -- Each op times one request (process the request through the kernel) and
-  -- folds its latency into the threaded histogram. unix_time() allocates
+  -- folds its latency into the threaded histogram. System.now() allocates
   -- transient boxed Floats every iteration; RC frees them immediately, which
   -- is exactly claim (1): a high per-op allocation rate with a flat live set.
   pfn drive(i : Int, n : Int, work : Int, mn : Int, mx : Int, sum : Int,
@@ -88,9 +88,9 @@ mod SteadyStateRing do
       report(n, work, mn, mx, sum, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17)
     else do
       let seed = (i - (i / 2147483646) * 2147483646) + 1
-      let t0 = unix_time(())
+      let t0 = Authority.must(System.now())
       let r = Hot.process(seed, work)
-      let t1 = unix_time(())
+      let t1 = Authority.must(System.now())
       let raw = float_to_int((t1 -. t0) *. 1000000000.0)
       let ns = if raw < 0 do 0 else raw end
       let b = Hot.bucket_of(ns)

@@ -28,7 +28,7 @@ mod Main do
   -- instead of a 4x one. Both backends tail-call-optimize this, so it does not
   -- grow the stack.
   fn spin_until(deadline_ms) do
-    if unix_time_ms() >= deadline_ms do
+    if Authority.must(System.now_ms()) >= deadline_ms do
       0
     else
       spin_until(deadline_ms)
@@ -40,7 +40,7 @@ mod Main do
     init  { n: 0 }
 
     on Get(reply_to) do
-      let _ = spin_until(unix_time_ms() + 50)
+      let _ = spin_until(Authority.must(System.now_ms()) + 50)
       Actor.reply(reply_to, state.n)
       { n: state.n + 1 }
     end

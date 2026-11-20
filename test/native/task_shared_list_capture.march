@@ -26,7 +26,7 @@ mod Main do
     if left <= 0 do acc
     else
       let items = build(64, Nil)
-      let t = task_spawn(fn _ -> walk(items, 0))
+      let t = Authority.must(Task.async(fn () -> walk(items, 0)))
       start(left - 1, Cons((List.length(items), t), acc))
     end
   end

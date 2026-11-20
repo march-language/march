@@ -125,15 +125,15 @@ mod DrainPeers do
 
   -- ── the real Stream roles, with drain handlers that report ───────────
   pfn prod(s : Cap(Session.Live), st : Stream_Prod.Entry, next : Int) : Stream_Prod.Yield do
-    print_line("Prod sends " ++ int_to_string(next))
+    IO.puts("Prod sends " ++ int_to_string(next))
     let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
     Stream_Prod.offer_more_done_or_drain(s, st1,
       fn (_b, st2) -> prod(s, st2, next + 1),
       fn (_b, st2) ->
-        print_line("Prod got Done")
+        IO.puts("Prod got Done")
         Stream_Prod.close(s, st2),
       fn (role, undelivered, d) ->
-        print_line("Prod drained (waiting on role " ++ int_to_string(role) ++ "), undelivered: "
+        IO.puts("Prod drained (waiting on role " ++ int_to_string(role) ++ "), undelivered: "
           ++ String.join(List.map(undelivered, fn m -> match m do
                Stream_Msg.Msg_Prod_Cons_1(v) -> int_to_string(v)
                _ -> "?"
@@ -144,16 +144,16 @@ mod DrainPeers do
   pfn cons(s : Cap(Session.Live), st : Stream_Cons.Entry, budget : Int) : Stream_Cons.Yield do
     Stream_Cons.recv_Msg_Prod_Cons_1_or_drain(s, st,
       fn (n, st1) ->
-        print_line("Cons got " ++ int_to_string(n))
+        IO.puts("Cons got " ++ int_to_string(n))
         if budget > 1 do cons(s, Stream_Cons.choose_more(s, st1, true), budget - 1)
         else Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)) end,
       fn (role, _undelivered, d) ->
-        print_line("Cons drained at its boundary (role " ++ int_to_string(role) ++ ")")
+        IO.puts("Cons drained at its boundary (role " ++ int_to_string(role) ++ ")")
         Stream_Cons.drained(s, d))
   end
 
   pfn tracing() : Session.InProcess do
-    Session.in_process_with(fn line -> print_line("  transport: " ++ line))
+    Session.in_process_with(fn line -> Authority.ignore(IO.puts("  transport: " ++ line)))
   end
 
   pfn counts(t : Session.InProcess) : String do
@@ -202,11 +202,12 @@ mod DrainPeers do
       && t.sent(()) == t.consumed(()) + t.returned(())
       && per_role == t.returned(()) && per_role == count(tally, "undelivered")
     if ok do () else
-      print_line("VIOLATION " ++ name ++ " seed " ++ int_to_string(seed) ++ ": ends " ++ int_to_string(count(tally, "end"))
+      IO.puts("VIOLATION " ++ name ++ " seed " ++ int_to_string(seed) ++ ": ends " ++ int_to_string(count(tally, "end"))
         ++ ", stalls " ++ int_to_string(count(tally, "stalled")) ++ ", cancels " ++ int_to_string(count(tally, "cancel"))
         ++ ", dropped " ++ int_to_string(count(tally, "dropped")) ++ ", in flight at the drain " ++ int_to_string(in_flight)
         ++ ", per-role undelivered " ++ int_to_string(per_role) ++ ", traced " ++ int_to_string(count(tally, "undelivered"))
         ++ ", " ++ counts(t))
+      ()
     end
   end
 
@@ -258,7 +259,7 @@ mod DrainPeers do
   pfn steady_dst(s : Cap(Session.Live), st : Steady_Dst.Entry, got : Int) : Steady_Dst.Yield do
     Steady_Dst.recv_Msg_Src_Dst_1(s, st, fn (_n, st1) ->
       if got >= 4 do
-        print_line("Steady: Dst got all 5 items")
+        IO.puts("Steady: Dst got all 5 items")
         Steady_Dst.close(s, Steady_Dst.choose_done(s, st1, true))
       else steady_dst(s, Steady_Dst.choose_more(s, st1, true), got + 1) end)
   end
@@ -320,7 +321,7 @@ mod DrainPeers do
   end
 
   fn main(c : Cap(IO)) do
-    print_line("-- Stream: Cons drains at its loop boundary after two items")
+    IO.puts("-- Stream: Cons drains at its loop boundary after two items")
     let t1 = tracing()
     let s1 = Session.attach(c, t1.ops)
     let _ = cons(s1, Stream_Cons.register(s1, 0), 10)
@@ -328,10 +329,10 @@ mod DrainPeers do
     steps(t1, 3)
     t1.drain_role(2)
     t1.drain(())
-    print_line("Prod undelivered " ++ int_to_string(t1.undelivered(1)) ++ ", Cons drained " ++ bool_to_string(t1.drained(2)))
-    print_line(counts(t1))
+    IO.puts("Prod undelivered " ++ int_to_string(t1.undelivered(1)) ++ ", Cons drained " ++ bool_to_string(t1.drained(2)))
+    IO.puts(counts(t1))
 
-    print_line("-- Stream: Prod's epoch drains; Cons ends at its next boundary")
+    IO.puts("-- Stream: Prod's epoch drains; Cons ends at its next boundary")
     let t2 = tracing()
     let s2 = Session.attach(c, t2.ops)
     let _ = cons(s2, Stream_Cons.register(s2, 0), 10)
@@ -339,9 +340,9 @@ mod DrainPeers do
     steps(t2, 1)
     t2.drain_role(1)
     t2.drain(())
-    print_line(counts(t2))
+    IO.puts(counts(t2))
 
-    print_line("-- Ring: C drains; B is mid-iteration, A waits on C")
+    IO.puts("-- Ring: C drains; B is mid-iteration, A waits on C")
     let t3 = tracing()
     let s3 = Session.attach(c, t3.ops)
     let _ = Ring_C.chaos(s3, Ring_C.register(s3, 0), 1)
@@ -350,23 +351,23 @@ mod DrainPeers do
     steps(t3, 2)
     t3.drain_role(3)
     t3.drain(())
-    print_line("A undelivered " ++ int_to_string(t3.undelivered(1)) ++ ", B undelivered " ++ int_to_string(t3.undelivered(2))
+    IO.puts("A undelivered " ++ int_to_string(t3.undelivered(1)) ++ ", B undelivered " ++ int_to_string(t3.undelivered(2))
       ++ ", C undelivered " ++ int_to_string(t3.undelivered(3)))
-    print_line(counts(t3))
+    IO.puts(counts(t3))
 
-    print_line("-- chaos: Stream, 60 seeds, a random role drains after a random number of steps")
+    IO.puts("-- chaos: Stream, 60 seeds, a random role drains after a random number of steps")
     let tot1 = Authority.must(Vault.new("drain_peers_totals_stream"))
     stream_seeds(c, tot1, 0)
-    print_line("drained " ++ int_to_string(count(tot1, "drained_sessions")) ++ ", finished first "
+    IO.puts("drained " ++ int_to_string(count(tot1, "drained_sessions")) ++ ", finished first "
       ++ int_to_string(count(tot1, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot1, "returned")))
 
-    print_line("-- chaos: Ring, three roles, 60 seeds")
+    IO.puts("-- chaos: Ring, three roles, 60 seeds")
     let tot2 = Authority.must(Vault.new("drain_peers_totals_ring"))
     ring_seeds(c, tot2, 0)
-    print_line("drained " ++ int_to_string(count(tot2, "drained_sessions")) ++ ", finished first "
+    IO.puts("drained " ++ int_to_string(count(tot2, "drained_sessions")) ++ ", finished first "
       ++ int_to_string(count(tot2, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot2, "returned")))
 
-    print_line("-- loop atomic: both roles draining, the session still runs to its end")
+    IO.puts("-- loop atomic: both roles draining, the session still runs to its end")
     let t4 = tracing()
     let s4 = Session.attach(c, t4.ops)
     let _ = steady_dst(s4, Steady_Dst.register(s4, 0), 0)
@@ -374,23 +375,23 @@ mod DrainPeers do
     t4.drain_role(1)
     t4.drain_role(2)
     t4.drain(())
-    print_line(counts(t4))
-    print_line("-- chaos: Pair, two sends in a row to a loop head, 60 seeds")
+    IO.puts(counts(t4))
+    IO.puts("-- chaos: Pair, two sends in a row to a loop head, 60 seeds")
     let tot3 = Authority.must(Vault.new("drain_peers_totals_pair"))
     pair_seeds(c, tot3, 0)
-    print_line("drained " ++ int_to_string(count(tot3, "drained_sessions")) ++ ", finished first "
+    IO.puts("drained " ++ int_to_string(count(tot3, "drained_sessions")) ++ ", finished first "
       ++ int_to_string(count(tot3, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot3, "returned")))
 
-    print_line("-- chaos: Relay3, a send to a role after it drained, 60 seeds")
+    IO.puts("-- chaos: Relay3, a send to a role after it drained, 60 seeds")
     let tot4 = Authority.must(Vault.new("drain_peers_totals_relay"))
     relay_seeds(c, tot4, 0)
-    print_line("drained " ++ int_to_string(count(tot4, "drained_sessions")) ++ ", finished first "
+    IO.puts("drained " ++ int_to_string(count(tot4, "drained_sessions")) ++ ", finished first "
       ++ int_to_string(count(tot4, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot4, "returned")))
 
-    print_line("-- chaos: Fork, a send to a drained role, 60 seeds")
+    IO.puts("-- chaos: Fork, a send to a drained role, 60 seeds")
     let tot5 = Authority.must(Vault.new("drain_peers_totals_fork"))
     fork_seeds(c, tot5, 0)
-    print_line("drained " ++ int_to_string(count(tot5, "drained_sessions")) ++ ", finished first "
+    IO.puts("drained " ++ int_to_string(count(tot5, "drained_sessions")) ++ ", finished first "
       ++ int_to_string(count(tot5, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot5, "returned")))
     ()
   end

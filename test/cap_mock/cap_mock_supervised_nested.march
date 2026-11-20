@@ -24,7 +24,7 @@ mod CapMockSupervisedNested do
     state { n : Int }
     init  { n: 0 }
     on Say(s : String) do
-      print_line("leaf:" ++ s)
+      IO.puts("leaf:" ++ s)
       { state with n: state.n + 1 }
     end
   end
@@ -63,7 +63,7 @@ mod CapMockSupervisedNested do
     let intro = Actor.introspect(io)
     let outside = spawn(Top)
     let mock = cap_impl(c, { cap_ops_empty(c) with
-      print_line: Some(fn s -> print("MOCK[" ++ s ++ "]\n")) })
+      print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) })
     with_cap(mock, fn _ -> do
       let inside = spawn(Top)
       send(leaf_of(intro, inside), Say("in"))

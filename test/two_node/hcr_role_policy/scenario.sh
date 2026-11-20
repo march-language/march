@@ -18,8 +18,9 @@
 #              socket, as `forge deploy hot` sends it                407
 #   v3         n * 1000 + the mark, as a release through the control
 #              plane (the Agent relays it to the same gate)          4007
-#   v4         answers n, and widens Back.audit (a direct file_write, so
-#              it is the function's own cap; reached by no role, so
+#   v4         answers n, and widens Back.audit (its own call of the
+#              File.write entry point, which the per-function capability
+#              closure charges to audit itself; reached by no role, so
 #              the compiler's grant check cannot see it) to IO.FileWrite,
 #              which the operator grants (--grant-cap) but the node's
 #              policy does not: ERR cap_policy IO.FileWrite, and the
@@ -79,7 +80,7 @@ version() {
     4) answer='n + env.factor * 0 + m * 0' ;;
   esac
   audit='fn audit(_path : String) : Int do 0 end'
-  [ "$v" = 4 ] && audit=$'fn audit(path : String) : Int do\n      let _ = file_write(path, "x")\n      1\n    end'
+  [ "$v" = 4 ] && audit=$'fn audit(path : String) : Int do\n      Authority.ignore(File.write(path, "x"))\n      1\n    end'
   ANSWER="$answer" AUDIT="$audit" perl -pe '
     s/^(\s*let a = ).*(-- ANSWER)$/$1$ENV{ANSWER} $2/;
     s/^(\s*)fn audit.*(-- AUDIT)$/$1$ENV{AUDIT} $2/' "$dir/app.march" > "$work/v$v/role_app.march"

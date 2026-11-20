@@ -56,7 +56,7 @@ mod PeerClosedQueueGoneB do
         println("node-b: linked")
         println("node-b: queue to node-a at its close: " ++ await_report(seen, 60000))
         ClusterNode.stop(h)
-        process_exit(0)
+        Process.exit(0)
     end
   end
 end

@@ -1129,7 +1129,7 @@ fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_f
   let server = HttpServer.plug(server, fn req_conn ->
     router(nb_path, display_title, port, march_bin, req_conn)
   )
-  HttpServer.listen(server)
+  Authority.must(HttpServer.listen(server))
 end
 
 end

@@ -39,7 +39,7 @@ mod Tetris do
   end
 
   fn lcg_seed() : Int do
-    let raw = int_mod(float_to_int(unix_time(()) *. 1000000.0), 2147483646)
+    let raw = int_mod(float_to_int(Authority.must(System.now()) *. 1000000.0), 2147483646)
     match raw <= 0 do
       true  -> raw + 2147483646
       false -> raw

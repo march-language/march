@@ -9,6 +9,6 @@ mod Main do
     fn length(_xs : List(Int)) : Int do 50 end
   end
   fn main(c : Cap(IO.Console)) do
-    print_line(int_to_string(B.length([1])))
+    IO.puts(int_to_string(B.length([1])))
   end
 end

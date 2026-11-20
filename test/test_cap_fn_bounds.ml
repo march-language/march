@@ -6,8 +6,11 @@
    looked at", which is how the impl-method gap in the first draft would have
    shipped. *)
 
+(* The bound check's own treatment of a direct builtin call is what these pin,
+   so the raw builtins stay callable here ([with_raw_capability_builtins]). *)
 let codes src =
-  let errors = Test_helpers.typecheck src in
+  let errors =
+    Test_helpers.with_raw_capability_builtins (fun () -> Test_helpers.typecheck src) in
   List.filter_map
     (fun (d : March_errors.Errors.diagnostic) ->
       if d.March_errors.Errors.severity = March_errors.Errors.Error then
@@ -16,7 +19,8 @@ let codes src =
     errors.March_errors.Errors.diagnostics
 
 let messages src =
-  let errors = Test_helpers.typecheck src in
+  let errors =
+    Test_helpers.with_raw_capability_builtins (fun () -> Test_helpers.typecheck src) in
   List.map
     (fun (d : March_errors.Errors.diagnostic) -> d.March_errors.Errors.message)
     errors.March_errors.Errors.diagnostics

@@ -23,3 +23,13 @@ What to do: charge the stdlib-mediated route in `march caps` the way the source-
 does (`check_stdlib_mediated_ceiling`, `cap_strict_ceiling`), or read the TIR-side ceiling's
 attribution (`Cap_attrib`) for the package's own modules; then point the `test_cap_package`
 fixture back at `Socket.connect`.
+
+## Update (2026-11-17, ocap phase 4 Task 8)
+
+Task 8 made every gated capability builtin stdlib-only, so user code reaches those
+operations only through their stdlib entry points. It also made the per-function
+closures charge a call of a gated row's entry point (`File.read`, `System.now_ms`,
+`Task.async`, ... — `Typecheck_builtins.entry_cap_table`) as they charge the builtin, so
+`march caps` sees them again (test/test_cap_package.ml uses `File.read`). Still open: the
+other wrappers, e.g. `Socket.connect` (an ungated phase-2 open) or any stdlib function
+that is not a `Cap_ops` entry point.

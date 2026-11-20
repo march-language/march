@@ -16,7 +16,7 @@ mod CapMockClock do
 
   -- code under test: takes no capability and names none
   pfn stamp() : Int do
-    unix_time_ms()
+    Authority.must(System.now_ms())
   end
 
   test "a clock mock is scoped to with_cap" do

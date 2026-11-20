@@ -11801,13 +11801,13 @@ end
 
 fn role_a(s : Cap(Session.Live), st : Pq_A.Entry, k : Int) : Pq_A.Yield do
   Pq_A.recv_Back(s, Pq_A.send_Hi(s, st, k), fn (note, st1) ->
-    print_line("A got " ++ note.text ++ " " ++ int_to_string(note.pq))
+    Authority.ignore(println("A got " ++ note.text ++ " " ++ int_to_string(note.pq)))
     Pq_A.close(s, st1))
 end
 
 fn role_b(s : Cap(Session.Live), st : Pq_B.Entry) : Pq_B.Yield do
   Pq_B.recv_Hi(s, st, fn (k, st1) ->
-    print_line("B got " ++ int_to_string(k))
+    Authority.ignore(println("B got " ++ int_to_string(k)))
     Pq_B.close(s, Pq_B.send_Back(s, st1, { pq: k * 2, text: "pong" })))
 end
 
@@ -11816,7 +11816,7 @@ fn run_inside(c : Cap(IO)) : () do
   let t = Session.in_process()
   let s = Session.attach(c, t.ops)
   let _ = role_b(s, Pq_B.register(s, 0))
-  let _ = Pq_A.script(s, Pq_A.register(s, 0), [Pq_A.Send_Hi(5), Pq_A.Expect_Back(fn note -> print_line("script A got " ++ note.text))])
+  let _ = Pq_A.script(s, Pq_A.register(s, 0), [Pq_A.Send_Hi(5), Pq_A.Expect_Back(fn note -> Authority.ignore(println("script A got " ++ note.text)))])
   t.drain(())
 end
 
@@ -11833,7 +11833,7 @@ let endpoints_placement_user = {|fn use_from_outside(c : Cap(IO)) : () do
   P.run_inside(c)
   let t = Session.in_process()
   let s = Session.attach(c, t.ops)
-  let _ = P.Pq_B.script(s, P.Pq_B.register(s, 0), [P.Pq_B.Expect_Hi(fn n -> print_line("script B got " ++ int_to_string(n))), P.Pq_B.Send_Back({ pq: 7, text: "scripted" })])
+  let _ = P.Pq_B.script(s, P.Pq_B.register(s, 0), [P.Pq_B.Expect_Hi(fn n -> Authority.ignore(println("script B got " ++ int_to_string(n)))), P.Pq_B.Send_Back({ pq: 7, text: "scripted" })])
   let _ = P.role_a(s, P.Pq_A.register(s, 0), 3)
   t.drain(())
   let t2 = Session.in_process()
@@ -11841,9 +11841,9 @@ let endpoints_placement_user = {|fn use_from_outside(c : Cap(IO)) : () do
   let _ = P.Pq_B.chaos(s2, P.Pq_B.register(s2, 0), 11, Gen.map(Gen.int(0, 9), fn n -> { pq: n, text: "chaos" }))
   let _ = P.Pq_A.chaos(s2, P.Pq_A.register(s2, 0), 12)
   t2.drain(())
-  print_line("chaos left " ++ int_to_string(t2.queued(())))
-  print_line("roles " ++ int_to_string(List.length(P.Pq_Msg.role_names())))
-  print_line("fingerprint " ++ (if String.byte_size(P.Pq_Msg.fingerprint()) > 0 do "set" else "empty" end))
+  Authority.ignore(println("chaos left " ++ int_to_string(t2.queued(()))))
+  Authority.ignore(println("roles " ++ int_to_string(List.length(P.Pq_Msg.role_names()))))
+  Authority.ignore(println("fingerprint " ++ (if String.byte_size(P.Pq_Msg.fingerprint()) > 0 do "set" else "empty" end)))
 end|}
 
 let endpoints_placement_expected =
@@ -11900,10 +11900,10 @@ fn decode_mine() : () do
   match Json.parse(Json.to_string(to_json({ mine: 3, label: "mine" }))) do
     Ok(j) ->
       match from_json(j) do
-        Ok(v) -> print_line("decoded " ++ v.label)
-        Err(_) -> print_line("decode failed")
+        Ok(v) -> Authority.ignore(println("decoded " ++ v.label))
+        Err(_) -> Authority.ignore(println("decode failed"))
       end
-    Err(_) -> print_line("parse failed")
+    Err(_) -> Authority.ignore(println("parse failed"))
   end
 end|}
 
@@ -12038,7 +12038,7 @@ let test_endpoints_stdlib_from_json_compiled () =
 let test_endpoints_stdlib_to_json_without_codec () =
   let (env, main_exe, src, tmp) =
     write_endpoints_stdlib_project ~name:"march_endpoints_tj"
-      ~main_body:"    let _r = to_json(3)\n    print_line(\"unreachable compiled\")\n" "" in
+      ~main_body:"    let _r = to_json(3)\n    Authority.ignore(println(\"unreachable compiled\"))\n" "" in
   match compile_march_raw ~cmd_prefix:env ~main_exe ~bin:(Filename.concat tmp "endpoints_tj_bin") ~src () with
   | `Skipped -> ()
   | `Ok _ -> Alcotest.fail "to_json(3) with no codec must be rejected, not linked"
@@ -12313,7 +12313,7 @@ let test_float_lit_no_wildcard_panics_compiled () =
     \    end\n\
     \  end\n\
     \  fn main(_cap_console : Cap(IO.Console), _cap_process : Cap(IO.Process)) do\n\
-    \    let n = int_to_float(List.length(process_argv())) +. 3.7\n\
+    \    let n = int_to_float(List.length(Authority.must(Process.argv()))) +. 3.7\n\
     \    println(name(n))\n\
     \  end\n\
      end\n"
@@ -13763,8 +13763,10 @@ let test_erased_option_niche_fbip_no_underflow_compiled () =
      pre-fix it aborted with `RC underflow` (SIGABRT, exit 134); post-fix it
      prints pg:42 and exits 0. *)
   let bin = Filename.concat tmp "erasedoptbin" in
+  (* --stdlib-source: the program reproduces depot's raw task_spawn shape,
+     which since ocap phase 4 only a stdlib-spanned program may write. *)
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
-          ~main_exe ~bin ~src () with
+          ~extra_args:"--stdlib-source" ~main_exe ~bin ~src () with
   | None -> ()  (* legitimate, counted skip: no clang on PATH *)
   | Some bin ->
     let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
@@ -14173,10 +14175,14 @@ let task_poll_pending_expected =
    finished: Ok(42)\nawait: Ok(42)\n\
    string reads: 15572 leaked 0\nfloat reads: 1503000. leaked 0"
 
+(* Builtin-level: these pin task_poll against tasks spawned with the raw
+   builtins (and the leak counts that go with them), so they run as
+   stdlib-spanned programs (`--stdlib-source`): since ocap phase 4 only the
+   stdlib may call task_spawn and unix_time_ms. *)
 let test_task_poll_compiled () =
   let (project_root, main_exe, src, tmp) =
     write_march_source ~name:"march_task_poll_neutral" task_poll_neutral_src in
-  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s --stdlib-source %s 2>&1"
       (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
   Alcotest.(check string) "interpreter" task_poll_neutral_expected interp_out;
   let (_, _, psrc, ptmp) =
@@ -14189,7 +14195,7 @@ let test_task_poll_compiled () =
           (expected ^ "\nEXIT:0") out)
       [ "MARCH_NUM_SCHEDULERS=1"; "env" ] in
   List.iter (fun opt ->
-      let extra_args = Printf.sprintf "--opt %d" opt in
+      let extra_args = Printf.sprintf "--opt %d --stdlib-source" opt in
       let cmd_prefix = Printf.sprintf "cd %s && " (Filename.quote project_root) in
       (match compile_march_or_skip ~cmd_prefix ~extra_args ~main_exe
                ~bin:(Filename.concat tmp (Printf.sprintf "poll_neutral_o%d" opt)) ~src () with
@@ -14490,17 +14496,17 @@ let builtin_named_user_type_src = {|mod Main do
   end
 
   fn main(c : Cap(IO.Console)) do
-    print_line(to_string(Won(3)))
-    print_line(to_string(Beaten))
-    print_line(to_string(Won(3) == Won(3)))
-    print_line(int_to_string(score(Won(7)) + score(Beaten)))
-    print_line(to_string(Shapes.wrap(5)))
-    print_line(to_string(List.head_opt([1, 2])))
+    Authority.ignore(println(to_string(Won(3))))
+    Authority.ignore(println(to_string(Beaten)))
+    Authority.ignore(println(to_string(Won(3) == Won(3))))
+    Authority.ignore(println(int_to_string(score(Won(7)) + score(Beaten))))
+    Authority.ignore(println(to_string(Shapes.wrap(5))))
+    Authority.ignore(println(to_string(List.head_opt([1, 2]))))
     match string_to_int("42") do
-      Some(n) -> print_line(int_to_string(n))
-      None -> print_line("none")
+      Some(n) -> Authority.ignore(println(int_to_string(n)))
+      None -> Authority.ignore(println("none"))
     end
-    print_line(to_string(string_to_int("x")))
+    Authority.ignore(println(to_string(string_to_int("x"))))
   end
 end
 |}
@@ -14974,16 +14980,16 @@ let test_erased_update_multi_field_values_compiled () =
     exact same stdout and the compiled binary must exit 0. Returns the
     compiled run's raw "stdout;EXIT:n" string on failure paths so callers
     can still assert on it directly if useful. *)
-let assert_compiled_interp_parity ~name ~src ~expected () =
+let assert_compiled_interp_parity ?(extra_args = "") ~name ~src ~expected () =
   let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
   let interp_out = read_cmd_output (Printf.sprintf
-    "cd %s && %s %s 2>&1"
+    "cd %s && %s %s %s 2>&1"
     (Filename.quote project_root)
-    (Filename.quote main_exe) (Filename.quote src_path)) in
+    (Filename.quote main_exe) extra_args (Filename.quote src_path)) in
   Alcotest.(check string) (name ^ ": interpreter output") expected interp_out;
   let bin = Filename.concat tmp (name ^ "bin") in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
-          ~main_exe ~bin ~src:src_path () with
+          ~extra_args ~main_exe ~bin ~src:src_path () with
   | None -> ()  (* legitimate, counted skip: no clang on PATH *)
   | Some bin ->
     let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?"
@@ -15107,7 +15113,7 @@ let test_main_adapter_two_caps () =
   needs IO.Console
   needs IO.Clock
   fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) : () do
-    let _t = unix_time()
+    let _t = Authority.must(System.now())
     println("a2")
     ()
   end
@@ -15123,8 +15129,8 @@ let test_main_adapter_three_caps () =
   needs IO.Clock
   needs IO.Random
   fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock), _cap_random : Cap(IO.Random)) : () do
-    let _t = unix_time()
-    let _b = random_bytes(4)
+    let _t = Authority.must(System.now())
+    let _b = Authority.must(Crypto.random_bytes(4))
     println("a3")
     ()
   end
@@ -15274,7 +15280,9 @@ let test_compiled_string_codepoint_builtin_parity () =
     differ, which is inherently flaky at millisecond resolution.  The purity
     registration is held by the list itself, not by this test. *)
 let test_compiled_unix_time_ms_parity () =
-  assert_compiled_interp_parity
+  (* Builtin-level: it pins the two raw clock builtins themselves, which since
+     ocap phase 4 only a stdlib-spanned program may call. *)
+  assert_compiled_interp_parity ~extra_args:"--stdlib-source"
     ~name:"march_unix_time_ms"
     ~src:"mod UnixTimeMsParity do\n\
     \  needs IO\n\
@@ -15839,8 +15847,8 @@ let test_js_test_runner_gaps () =
   end
 
   test "process env and value-typed capability mocks" do
-    println(to_string(process_env("MARCH_JS_GAPS_VAR")))
-    println(to_string(process_env("MARCH_JS_GAPS_UNSET")))
+    println(to_string(Authority.must(Process.env("MARCH_JS_GAPS_VAR"))))
+    println(to_string(Authority.must(Process.env("MARCH_JS_GAPS_UNSET"))))
     let c : Cap(IO.Process) = cap_narrow(root_cap)
     let before = where_am_i()
     let mock = cap_impl(c, { cap_ops_empty(c) with
@@ -20173,7 +20181,7 @@ let test_compiled_worker_local_fn_still_compiles () =
     failing the test if it compiled and linked (None when the toolchain is
     unavailable).  The module declares a `Worker` actor and grants main all
     of IO, so a body may spawn. *)
-let compile_expect_rejected ~(tag : string) ~(body : string) : string option =
+let compile_expect_rejected ?(extra_args = "") ~(tag : string) ~(body : string) () : string option =
   let main_exe = find_main_exe () in
   let project_root = march_project_root () in
   let tmp = Filename.temp_file ("march_" ^ tag) "" in
@@ -20195,7 +20203,7 @@ let compile_expect_rejected ~(tag : string) ~(body : string) : string option =
   close_out oc;
   let bin = Filename.concat tmp (tag ^ "_bin") in
   match compile_march_raw ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
-          ~main_exe ~bin ~src () with
+          ~extra_args ~main_exe ~bin ~src () with
   | `Ok _ -> Alcotest.failf "%s: the compiled call must be rejected, not linked" tag
   | `Skipped -> None
   | `Failed (rc, output, _) ->
@@ -20211,7 +20219,11 @@ let compile_expect_rejected ~(tag : string) ~(body : string) : string option =
 let test_compiled_interpreter_only_builtins_rejected () =
   List.iter (fun (name, call, reason_fragment) ->
       let tag = "iob_" ^ String.map (fun c -> if c = '.' then '_' else c) name in
-      match compile_expect_rejected ~tag ~body:("    let _r = " ^ call) with
+      (* --stdlib-source: task_spawn_link is a raw builtin, which since ocap
+         phase 4 only a stdlib-spanned program may name; this pins the
+         lowering's own rejection of it. *)
+      match compile_expect_rejected ~extra_args:"--stdlib-source" ~tag
+              ~body:("    let _r = " ^ call) () with
       | None -> ()
       | Some output ->
         Alcotest.(check bool) (name ^ ": diagnostic names the builtin") true
@@ -20234,7 +20246,7 @@ let test_compiled_interpreter_only_builtins_rejected () =
     symbol, and it is a positioned error rather than `_tap` at link time. *)
 let test_compiled_first_class_tap_rejected () =
   match compile_expect_rejected ~tag:"tap_value"
-          ~body:"    let _r = List.map([1, 2], tap)" with
+          ~body:"    let _r = List.map([1, 2], tap)" () with
   | None -> ()
   | Some output ->
     Alcotest.(check bool) "names tap and the fix" true
@@ -20247,7 +20259,7 @@ let test_compiled_first_class_tap_rejected () =
     this reached the linker as `Undefined symbols: _to_json`. *)
 let test_compiled_to_json_without_codec_rejected () =
   match compile_expect_rejected ~tag:"to_json_nocodec"
-          ~body:"    let _r = to_json(3)" with
+          ~body:"    let _r = to_json(3)" () with
   | None -> ()
   | Some output ->
     Alcotest.(check bool) "names the missing JsonTo impl and the type" true

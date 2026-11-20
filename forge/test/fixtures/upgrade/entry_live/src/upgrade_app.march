@@ -36,7 +36,7 @@ mod UpgradeApp do
 
   fn serve_one(env : Env, s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
     Echo_Server.recv_Ask(s, st, fn (n, st1) ->
-      let extra = if n >= 1000 do task_await_unwrap(task_spawn(fn _ -> nested(env, n))) else 0 end
+      let extra = if n >= 1000 do task_await_unwrap(Authority.must(Task.async(fn () -> nested(env, n)))) else 0 end
       Echo_Server.recv_Ask2(s, Echo_Server.send_Answer(s, st1, n + 1 + extra), fn (k, st2) ->
         Echo_Server.close(s, Echo_Server.send_Answer2(s, st2, k + 1))))
   end
@@ -68,7 +68,7 @@ mod UpgradeApp do
   -- `start` as changed although its code is not.
   fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Env do
     let t = spawn(Tally)
-    let _ = task_spawn(fn _ -> feed(t, 0))
+    let _ = Task.async(fn () -> feed(t, 0))
     -- Named state the OLD version creates: a later version's code must find
     -- it (a hot patch used to carry its own vault registry and could not).
     let st = Authority.must(Vault.new("upgrade_state"))

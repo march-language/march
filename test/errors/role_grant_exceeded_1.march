@@ -1,4 +1,8 @@
 -- EXPECT-ERROR: The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)`
+-- (Since ocap phase 4 the raw builtin is stdlib-only, so this program also
+-- draws `stdlib_internal`; it pins the call-level rule, which stdlib-spanned
+-- code still reaches. A user program reaches the operation through its
+-- stdlib entry point, rejected by the module and grant checks.)
 -- Per-role grants (distributed-deploys step 4, 2026-09-22): `Cons` is granted
 -- the console only, and its body reaches `file_write` through `save`.  The
 -- TYPE cannot catch this -- `save` takes no capability value; `needs

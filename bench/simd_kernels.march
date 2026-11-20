@@ -192,15 +192,15 @@ mod SimdKernels do
     let a = NativeArray.make_f32(n, 1.0000001)
     let b = NativeArray.make_f32(n, 2.0000003)
 
-    let t0s = unix_time(())
+    let t0s = Authority.must(System.now())
     let ds = dot_simd(a, b)
-    let t1s = unix_time(())
+    let t1s = Authority.must(System.now())
     println("DOT_SIMD_RESULT " ++ float_to_string(ds))
     println("DOT_SIMD_TIME_MS " ++ float_to_string(elapsed_ms(t0s, t1s)))
 
-    let t0c = unix_time(())
+    let t0c = Authority.must(System.now())
     let dc = dot_composed(a, b)
-    let t1c = unix_time(())
+    let t1c = Authority.must(System.now())
     println("DOT_COMPOSED_RESULT " ++ float_to_string(dc))
     println("DOT_COMPOSED_TIME_MS " ++ float_to_string(elapsed_ms(t0c, t1c)))
 
@@ -210,15 +210,15 @@ mod SimdKernels do
     let hay0 = NativeArray.make_u8(hay_len, 65)
     let hay = NativeArray.set_u8(hay0, needle_offset, 200)
 
-    let t0ss = unix_time(())
+    let t0ss = Authority.must(System.now())
     let idx_simd = scan_simd(hay, 200)
-    let t1ss = unix_time(())
+    let t1ss = Authority.must(System.now())
     println("SCAN_SIMD_RESULT " ++ int_to_string(idx_simd))
     println("SCAN_SIMD_TIME_MS " ++ float_to_string(elapsed_ms(t0ss, t1ss)))
 
-    let t0sc = unix_time(())
+    let t0sc = Authority.must(System.now())
     let idx_scalar = scan_scalar(hay, 200)
-    let t1sc = unix_time(())
+    let t1sc = Authority.must(System.now())
     println("SCAN_SCALAR_RESULT " ++ int_to_string(idx_scalar))
     println("SCAN_SCALAR_TIME_MS " ++ float_to_string(elapsed_ms(t0sc, t1sc)))
 

@@ -72,8 +72,8 @@ mod LiveProcReg do
         end
         -- Eight tasks spawning at once, across scheduler threads.
         let tasks = List.map(Range.to_list(Range.new(0, 8)), fn t ->
-          task_spawn(fn _ -> churn(t * 100, t * 100 + 25, 0)))
-        let total = List.fold_left(tasks, 0, fn (acc, tk) -> acc + task_await_unwrap(tk))
+          Task.async(fn () -> churn(t * 100, t * 100 + 25, 0)))
+        let total = List.fold_left(tasks, 0, fn (acc, tk) -> acc + task_await_unwrap(Authority.must(tk)))
         Authority.ignore(println("concurrent mismatches: " ++ int_to_string(total)))
       Err(e) -> Authority.ignore(println("spawn p0 failed: " ++ to_string(e)))
     end

@@ -70,13 +70,13 @@ mod Main do
   end
 
   fn main(c : Cap(IO.Console)) do
-    print_line(A.describe(unwrap(A.wrap(A.make()))))
-    print_line(pick(A.NB("x"), B.NC(true), Top(7)))
-    print_line(show(A.make()) ++ " " ++ show(B.ND(1, 2)) ++ " " ++ show(Top(1)))
-    print_line(if A.make() == A.NA(3) do "eq A" else "neq A" end)
-    print_line(if B.ND(1, 2) == B.ND(1, 3) do "eq B" else "neq B" end)
-    print_line(if Top(2) == Top(2) do "eq Top" else "neq Top" end)
-    print_line(A.roundtrip(A.NA(3)))
-    print_line(B.roundtrip(B.ND(1, 2)))
+    IO.puts(A.describe(unwrap(A.wrap(A.make()))))
+    IO.puts(pick(A.NB("x"), B.NC(true), Top(7)))
+    IO.puts(show(A.make()) ++ " " ++ show(B.ND(1, 2)) ++ " " ++ show(Top(1)))
+    IO.puts(if A.make() == A.NA(3) do "eq A" else "neq A" end)
+    IO.puts(if B.ND(1, 2) == B.ND(1, 3) do "eq B" else "neq B" end)
+    IO.puts(if Top(2) == Top(2) do "eq Top" else "neq Top" end)
+    IO.puts(A.roundtrip(A.NA(3)))
+    IO.puts(B.roundtrip(B.ND(1, 2)))
   end
 end

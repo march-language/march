@@ -84,14 +84,14 @@ mod RecordSharedRelease do
 
   fn spawn_all(seed : Int, rounds : Int) do
     let w = make(seed)
-    List.map(List.range(0, 8), fn j -> task_spawn(fn _ -> churn(w, rounds, j) + weigh(w)))
+    List.map(List.range(0, 8), fn j -> Authority.must(Task.async(fn -> churn(w, rounds, j) + weigh(w))))
   end
 
   fn tasks(i : Int, acc : Int) : Int do
     if i == 0 do acc
     else
       let ts = spawn_all(i, 300)
-      let got = List.fold_left(ts, 0, fn (s, t) -> s + task_await_unwrap(t))
+      let got = List.fold_left(ts, 0, fn (s, t) -> s + Task.await_unwrap(t))
       tasks(i - 1, acc + got)
     end
   end

@@ -12,7 +12,7 @@ let compiler_exe =
   let exe_dir = Filename.dirname Sys.executable_name in
   Filename.concat exe_dir "../bin/main.exe"
 
-let emit_ir src_text =
+let emit_ir ?(stdlib_source = true) src_text =
   if not (Sys.file_exists compiler_exe) then
     Alcotest.failf "compiler not found at %s" compiler_exe;
   let src = Filename.temp_file "cap_marker" ".march" in
@@ -22,10 +22,16 @@ let emit_ir src_text =
   (* --emit-llvm ignores -o: it writes <input-basename>.ll next to the input
      (bin/main.ml:2616, `let ll_file = basename ^ ".ll"`). *)
   let ll = Filename.remove_extension src ^ ".ll" in
+  (* --stdlib-source: these programs call the raw builtins on purpose (the
+     markers are recorded where a builtin resolves), and since ocap phase 4
+     only a stdlib-spanned program may (Typecheck_env.stdlib_only). A program
+     that calls none is checked as user code ([~stdlib_source:false]). *)
   let rc =
     Sys.command
-      (Printf.sprintf "%s --emit-llvm %s > /dev/null 2>&1"
-         (Filename.quote compiler_exe) (Filename.quote src))
+      (Printf.sprintf "%s --emit-llvm%s %s > /dev/null 2>&1"
+         (Filename.quote compiler_exe)
+         (if stdlib_source then " --stdlib-source" else "")
+         (Filename.quote src))
   in
   if rc <> 0 then Alcotest.failf "emit-llvm failed (rc=%d)" rc;
   let ic = open_in ll in
@@ -315,7 +321,9 @@ end
 |}
 
 let test_user_fn_named_dns_resolve_marks_nothing () =
-  let ir = emit_ir user_dns_resolve_src in
+  (* User code: the bug was in how a USER module's own `dns_resolve` is
+     charged, which a stdlib-spanned program would not show. *)
+  let ir = emit_ir ~stdlib_source:false user_dns_resolve_src in
   Alcotest.(check bool) "no IO.Network marker for a user fn named dns_resolve"
     false
     (contains ir "@__march_cap_IO_Network");

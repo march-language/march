@@ -12,7 +12,7 @@ mod Main do
   -- `main` is granted nothing and its IO is rejected.  Accept companion
   -- t176 states the grant as `Cap` parameters.
   fn main() : () do
-    match file_write("/tmp/t176_out", "d") do
+    match Authority.must(File.write("/tmp/t176_out", "d")) do
       Ok(_)  -> Authority.ignore(println("ok"))
       Err(_) -> Authority.ignore(println("e"))
     end

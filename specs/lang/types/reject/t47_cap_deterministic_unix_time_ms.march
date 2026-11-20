@@ -1,4 +1,8 @@
 -- EXPECT-ERROR: which is non-deterministic
+-- (Since ocap phase 4 the raw builtin is stdlib-only, so this program also
+-- draws `stdlib_internal`; it pins the call-level rule, which stdlib-spanned
+-- code still reaches. A user program reaches the operation through its
+-- stdlib entry point, rejected by the module and grant checks.)
 -- Capabilities widening, Task 5 (F2 fix) -- `cap deterministic`
 -- (`check_deterministic_module`, `typecheck.ml:6650`), the REJECT side: a
 -- `cap deterministic` module whose body reads the wall clock via the REAL

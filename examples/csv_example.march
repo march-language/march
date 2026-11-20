@@ -21,7 +21,7 @@ end
 -- ── Example 1: streaming with each_row ──────────────────────────────
 
 pfn print_row(row) do
-  print(to_string(row))
+  IO.write(to_string(row))
 end
 
 pfn demo_each_row(path) do

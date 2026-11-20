@@ -5,7 +5,7 @@ mod JsArgv do
   needs IO.Process
 
   fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) : Unit do
-    println(String.join(process_argv(), ","))
+    println(String.join(Authority.must(Process.argv()), ","))
     ()
   end
 end

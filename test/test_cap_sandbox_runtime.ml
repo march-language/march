@@ -312,8 +312,8 @@ mod SbxDenyNet do
   end
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _p : Cap(IO.Process), _w : Cap(IO.FileWrite)) : Unit do
-    let _anchor_proc = process_pid()
-    let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
+    let _anchor_proc = Authority.must(Process.pid())
+    let _anchor_write = File.write("/tmp/march_sbx_anchor_write", "")
     println("socket=" ++ int_to_string(probe_socket()))
     println("execve=" ++ int_to_string(probe_execve()))
     println("write=" ++ int_to_string(probe_write_open()))
@@ -338,7 +338,7 @@ mod SbxDenyExec do
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _w : Cap(IO.FileWrite)) : Unit do
     let _anchor_net = Socket.connect("127.0.0.1", 1)
-    let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
+    let _anchor_write = File.write("/tmp/march_sbx_anchor_write", "")
     println("socket=" ++ int_to_string(probe_socket()))
     println("execve=" ++ int_to_string(probe_execve()))
     println("write=" ++ int_to_string(probe_write_open()))
@@ -363,7 +363,7 @@ mod SbxDenyWrite do
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _p : Cap(IO.Process)) : Unit do
     let _anchor_net = Socket.connect("127.0.0.1", 1)
-    let _anchor_proc = process_pid()
+    let _anchor_proc = Authority.must(Process.pid())
     println("socket=" ++ int_to_string(probe_socket()))
     println("execve=" ++ int_to_string(probe_execve()))
     println("write=" ++ int_to_string(probe_write_open()))
@@ -504,8 +504,8 @@ mod SbxDenyNetMac do
   end
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _p : Cap(IO.Process), _w : Cap(IO.FileWrite)) : Unit do
-    let _anchor_proc = process_pid()
-    let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
+    let _anchor_proc = Authority.must(Process.pid())
+    let _anchor_write = File.write("/tmp/march_sbx_anchor_write", "")
     println("socket=" ++ int_to_string(probe_socket()))
     println("fork=" ++ int_to_string(probe_fork()))
     println("write=" ++ int_to_string(probe_write_open()))
@@ -531,7 +531,7 @@ mod SbxDenyProcessMac do
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _w : Cap(IO.FileWrite)) : Unit do
     let _anchor_net = Socket.connect("127.0.0.1", 1)
-    let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
+    let _anchor_write = File.write("/tmp/march_sbx_anchor_write", "")
     println("connect=" ++ int_to_string(probe_connect()))
     println("fork=" ++ int_to_string(probe_fork()))
     println("write=" ++ int_to_string(probe_write_open()))
@@ -556,7 +556,7 @@ mod SbxHoldProcessMac do
   end
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _p : Cap(IO.Process)) : Unit do
-    let _anchor_proc = process_pid()
+    let _anchor_proc = Authority.must(Process.pid())
     println("fork=" ++ int_to_string(probe_fork()))
     println("exec=" ++ int_to_string(probe_exec_inplace()))
     ()
@@ -580,7 +580,7 @@ mod SbxDenyWriteMac do
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _p : Cap(IO.Process)) : Unit do
     let _anchor_net = Socket.connect("127.0.0.1", 1)
-    let _anchor_proc = process_pid()
+    let _anchor_proc = Authority.must(Process.pid())
     println("connect=" ++ int_to_string(probe_connect()))
     println("fork=" ++ int_to_string(probe_fork()))
     println("write=" ++ int_to_string(probe_write_open()))
@@ -788,11 +788,11 @@ let test_macos_scope_under_symlinked_tmp () =
           scoped_fixture ~modname:"SbxScopeTmpMac" ~scope:d
             ~body:
               [ result_line "inscope"
-                  (Printf.sprintf "file_write(\"%s/in.txt\", \"x\")" d);
+                  (Printf.sprintf "Authority.must(File.write(\"%s/in.txt\", \"x\"))" d);
                 (* A subdirectory that does not exist at startup. *)
-                result_line "mkdir" (Printf.sprintf "dir_mkdir(\"%s/newdir\")" d);
+                result_line "mkdir" (Printf.sprintf "Authority.must(Dir.mkdir(\"%s/newdir\"))" d);
                 result_line "newsub"
-                  (Printf.sprintf "file_write(\"%s/newdir/f.txt\", \"y\")" d) ]
+                  (Printf.sprintf "Authority.must(File.write(\"%s/newdir/f.txt\", \"y\"))" d) ]
         in
         let out = compile_and_run src in
         check_field "inscope" 0 out;
@@ -815,9 +815,9 @@ let test_macos_scope_not_yet_existing () =
         let src =
           scoped_fixture ~modname:"SbxScopeNewMac" ~scope
             ~body:
-              [ result_line "mkdir" (Printf.sprintf "dir_mkdir(\"%s\")" scope);
+              [ result_line "mkdir" (Printf.sprintf "Authority.must(Dir.mkdir(\"%s\"))" scope);
                 result_line "inscope"
-                  (Printf.sprintf "file_write(\"%s/f.txt\", \"x\")" scope) ]
+                  (Printf.sprintf "Authority.must(File.write(\"%s/f.txt\", \"x\"))" scope) ]
         in
         let out = compile_and_run src in
         check_field "mkdir" 0 out;
@@ -836,7 +836,7 @@ let test_macos_scope_is_symlink () =
           scoped_fixture ~modname:"SbxScopeLinkMac" ~scope:(d ^ "/link")
             ~body:
               [ result_line "inscope"
-                  (Printf.sprintf "file_write(\"%s/link/f.txt\", \"x\")" d) ]
+                  (Printf.sprintf "Authority.must(File.write(\"%s/link/f.txt\", \"x\"))" d) ]
         in
         let out = compile_and_run src in
         check_field "inscope" 0 out;
@@ -1006,7 +1006,7 @@ let reload_write_src =
     fn wait_stdin() : Int = "sbx_wait_stdin"
   end
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _w : Cap(IO.FileWrite)) : Unit do
-    let _anchor = file_write("/dev/null", "")
+    let _anchor = File.write("/dev/null", "")
     println("up")
     println("waited=" ++ int_to_string(wait_stdin()))
     ()

@@ -388,11 +388,11 @@ let scope_fixture ~modname ~decl ~inside ~outside =
 
   fn main(_c : Cap(IO.Console), _w : Cap(IO.FileWrite)) : Unit do
     let outside = "%s"
-    match file_write("%s", "x") do
+    match Authority.must(File.write("%s", "x")) do
       Ok(_) -> println("inscope=0")
       Err(_) -> println("inscope=1")
     end
-    match file_write(outside ++ "", "x") do
+    match Authority.must(File.write(outside ++ "", "x")) do
       Ok(_) -> println("outscope=0")
       Err(_) -> println("outscope=1")
     end

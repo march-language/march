@@ -80,7 +80,7 @@ mod TwoNodeSkewA do
         let d = drain(fd, buf1, Nil, false)
         match d do
           (buf2, events, acked) ->
-            match SwimDriver.step(s, unix_time_ms(), events) do
+            match SwimDriver.step(s, Authority.must(System.now_ms()), events) do
               (s2, acts) ->
                 perform(fd, acts)
                 (s2, buf2, acked, false)
@@ -115,7 +115,7 @@ mod TwoNodeSkewA do
     match tick(fd, s, buf) do
       (_, _, _, true) -> Authority.ignore(println("node-a: peer closed early"))
       (s2, buf2, _, false) ->
-        let t = unix_time_ms()
+        let t = Authority.must(System.now_ms())
         if arrived == 0 do
           match Map.get(s2.peer_loads, "node-b", Map.str_cmp) do
             None -> observe(fd, s2, buf2, 0)

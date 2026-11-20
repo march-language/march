@@ -47,7 +47,7 @@ mod TopologyRejoinB do
   pfn early(h : Cap(ClusterNode.Live), settle : Int, left : Int, seen : Bool) : (Bool, Bool) do
     let seen2 = seen || offering(h)
     let done = match ClusterNode.rejoined_at(h) do
-      Some(t) -> unix_time_ms() >= t + settle - 300
+      Some(t) -> Authority.must(System.now_ms()) >= t + settle - 300
       None -> false
     end
     if done || left <= 0 do (seen2, ClusterNode.rejoined_at(h) != None)

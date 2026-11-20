@@ -18,7 +18,8 @@ mod CapMockIO do
   needs IO.Console
 
   pfn shout(s : String) : () do
-    print_line("REAL:" ++ s)
+    IO.puts("REAL:" ++ s)
+    ()
   end
 
   pfn work() : () do
@@ -28,7 +29,7 @@ mod CapMockIO do
   fn main(c : Cap(IO.Console)) do
     work()
     let mock = cap_impl(c, { cap_ops_empty(c) with
-      print_line: Some(fn s -> print("MOCK[" ++ s ++ "]\n")) })
+      print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) })
     with_cap(mock, fn _ -> work())
     work()
   end

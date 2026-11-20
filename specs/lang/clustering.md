@@ -1104,7 +1104,7 @@ mod NodeA do
     -- standard library). No seeds: this node waits to be dialled.
     let cfg = ClusterNode.config("a", 9000, "", Nil, "shared-secret", 1)
     match ClusterNode.start(c, cfg) do
-      Err(e)   -> process_exit(1)
+      Err(e)   -> Authority.ignore(Process.exit(1))
       Ok(node) ->
         println("node " ++ ClusterNode.node_id(node) ++ " up")
         -- In practice, serve RemoteCall requests from an actor.
@@ -1126,7 +1126,7 @@ mod NodeB do
     -- Node A's address is a seed: B dials it and handshakes during `start`.
     let cfg = ClusterNode.config("b", 9001, "", Cons("127.0.0.1:9000", Nil), secret, 1)
     match ClusterNode.start(c, cfg) do
-      Err(e)   -> process_exit(1)
+      Err(e)   -> Authority.ignore(Process.exit(1))
       Ok(node) ->
         -- Peers appear in the membership once the handshake has completed.
         let peers = ClusterNode.members(node)

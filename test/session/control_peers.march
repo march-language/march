@@ -408,7 +408,7 @@ mod ControlPeers do
       List.fold_left(names(), (), fn (_, nm) -> session(c, nc, fw, lv, ints, nodes, tally, nm))
       let _ = if k == swap do
         let progress = String.join(List.map(names(), fn nm -> progress_of(node_of(nodes, nm))), ", ")
-        print_line("leader replaced after round " ++ int_to_string(k) ++ " (" ++ decision_of(lv, nodes, ints) ++ "; lines applied " ++ progress ++ ")")
+        IO.puts("leader replaced after round " ++ int_to_string(k) ++ " (" ++ decision_of(lv, nodes, ints) ++ "; lines applied " ++ progress ++ ")")
         fresh_leader(lv)
       else () end
       rounds(c, nc, fw, lv, ints, nodes, tally, k + 1, swap)
@@ -531,7 +531,7 @@ mod ControlPeers do
     let fw : Cap(IO.FileWrite) = cap_narrow(c)
     let r = rel()
 
-    print_line("-- scripted Control against the real Agent")
+    IO.puts("-- scripted Control against the real Agent")
     let nodes1 = Authority.must(Vault.new("control_peers_nodes1"))
     put_node(nodes1, sim("r1", "render"))
     let o1 = Control.order(r, head(r.steps), "r1")
@@ -539,22 +539,22 @@ mod ControlPeers do
     let s1 = Session.attach(c, t1.ops)
     let _ = agent_role(s1, nc, Ctl_Agent.register(s1, 0), agent_ops(nodes1, "r1"))
     let _ = Ctl_Control.script(s1, nc, fw, Ctl_Control.register(s1, 0), [
-      Ctl_Control.Expect_Hello(fn rep -> print_line("script: hello from " ++ rep.node ++ " at seq " ++ int_to_string(rep.seq))),
+      Ctl_Control.Expect_Hello(fn rep -> Authority.ignore(IO.puts("script: hello from " ++ rep.node ++ " at seq " ++ int_to_string(rep.seq)))),
       Ctl_Control.Choose_apply(wire_order(o1)),
-      Ctl_Control.Expect_Stepped(fn res -> print_line("script: " ++ show_result(result_of(res)))),
+      Ctl_Control.Expect_Stepped(fn res -> Authority.ignore(IO.puts("script: " ++ show_result(result_of(res))))),
       Ctl_Control.Choose_apply(wire_order(o1)),
-      Ctl_Control.Expect_Stepped(fn res -> print_line("script: again, " ++ show_result(result_of(res)))),
+      Ctl_Control.Expect_Stepped(fn res -> Authority.ignore(IO.puts("script: again, " ++ show_result(result_of(res))))),
       Ctl_Control.Choose_apply(wire_order({ o1 with lines: "SEQ 42 id1 s1 PURGE everything", want: "mr3" })),
-      Ctl_Control.Expect_Stepped(fn res -> print_line("script: " ++ show_result(result_of(res)))),
+      Ctl_Control.Expect_Stepped(fn res -> Authority.ignore(IO.puts("script: " ++ show_result(result_of(res))))),
       Ctl_Control.Choose_observe(42),
-      Ctl_Control.Expect_Report(fn rep -> print_line("script: report from " ++ rep.node ++ " at seq " ++ int_to_string(rep.seq))),
+      Ctl_Control.Expect_Report(fn rep -> Authority.ignore(IO.puts("script: report from " ++ rep.node ++ " at seq " ++ int_to_string(rep.seq)))),
       Ctl_Control.Choose_bye("done")
     ])
     t1.drain(())
-    print_line(show_node(node_of(nodes1, "r1")))
-    print_line("queued after: " ++ int_to_string(t1.queued(())))
+    IO.puts(show_node(node_of(nodes1, "r1")))
+    IO.puts("queued after: " ++ int_to_string(t1.queued(())))
 
-    print_line("-- scripted Agent against the real Control")
+    IO.puts("-- scripted Agent against the real Control")
     let nodes2 = Authority.must(Vault.new("control_peers_nodes2"))
     cluster(nodes2)
     let lv2 = Authority.must(Vault.new("control_peers_leader2"))
@@ -567,18 +567,18 @@ mod ControlPeers do
     let _ = control_role(s2, nc, fw, Ctl_Control.register(s2, 0), leader_ops(lv2, ints2, nodes2))
     let _ = Ctl_Agent.script(s2, nc, Ctl_Agent.register(s2, 0), [
       Ctl_Agent.Send_Hello(wire_report(r1_old)),
-      Ctl_Agent.Expect_Apply(fn o -> print_line(show_order(o))),
+      Ctl_Agent.Expect_Apply(fn o -> Authority.ignore(IO.puts(show_order(o)))),
       Ctl_Agent.Send_Stepped(wire_result({ seq: 42, step: 1, node: "r1", ok: true, detail: "applied" })),
-      Ctl_Agent.Expect_Observe(fn head -> print_line("script: polled, leader holds " ++ int_to_string(head))),
+      Ctl_Agent.Expect_Observe(fn head -> Authority.ignore(IO.puts("script: polled, leader holds " ++ int_to_string(head)))),
       Ctl_Agent.Send_Report(wire_report({ r1_old with seq: 42, versions: "render=mr2" })),
-      Ctl_Agent.Expect_Observe(fn head -> print_line("script: polled again (gate), leader holds " ++ int_to_string(head))),
+      Ctl_Agent.Expect_Observe(fn head -> Authority.ignore(IO.puts("script: polled again (gate), leader holds " ++ int_to_string(head)))),
       Ctl_Agent.Send_Report(wire_report({ r1_old with seq: 42, versions: "render=mr2" })),
-      Ctl_Agent.Expect_Bye(fn why -> print_line("script: bye, " ++ why))
+      Ctl_Agent.Expect_Bye(fn why -> Authority.ignore(IO.puts("script: bye, " ++ why)))
     ])
     t2.drain(())
-    print_line("leader: " ++ decision_of(lv2, nodes2, ints2))
+    IO.puts("leader: " ++ decision_of(lv2, nodes2, ints2))
 
-    print_line("-- a rollout over Ctl sessions, the leader replaced mid-rollout")
+    IO.puts("-- a rollout over Ctl sessions, the leader replaced mid-rollout")
     let nodes3 = Authority.must(Vault.new("control_peers_nodes3"))
     cluster(nodes3)
     let lv3 = Authority.must(Vault.new("control_peers_leader3"))
@@ -586,11 +586,11 @@ mod ControlPeers do
     let ints3 = Authority.must(Vault.new("control_peers_ints3"))
     let tally3 = Authority.must(Vault.new("control_peers_tally3"))
     let n3 = rounds(c, nc, fw, lv3, ints3, nodes3, tally3, 1, 1)
-    print_line("after " ++ int_to_string(n3) ++ " rounds: " ++ decision_of(lv3, nodes3, ints3))
-    List.fold_left(names(), (), fn (_, nm) -> print_line(show_node(node_of(nodes3, nm))))
-    print_line(tallies(tally3, n3 * 8))
+    IO.puts("after " ++ int_to_string(n3) ++ " rounds: " ++ decision_of(lv3, nodes3, ints3))
+    List.fold_left(names(), (), fn (_, nm) -> Authority.ignore(IO.puts(show_node(node_of(nodes3, nm)))))
+    IO.puts(tallies(tally3, n3 * 8))
 
-    print_line("-- a refused order halts the rollout")
+    IO.puts("-- a refused order halts the rollout")
     let nodes4 = Authority.must(Vault.new("control_peers_nodes4"))
     cluster(nodes4)
     let r1_4 = node_of(nodes4, "r1")
@@ -600,46 +600,46 @@ mod ControlPeers do
     let ints4 = Authority.must(Vault.new("control_peers_ints4"))
     let tally4 = Authority.must(Vault.new("control_peers_tally4"))
     let n4 = rounds(c, nc, fw, lv4, ints4, nodes4, tally4, 1, 0)
-    print_line("after " ++ int_to_string(n4) ++ " rounds: " ++ decision_of(lv4, nodes4, ints4))
-    List.fold_left(names(), (), fn (_, nm) -> print_line(show_node(node_of(nodes4, nm))))
+    IO.puts("after " ++ int_to_string(n4) ++ " rounds: " ++ decision_of(lv4, nodes4, ints4))
+    List.fold_left(names(), (), fn (_, nm) -> Authority.ignore(IO.puts(show_node(node_of(nodes4, nm)))))
 
-    print_line("-- CtlFetch: the real roles, a known and an unknown hash")
+    IO.puts("-- CtlFetch: the real roles, a known and an unknown hash")
     let t5 = Session.in_process()
     let s5 = Session.attach(c, t5.ops)
     let _ = fetch_server(s5, nc, CtlFetch_Server.register(s5, 0), fn h -> artifact(h), 4)
-    let _ = fetch_agent(s5, nc, CtlFetch_Agent.register(s5, 0), "h1", fn hex -> print_line("fetched h1: " ++ hex))
+    let _ = fetch_agent(s5, nc, CtlFetch_Agent.register(s5, 0), "h1", fn hex -> Authority.ignore(IO.puts("fetched h1: " ++ hex)))
     t5.drain(())
     let t6 = Session.in_process()
     let s6 = Session.attach(c, t6.ops)
     let _ = fetch_server(s6, nc, CtlFetch_Server.register(s6, 0), fn h -> artifact(h), 4)
-    let _ = fetch_agent(s6, nc, CtlFetch_Agent.register(s6, 0), "nope", fn hex -> print_line("fetched nope: \"" ++ hex ++ "\""))
+    let _ = fetch_agent(s6, nc, CtlFetch_Agent.register(s6, 0), "nope", fn hex -> Authority.ignore(IO.puts("fetched nope: \"" ++ hex ++ "\"")))
     t6.drain(())
     let t7 = Session.in_process()
     let s7 = Session.attach(c, t7.ops)
     let _ = fetch_server(s7, nc, CtlFetch_Server.register(s7, 0), fn h -> artifact(h), 16)
     let _ = CtlFetch_Agent.script(s7, nc, CtlFetch_Agent.register(s7, 0), [
       CtlFetch_Agent.Send_Want("h1"),
-      CtlFetch_Agent.Expect_Chunk(fn ch -> print_line("script: chunk at " ++ int_to_string(ch.offset) ++ ": " ++ ch.data)),
-      CtlFetch_Agent.Expect_Chunk(fn ch -> print_line("script: chunk at " ++ int_to_string(ch.offset) ++ ": " ++ ch.data)),
-      CtlFetch_Agent.Expect_Fin(fn ch -> print_line("script: last chunk at " ++ int_to_string(ch.offset) ++ ": " ++ ch.data))
+      CtlFetch_Agent.Expect_Chunk(fn ch -> Authority.ignore(IO.puts("script: chunk at " ++ int_to_string(ch.offset) ++ ": " ++ ch.data))),
+      CtlFetch_Agent.Expect_Chunk(fn ch -> Authority.ignore(IO.puts("script: chunk at " ++ int_to_string(ch.offset) ++ ": " ++ ch.data))),
+      CtlFetch_Agent.Expect_Fin(fn ch -> Authority.ignore(IO.puts("script: last chunk at " ++ int_to_string(ch.offset) ++ ": " ++ ch.data)))
     ])
     t7.drain(())
 
-    print_line("-- chaos: Control against the real Agent, 30 seeds")
+    IO.puts("-- chaos: Control against the real Agent, 30 seeds")
     let tally8 = Authority.must(Vault.new("control_peers_tally8"))
     chaos_control(c, nc, fw, tally8, 0)
-    print_line(tallies(tally8, 60))
+    IO.puts(tallies(tally8, 60))
 
-    print_line("-- chaos: Agent against the real Control, 30 seeds")
+    IO.puts("-- chaos: Agent against the real Control, 30 seeds")
     let tally9 = Authority.must(Vault.new("control_peers_tally9"))
     chaos_agent(c, nc, fw, tally9, 0)
-    print_line(tallies(tally9, 60))
+    IO.puts(tallies(tally9, 60))
 
-    print_line("-- chaos: CtlFetch, each role against the real other, 30 seeds")
+    IO.puts("-- chaos: CtlFetch, each role against the real other, 30 seeds")
     let tally10 = Authority.must(Vault.new("control_peers_tally10"))
     let got = Authority.must(Vault.new("control_peers_got"))
     fetch_seeds(c, nc, tally10, got, 0)
-    print_line(tallies(tally10, 120) ++ ", real agents finished: " ++ int_to_string(int_of(got, "fetched")) ++ " of 30")
+    IO.puts(tallies(tally10, 120) ++ ", real agents finished: " ++ int_to_string(int_of(got, "fetched")) ++ " of 30")
     ()
   end
 end

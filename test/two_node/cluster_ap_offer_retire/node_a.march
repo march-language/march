@@ -169,13 +169,13 @@ mod ClusterApOfferRetire do
             retired("5 refused re-offers", held)
 
             -- 3. Close while a session runs under it.
-            let client = task_spawn(fn _ ->
+            let client = Authority.must(Task.async(fn () ->
               match Echo_Run.initiate_Client(h, fn (s, st) -> ask(s, st, 7)) do
                 Ok(_) -> 1
                 Err(e) ->
                   println("Client: " ++ Echo_Run.error_message(e))
                   0
-              end)
+              end))
             await_active(o, 1, 10000)
             SessionNode.close_offer(o)
             sleep_ms(200)

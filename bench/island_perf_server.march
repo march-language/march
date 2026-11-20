@@ -48,9 +48,9 @@ fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen)) : Un
   println("  POST /update  -> inc actor counter, returns {ok:true}")
   println("  GET  /ping    -> pong (health check)")
 
-  HttpServer.new(8899)
+  Authority.must(HttpServer.new(8899)
   |> HttpServer.plug(fn conn -> router(counter, conn))
-  |> HttpServer.listen()
+  |> HttpServer.listen())
 end
 
 end

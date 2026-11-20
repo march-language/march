@@ -129,6 +129,6 @@ mod TopologyConflict do
     Topology.reconcile_now(c)
     show_offers(c, "name released")
     status(c)
-    process_exit(0)
+    Process.exit(0)
   end
 end

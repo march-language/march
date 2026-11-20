@@ -145,7 +145,7 @@ mod RoleApp do
     type Env = { started : Bool }
 
     fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Env do
-      let _ = task_spawn(fn _ -> run(io, node, 0, 0))
+      let _ = Task.async(fn () -> run(io, node, 0, 0))
       { started: true }
     end
 

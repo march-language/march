@@ -11,7 +11,7 @@ mod Main do
     let a = S(1)
     let x = step(a)
     let y = step(a)
-    print_line(int_to_string(x + y))
+    IO.puts(int_to_string(x + y))
   end
   fn step(s : S) : Int do match s do S(e) -> e end end
   always_linear type S = S(Int)

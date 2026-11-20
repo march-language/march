@@ -29,17 +29,17 @@ mod HttpTest do
 
   fn assert_eq(label, expected, actual) do
     if expected == actual do
-      print("[PASS] " ++ label)
+      IO.write("[PASS] " ++ label)
     else
-      print("[FAIL] " ++ label ++ ": expected \"" ++ expected ++ "\" got \"" ++ actual ++ "\"")
+      IO.write("[FAIL] " ++ label ++ ": expected \"" ++ expected ++ "\" got \"" ++ actual ++ "\"")
     end
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen)) do
     -- Spawn server subprocess: handles exactly 3 requests then exits
-    let handle = HttpServer.new(18080)
+    let handle = Authority.must(HttpServer.new(18080)
       |> HttpServer.plug(router)
-      |> HttpServer.spawn_n(3)
+      |> HttpServer.spawn_n(3))
 
     let client = HttpClient.new_client()
 
@@ -48,7 +48,7 @@ mod HttpTest do
     Ok(resp) ->
       assert_eq("GET /", "hello", Http.response_body(resp))
     Err(_) ->
-      print("[FAIL] GET / - request error")
+      IO.write("[FAIL] GET / - request error")
     end
 
     -- GET /ping → "pong"
@@ -56,7 +56,7 @@ mod HttpTest do
     Ok(resp) ->
       assert_eq("GET /ping", "pong", Http.response_body(resp))
     Err(_) ->
-      print("[FAIL] GET /ping - request error")
+      IO.write("[FAIL] GET /ping - request error")
     end
 
     -- POST /echo → echoes the body
@@ -64,13 +64,13 @@ mod HttpTest do
     Ok(resp) ->
       assert_eq("POST /echo", "hello echo", Http.response_body(resp))
     Err(_) ->
-      print("[FAIL] POST /echo - request error")
+      IO.write("[FAIL] POST /echo - request error")
     end
 
     -- Wait for server to exit cleanly
     HttpServer.wait_for(handle)
 
-    print("Done.")
+    IO.write("Done.")
   end
 
 end

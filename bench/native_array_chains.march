@@ -156,17 +156,17 @@ end
 -- ── Driver ─────────────────────────────────────────────────────────────────
 
 pfn time_int(case_name : String, variant : String, f : Unit -> Int) : Int do
-  let t0 = unix_time(())
+  let t0 = Authority.must(System.now())
   let v = f(())
-  let t1 = unix_time(())
+  let t1 = Authority.must(System.now())
   report(case_name, variant, elapsed_ms(t0, t1))
   v
 end
 
 pfn time_flt(case_name : String, variant : String, f : Unit -> Float) : Float do
-  let t0 = unix_time(())
+  let t0 = Authority.must(System.now())
   let v = f(())
-  let t1 = unix_time(())
+  let t1 = Authority.must(System.now())
   report(case_name, variant, elapsed_ms(t0, t1))
   v
 end

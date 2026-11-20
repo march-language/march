@@ -1253,7 +1253,7 @@ diverge or crash compiled (see [Interpreted vs compiled](#interpreted-vs-compile
 | `pid_to_int(pid)` | `→ Int` | both | The inverse: a Pid's spawn index, the `N` in its `Pid(N)` display (what `GlobalPid.make` takes for a local actor) |
 | `Actor.inspect_state(d, pid, timeout_ms)` | `→ Result(String, InspectError)` | both | The actor's state as text; `d : Cap(Actor.Debug)` from `Actor.debug(io)`; see [Reading an actor's state](#reading-an-actors-state-actorinspect_state) |
 | `get_actor_field(pid, name)` | `→ Option(a)` | both | Read an actor's state field via the runtime shape registry |
-| `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |
+| `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task. Stdlib-internal: a program calls `Task.async` (or `Task.async_steal`, `Task.async_cancellable`), which checks `IO.Spawn` first |
 | `task_await(t)` | `→ Result(a, String)` | both | Await a task (use `Task.await` instead) |
 | `task_poll(t)` | `→ Option(Result(a, String))` | both (the interpreter's tasks finish at spawn, so it never answers `None`) | Non-blocking await: `None` while the task runs, else `Some` of what `task_await` answers (use `Task.poll` instead); see [Checking a task without waiting](#checking-a-task-without-waiting) |
 | `Actor.set_queue_limit(pid, limit, policy)` | `→ ()` | both (policy `3` is compiled-only; interpreted treats it as unbounded) | Bound an actor's mailbox; see [Mailbox Limits and Backpressure](#mailbox-limits-and-backpressure) |

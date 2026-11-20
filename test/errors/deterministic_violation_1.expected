@@ -5,7 +5,7 @@ exit: 1
 
 Declare only capabilities that are neither the clock nor an RNG (`IO.Console`, `IO.FileRead`, ...), and move the code that reads the clock or an RNG to a module without `cap deterministic`.
 
-22 |   needs IO.Clock
+26 |   needs IO.Clock
        ^^^^^^^^^^^^^^
 
 
@@ -16,7 +16,16 @@ Declare only capabilities that are neither the clock nor an RNG (`IO.Console`, `
 
 Use deterministic operations only in a `cap deterministic` module. Avoid random/time builtins.
 
-26 |     unix_time_ms(())
+30 |     unix_time_ms(())
+         ^^^^^^^^^^^^
+
+
+
+-- PROGRAM ------- errors/deterministic_violation_1.march
+
+`unix_time_ms` is internal to the standard library; use `System.now_ms`. [stdlib_internal]
+
+30 |     unix_time_ms(())
          ^^^^^^^^^^^^
 
 
