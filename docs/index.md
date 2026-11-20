@@ -305,9 +305,11 @@ end
 | [Getting Started](getting-started.md) | Hello world, compiling, running the REPL |
 | [Language Tour](tour.md) | Variables, functions, types, pipes: the essentials |
 | [Try It Out](playground.md) | A March interpreter in the browser; no install |
+| [Tetris Playground](tetris-playground.md) | A browser Tetris game compiled from March source you can edit live |
 | [Build a CLI Tool](build-a-cli.md) | Start-to-finish: scaffold, args, files, test, build |
 | [Cookbook](cookbook/) | Goal-oriented recipes: CLI, HTTP, JSON, files, config |
 | [Examples](examples.md) | Runnable programs in `examples/`, one feature each |
+| [Error Messages](error-messages.md) | A tour of the compiler's errors, each one loadable in the playground |
 | Coming from [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md) | Mental-model maps for newcomers |
 
 ### Compatibility & platforms
@@ -366,6 +368,8 @@ end
 | [Topology](topology.md) | `topology.toml`: which pool serves which role, and on which hosts |
 | [Hot Code Reload](hot-code-reload.md) | Deploy to a running node; state migration, capability-safe deploys |
 | [Observing a running node](observe.md) | The observe socket, `forge status` / `diagnose` / `top`, the remote shell |
+| [From a Protocol to a Cluster](protocol-to-cluster.md) | One protocol followed through the compiler into a cluster that loses machines and carries on |
+| [What a Deploy Is Allowed to Do](deploy-authority.md) | One dependency update to a running cluster, past every check on what the new code can reach |
 | [Multi-host Lab](lab.md) | What happens to a real multi-host deployment when it is cut, restarted and failed over |
 
 ### Tooling
@@ -383,4 +387,5 @@ end
 
 | Guide | What it covers |
 |-------|---------------|
+| [Upgrading to 0.7.0](upgrading-to-0-7-0.md) | The changes from 0.6.x to 0.7.0: Int overflow panics, `cap no_panic`, pure `Show`/`Eq`/`Ord`/`Hash` impls |
 | [Upgrading to 0.6.0](upgrading-to-0-6-0.md) | The changes from 0.5.x to 0.6.0 |

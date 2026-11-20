@@ -55,6 +55,8 @@ The same error catches **two actors with a handler of the same name**. A bare
 `Tally` resolves to only one of them, and an actor message can't be qualified
 by its actor's name. Under 0.5.0 the interpreter and compiled code disagreed
 about where such a message went. Rename one of the two handlers.
+(On current `main` you can instead qualify the message by its actor,
+`Counter.Tally(1)`; see [Actors]({{ site.baseurl }}/docs/actors/).)
 
 A pid's type is its actor's state type, so two actors whose state records have
 the same shape still can't be told apart. The checker doesn't catch a wrong

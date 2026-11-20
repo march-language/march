@@ -95,7 +95,7 @@ March is strict. `List` is a linked list, not a lazy sequence. For streaming/laz
 
 ### Perceus RC instead of GC
 
-No garbage collector: reference counting with in-place reuse (FBIP). Deterministic latency, no stop-the-world pauses. The `linear type` and `always_linear type` features give you Rust-style ownership at compile time when you need it.
+No tracing garbage collector: reference counting with in-place reuse (FBIP), so there are no stop-the-world pauses. The `linear type` and `always_linear type` features give you Rust-style ownership at compile time when you need it.
 
 ---
 

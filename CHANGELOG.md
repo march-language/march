@@ -1143,6 +1143,16 @@ git log is authoritative for exact commits.
   running programs and some ending in the compiler's own message. The README is shorter,
   opens with a capability-checked actor program, and links to the site for the language
   tour and tool reference.
+- New page: "Upgrading to 0.7.0". It covers Int overflow panics and the wrapping functions,
+  the `cap no_panic` overflow proof, pure `Show`/`Eq`/`Ord`/`Hash` impls, the one-time
+  restart for hot reload, and the stricter `@[measure]` and termination checks.
+- The Actors chapter no longer says `Actor.register` needs no capability: all four registry
+  functions need `IO.Registry` (or `needs IO`). The 0.6.0 upgrade guide notes that an actor
+  message can now be qualified by its actor.
+- The home page badge shows v0.7.0 (it still said v0.6.0). The docs index links four pages
+  it had left out: Error Messages, Tetris Playground, From a Protocol to a Cluster, and What
+  a Deploy Is Allowed to Do. Getting Started, the Language Tour and the "Coming from FP" page
+  say "no tracing garbage collector", matching the home page.
 - **Every cookbook "run" button runs.** 54 of the 151 March blocks on the cookbook and
   "Coming from" pages failed when run in the sidebar REPL: they used a value from an earlier
   block, had a placeholder body, used `1_000_000` (March has no digit separators), or need a
