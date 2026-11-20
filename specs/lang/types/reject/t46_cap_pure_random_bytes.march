@@ -11,7 +11,7 @@
 -- DO NOT EXIST as builtins) and MISSED the real `random_bytes` -- so this
 -- program typechecked with exit 0 (UNSOUND). The F2 fix derives `pure_banned`
 -- from `builtin_cap_table`, so `random_bytes` is now banned. `random_bytes :
--- Int -> Bytes` is total, so `: Bytes` is a correct signature and the ONLY
+-- Int -> Bytes` is total, so `: Bytes` is a correct signature and the pure
 -- rejection is `check_pure_module`'s own: `` `gen` in `mod LeakyPure`
 -- (declared `cap pure`) calls `random_bytes`, which has side effects. `` (A
 -- WARNING-level Check 1b body-scan diagnostic -- "requires `Cap(IO.Random)`"

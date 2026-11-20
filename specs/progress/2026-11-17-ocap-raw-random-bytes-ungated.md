@@ -38,3 +38,7 @@ now also draws `stdlib_internal`, like pure_violation_1. `Io_ops_gen.shadowed_by
 point is that `Crypto` defines a March function of that name, which is still true.
 Tests: `test_stdlib_only` `raw_capability_builtins_gated` (the shadowed list is
 `["println"]`, and a user `random_bytes(4)` is refused with the hint).
+Deliberately left raw: about ten cap_infer/chain programs in test/test_compiler.ml
+(around lines 14887-15038) still call `random_bytes` directly with the gate on. Their
+assertions read only hints, so they pass, but they pin output no user program can now
+produce (the same holds for the earlier raw `file_write` tests).
