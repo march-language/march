@@ -906,8 +906,10 @@ end
 
 A function that forwards the cap through its signature declares `needs Actor.Introspect`,
 as with any proof capability declared elsewhere. `Actor.register` and `Actor.unregister`
-stay unprivileged: registering a Pid you hold is not authority; resolving a name you were
-never handed is. The raw builtins behind these wrappers (`pid_of_int`,
+need no proof cap. All four registry functions (`register`, `unregister`, `whereis`,
+`registered`) are charged the `IO.Registry` capability, a child of `IO`, so the module
+declares `needs IO.Registry` or, as in the examples above, `needs IO`. Without it the
+module is rejected with `cap_ceiling`, and `forge fix` adds the line. The raw builtins behind these wrappers (`pid_of_int`,
 `actor_pid_indices`, `actor_whereis`, `actor_registered`) are internal to the standard
 library; a program that calls one is rejected at typecheck time with the wrapper to use:
 
