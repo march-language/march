@@ -1,0 +1,33 @@
+-- restrict entry cost, computed scope: 1_000_000 calls of a fn whose body is
+-- `restrict s do n + 1 end`, where `s = IO.Console + IO.FileRead("/srv/")`
+-- is a `Scope` value built once outside the loop. A restrict over a value is
+-- computed (ocap p5 decision 5), so every entry parses the scope's text and
+-- pushes a fresh layer.
+-- ns per entry = (wall time - a copy without the restrict) / 1e6
+-- (ocap phase 5 budget: <= 2 us; see specs/benchmarks.md).
+--
+-- Usage: march --compile --opt 2 bench/restrict_enter_computed.march -o /tmp/restrict_enter_computed
+--        /tmp/restrict_enter_computed
+
+mod RestrictEnterComputed do
+  needs IO.Console
+  needs IO.FileRead
+
+pfn step(s : Scope, n : Int) : Int do
+  restrict s do
+    n + 1
+  end
+end
+
+pfn go(s : Scope, i : Int, n : Int, acc : Int) : Int do
+  if i >= n do acc
+  else go(s, i + 1, n, acc + step(s, i))
+  end
+end
+
+fn main() do
+  let s = IO.Console + IO.FileRead("/srv/")
+  println(int_to_string(go(s, 0, 1000000, 0)))
+end
+
+end

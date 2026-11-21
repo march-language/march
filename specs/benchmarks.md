@@ -1492,6 +1492,7 @@ to the features it exercises. Quick reference:
 | actor / mailbox / scheduler / supervision changes | `scripts/actor-load.sh` (all four scenarios: `fanin`, `churn`, `callstorm`, `crashloop`) |
 | interpreter (`lib/eval/eval.ml`) / REPL-JIT (`lib/jit/`) changes | `bench/run_interp_bench.sh` (interp vs. compiled vs. repl-clang vs. repl-orc A-B over `bench/interp/`) |
 | ocap run-time authority (`stdlib/authority.march`, `runtime/march_authority.c`, `march_cap_*` in the runtime, `lib/tir/auth_rt.ml`, `lib/tir/auth_native.ml`) | `println_loop clock_loop spawn_loop actor_ping cap_check_slow cap_capture_closures list_ops` |
+| ocap `restrict` / scope values (`ERestrict` lowering in `lib/tir/lower*.ml`, `Auth_rt.restricts`, `stdlib/scope.march`, `Authority.restrict_layer`, the interpreter's restrict frame) | `restrict_enter restrict_enter_static restrict_enter_computed list_ops` (read each restrict bench against a copy with the `restrict` removed) |
 
 ## scripts/compile-time-bench.sh — compile-time scenarios (cold / warm / per-edit)
 
@@ -1562,6 +1563,29 @@ under no longer touches a count or writes the slot, and a frame entered from the
 authority pushes a cached, immortal cell instead of allocating one. `cap_capture_closures`
 74 → 59 ms cpu against 43 ms with its frame removed: about 6.5 → 3.5 ns per captured call;
 frame entry and leave about 47 → 15 ns; `cap_check_slow` and `list_ops` unchanged.
+
+## bench/restrict_enter*.march — ocap `restrict` entry cost (2026-11-21)
+
+Three loops of 1,000,000 calls of a function whose body is a `restrict` block around
+`n + 1`, summing the results (`500000500000`). Each is read against a copy of itself with the
+`restrict` removed (the same loop, the same call), so the difference over 1e6 is the cost of
+one entry and exit. The phase-5 budget: a literal framed restrict at most 50 ns per entry, a
+computed one at most 2 µs, and a frame-dropped one within noise of no restrict at all.
+
+- `restrict_enter`: `restrict IO.FileRead("/srv/") do`. The entry carries a scope, so the block
+  keeps its frame: the layer is built once per program (`march_cap_layer_once`), and each entry
+  is `Authority.enter_fn` plus `cap_restore`.
+- `restrict_enter_static`: `restrict IO.Console do`. No scope, no spawn, no call of a function
+  value: the compile-time reach check is the whole proof and no frame is emitted.
+- `restrict_enter_computed`: `restrict s do` over `s = IO.Console + IO.FileRead("/srv/")` built
+  once outside the loop. Each entry takes the scope value's text and parses it (`Authority.restrict_layer` → `cap_rt_parse`), then enters the new layer.
+
+First measurement (macOS arm64, 14 cores, load average about 3.3, 11 interleaved runs each,
+`--opt 2`, median wall): `restrict_enter` 27.0 ms against 13.6 ms without the restrict, about
+13 ns per entry; `restrict_enter_static` 11.0 ms against 9.0 ms, 2 ns per entry on the medians
+and 0.1 ns on the minima (noise: the plain loop is mostly process start-up);
+`restrict_enter_computed` 399 ms against 18 ms, about 380 ns per entry. Detail in
+`specs/progress/2026-11-19-ocap-p5-restrict.md`.
 
 ## bench/int_divmod.march — Int `/` and `%` zero-divisor check (2026-11-06)
 

@@ -17,8 +17,9 @@ what the whole program may reach. The checks cost nothing at run time: a `Cap(X)
 is a null pointer unless you attach a test dictionary to it. What a run may do is
 also limited while it runs: each capability operation is checked against the
 [run-time authority](#run-time-authority), which `--grant` or `MARCH_GRANT` can
-narrow at launch and a scoped function `needs` clause narrows inside the function.
-A program that uses neither pays two global loads per operation.
+narrow at launch, a scoped function `needs` clause narrows inside the function, and a
+[`restrict`](#restrict) block narrows for one block.
+A program that uses none of them pays two global loads per operation.
 
 Three checks do the work. The **manifest** check makes every module declare what it
 touches. The **upper limit** makes the build fail if any module's emitted code, your
@@ -62,6 +63,8 @@ callers never have to satisfy. See [The grant](#grant).
 - [Host and method scopes on IO.NetConnect](#host-scopes)
 - [Refusals: capability operations return `Result`](#refusals)
 - [Run-time authority: `--grant`, `MARCH_GRANT` and scoped function `needs`](#run-time-authority)
+- [Narrowing a block: `restrict`](#restrict)
+- [Scope values: `Scope` and `+`](#scope-values)
 - [When not to use IO caps](#when-not-to-use-io-caps)
 - [Specific IO capabilities](#specific-io-capabilities): [IO.Mut](#iomut-shared-mutable-state), [IO.Registry](#ioregistry-naming-and-finding-actors), [name scopes](#name-scopes), [IO.NetConnect.TLS](#ionetconnecttls-encrypted-transport-only), [IO.Telemetry](#iotelemetry-observability-annotation), [IO.Foreign](#ioforeign--calling-unverified-c)
 
@@ -874,8 +877,8 @@ end
 ```
 
 An operation is refused at run time when it lies outside the current
-authority: `main`'s request, narrowed by `--grant` or `MARCH_GRANT` at launch
-and by each function `needs` clause it runs under; see
+authority: `main`'s request, narrowed by `--grant` or `MARCH_GRANT` at launch,
+and by each function `needs` clause and `restrict` block it runs under; see
 [Run-time authority](#run-time-authority). UDP sockets and TLS contexts are handles opened by a
 checked open (`Udp.open`, `Tls.client_ctx`). `HttpServer.listen`, `spawn_n` and
 `bind_host` check `IO.NetListen` (on the port, a `plain_listener` port, the bind
@@ -995,6 +998,137 @@ started on another node: the receiving node runs it under its own launch authori
 (`specs/todos/2026-11-17-ocap-cross-node-authority.md`). A module's own scoped `needs`
 line is checked at compile time only, except as the program's request when it is the
 entry module's and `main` has none.
+
+<a id="restrict"></a>
+### Narrowing a block: `restrict`
+
+`restrict SCOPE do ... end` runs a block, and everything it reaches, under a narrower
+authority. Inside the block the authority is the intersection of the authority already in
+force and `SCOPE`; nested blocks intersect further, and nothing inside can widen it. Any code
+may restrict itself: writing `restrict` needs no `needs` line, and naming a kind the module
+does not hold is not an error, it simply adds nothing. `restrict` is an expression whose value
+is the block's value, and `restrict` is a reserved word.
+
+```march
+mod Report do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn load(name : String) : String do
+    match File.read(name) do
+    Ok(Ok(t)) -> t
+    Ok(Err(_)) -> "missing"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main() do
+    let r = restrict IO.Console, IO.FileRead("/srv/data/") do
+      load("/etc/passwd")
+    end
+    println(r)
+  end
+end
+```
+
+This prints `IO.FileRead("/etc/passwd") refused by the restrict at report.march:14
+(IO.Console, IO.FileRead("/srv/data/"))`. A refusal by a block is a value like any other,
+`Err(CapError(kind, target, ByRestrict(where), scope_text))`, where `where` is the source file's
+base name and the line of the `restrict` keyword. Code loaded into the REPL names its file the
+same way; a snippet typed at the prompt is `.:<line>`. When the block ends, the authority in
+force before it is back, also when a panic unwinds out of it and is caught.
+
+The scope list is one or more entries separated by commas, each a
+[scope value](#scope-values) or `()` (the empty scope: `restrict () do ... end` admits no
+capability operation at all).
+
+**The compile-time check.** When every entry is written out (a literal scope expression such as
+`IO.Console` or `IO.FileRead("/srv/")`, or `()`), the block is a *literal* restrict, and the
+compiler checks it like a function with a `needs` clause: every operation in the block, every
+function it calls directly (with everything that function reaches), and every lambda made
+inside it must use only the kinds the scope names. A violation is the error `cap_restrict`:
+
+```
+`println` needs `IO.Console`, which the restrict at main.march:5 does not allow. [cap_restrict]
+help: add `IO.Console` to the restrict, or move the call out of the block.
+```
+
+This check is by kind, as for `needs`: a path or host scope (`/srv/data/` above) is checked at
+run time, against the target each operation is given. A call of a function value inside the
+block is not traced at compile time (the compiler cannot know which function it is); it is left
+to the run-time frame. When an entry is a value computed at run time (`restrict s do`), the
+block is a *computed* restrict and is checked at run time only.
+
+**When the run-time frame is kept.** A literal restrict whose entries carry no scope (only
+kinds, such as `restrict IO.Console do`), and whose block reaches no actor spawn and no call of
+a function value, is fully proved by the compile-time check, so compiled code (native, `--jit`,
+the REPL's JIT and `--target js`) emits no run-time frame for it and pays nothing to enter it.
+Every other restrict is a run-time frame: a literal one builds its layer once per program and
+then costs a few tens of nanoseconds per entry; a computed one parses its scope text at every
+entry (a few hundred nanoseconds). The interpreter always enters the frame. One consequence: a
+direct `Authority.check(...)` call inside a frame-dropped block is not narrowed by the block in
+compiled code (the interpreter does narrow it). Every real capability operation in such a block
+has already been proved to lie within the block's kinds, so nothing the block can do is
+affected.
+
+**What keeps the narrowed authority.** Function values, tasks and actors *created* inside the
+block keep the block's authority after it ends: a lambda made inside and called later from
+outside still runs narrowed, and an actor spawned inside is restricted for life, across
+supervisor restarts. Function values and pids *brought in* from outside keep their own: a lambda
+made before the block and called inside runs under the authority it was made under, not the
+block's (see [Run-time authority](#run-time-authority)). A value made by module-level code
+captures nothing and runs under its caller's authority, so inside a block it runs restricted.
+There is no revocation: a value made inside a block cannot be widened again or cancelled later.
+
+**Not yet.** A spawn budget (`IO.Spawn(max(n))`) is not part of the scope language, so a block
+cannot limit how many tasks it starts (`specs/todos/2026-11-17-ocap-env-and-spawn-scopes.md`).
+A literal target outside a scoped literal restrict (`File.read("/etc/passwd")` under
+`restrict IO.FileRead("/srv/")`) is reported when it runs, not at compile time
+(`specs/todos/2026-11-17-ocap-scoped-fn-needs-literal-check.md`). A call in tail position inside
+a framed block is not a tail call: the stack grows by one frame per call through the block
+(the layer list does not), so a very deep recursion through a kept restrict can overflow the
+stack (`specs/todos/2026-11-19-ocap-restrict-tail-calls.md`).
+
+<a id="scope-values"></a>
+### Scope values: `Scope` and `+`
+
+A scope is also a value of type `Scope`. In expression position, a constructor written with a
+capability path is a scope expression, and its arguments follow the `needs` grammar (strings
+first, then the literal options `methods(...)`, `prefix("...")`, `no_redirects`):
+
+```march
+let a = IO.Console                                   -- Scope
+let b = IO.FileRead("/srv/") + IO.NetConnect("api.example.com", methods(get))  -- Scope
+let c = IO.FileRead(dir)                             -- Result(Scope, ScopeError)
+```
+
+- **Literal.** When every argument is a literal, the expression has type `Scope` and is checked
+  at compile time with the same validator as a `needs` line (an invalid one is
+  `invalid_cap_scope`). Literals follow the `needs` grammar, which folds `.` and `..` segments
+  lexically, so `IO.FileRead("/srv/../etc/")` is accepted and means `/etc/`.
+- **Computed.** When any string argument is an expression, the type is
+  `Result(Scope, ScopeError)` and the arguments are checked when the value is built: a `..` path
+  segment or a malformed host is `Err(ScopeError(message))`, such as
+  `IO.FileRead: the path "/srv/../etc/" has a `..` segment`. Bind it with `let?`; passing the
+  `Result` itself to `restrict` is a type error whose hint says so. Option arguments
+  (`methods(...)` and the rest) must still be literal.
+- **`+` is the union.** `a + b` is a `Scope` with the entries of both; `()` adds nothing. A `+`
+  chain of literal entries is itself literal (`restrict IO.Console + IO.FileRead("/srv/") do` is
+  a literal restrict), while a restrict over a variable is computed, whatever the variable holds.
+- **A scope grants nothing.** Its only use is as `restrict`'s argument. It shows as its source
+  text (`to_string(IO.Console + IO.FileRead("/srv/"))` is `IO.Console, IO.FileRead("/srv/")`)
+  and has no `Eq`, because two lists with the same entries in a different order are the same
+  scope.
+
+```march
+fn under(dir : String) : Result(String, ScopeError) do
+  let? s = IO.FileRead(dir)
+  Ok(restrict s, IO.Console do load("/etc/hosts") end)
+end
+```
+
+`under("/srv/")` is `Ok` of a refusal naming the restrict at that line; `under("/srv/../etc/")`
+is the `ScopeError` above, before the block runs.
 
 ### When *not* to use IO caps
 

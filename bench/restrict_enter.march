@@ -1,0 +1,31 @@
+-- restrict entry cost, literal scoped scope: 1_000_000 calls of a fn whose
+-- body is `restrict IO.FileRead("/srv/") do n + 1 end`. The entry carries a
+-- scope, so the block keeps its run-time frame (ocap p5 decision 7): every
+-- call pushes the once-per-site layer and restores the authority on exit.
+-- ns per entry = (wall time - a copy without the restrict) / 1e6
+-- (ocap phase 5 budget: <= 50 ns; see specs/benchmarks.md).
+--
+-- Usage: march --compile --opt 2 bench/restrict_enter.march -o /tmp/restrict_enter
+--        /tmp/restrict_enter
+
+mod RestrictEnter do
+  needs IO.Console
+  needs IO.FileRead
+
+pfn step(n : Int) : Int do
+  restrict IO.FileRead("/srv/") do
+    n + 1
+  end
+end
+
+pfn go(i : Int, n : Int, acc : Int) : Int do
+  if i >= n do acc
+  else go(i + 1, n, acc + step(i))
+  end
+end
+
+fn main() do
+  println(int_to_string(go(0, 1000000, 0)))
+end
+
+end

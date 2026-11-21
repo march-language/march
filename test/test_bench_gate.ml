@@ -104,6 +104,12 @@ let gated : (string * string * compare_mode) list = [
      capturing function values in a program with a frame. *)
   "cap_check_slow",   "1000000",      Exact;
   "cap_capture_closures", "333333666666\n333333666666", Exact;
+  (* ocap phase 5 restrict-entry benches: 1M entries of a literal scoped
+     restrict (framed), a scope-free one (frame dropped) and a computed one
+     over a Scope value; each sums n + 1 over the loop. *)
+  "restrict_enter",          "500000500000", Exact;
+  "restrict_enter_static",   "500000500000", Exact;
+  "restrict_enter_computed", "500000500000", Exact;
   (* checked Int `+ - *` in counted loops: the cost the 2026-10-30
      overflow trap adds per iteration. *)
   "index_loop",       "548550000003", Exact;

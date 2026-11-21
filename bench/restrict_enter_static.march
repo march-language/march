@@ -1,0 +1,30 @@
+-- restrict entry cost, frame dropped: 1_000_000 calls of a fn whose body is
+-- `restrict IO.Console do n + 1 end`. The entry carries no scope and the
+-- block reaches no actor spawn and no call of a function value, so the
+-- compile-time reach check is the whole proof and no run-time frame is
+-- emitted (ocap p5 decision 7). Should match a copy without the restrict
+-- within noise (see specs/benchmarks.md).
+--
+-- Usage: march --compile --opt 2 bench/restrict_enter_static.march -o /tmp/restrict_enter_static
+--        /tmp/restrict_enter_static
+
+mod RestrictEnterStatic do
+  needs IO.Console
+
+pfn step(n : Int) : Int do
+  restrict IO.Console do
+    n + 1
+  end
+end
+
+pfn go(i : Int, n : Int, acc : Int) : Int do
+  if i >= n do acc
+  else go(i + 1, n, acc + step(i))
+  end
+end
+
+fn main() do
+  println(int_to_string(go(0, 1000000, 0)))
+end
+
+end

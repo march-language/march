@@ -21,9 +21,9 @@ git log is authoritative for exact commits.
 
 ### Changed
 
-- `restrict` is now a keyword (the `restrict ... do ... end` block of the object-capability work; the
-  block parses, but is not yet type-checked or run). `SessionTheory.restrict` is renamed
-  `SessionTheory.restrict_role`; any other program that names a function or variable `restrict` must rename it.
+- **`restrict` is now a reserved word** (it opens a `restrict ... do ... end` block; see
+  Added). `SessionTheory.restrict` is renamed `SessionTheory.restrict_role`; any other program
+  that names a function or variable `restrict` must rename it.
 
 - **A Float `if` or `match` with a record field arm no longer allocates.** When one
   branch was a field read such as `event.progress`, compiled code boxed the result of
@@ -47,6 +47,22 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`restrict` blocks and `Scope` values (object capabilities, phase 5).**
+  `restrict IO.Console, IO.FileRead("/srv/") do ... end` runs a block, and everything it
+  reaches, under the intersection of the current authority and the listed scopes; nested
+  blocks narrow further and nothing inside can widen it. Any code may restrict itself. A
+  refusal names the block: `refused by the restrict at report.march:14 (...)`
+  (`ByRestrict(where)`). When the scopes are written out, the compiler also checks the block's
+  reach by kind, like a function `needs` clause (new error `cap_restrict`), and a block whose
+  scopes carry no path or host and which calls no function value or spawn costs nothing at run
+  time. A scope is also a value: `IO.Console + IO.FileRead("/srv/")` is a `Scope` (`+` is the
+  union), and a scope expression with a computed argument, `IO.FileRead(dir)`, is a
+  `Result(Scope, ScopeError)` that rejects a `..` segment or a malformed host when it is
+  built. Functions, tasks and actors made inside a block keep its authority after it ends.
+  Every runtime (interpreter, `--jit`, the REPL, compiled, `--target js`) behaves the same.
+  Entering a block with a scoped literal costs about 13 ns, one over a computed `Scope` about
+  0.4 µs (`bench/restrict_enter*.march`). See
+  [Capabilities]({{ site.baseurl }}/docs/capabilities/#restrict).
 - **Run-time authority (object capabilities, phase 4).** Every capability operation is now
   also checked while the program runs, against the authority in force, in the interpreter,
   `--jit`, the REPL, compiled binaries and `--target js` alike. A refusal is the operation's
@@ -1259,6 +1275,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Diagnostics and refusals from a file loaded into the REPL name the file.** `march repl
+  FILE`, the TUI and `:reload` lexed the file without its name, so a capability refusal read
+  `refused by ... at .:18` and other errors and stack traces for its declarations named no
+  file. They now name it, as the batch compiler does.
 - **A hot deploy that changes an actor's state with no migration is refused under every
   `@compat` policy.** `@compat(forward)` (added fields) and `@compat(any)` used to let such a
   deploy through with no migration, so each running actor kept its old state record while the
