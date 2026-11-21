@@ -228,11 +228,12 @@ type bound_origin =
     against that function's module); [ro_ops] are the block's own
     capability operations, (capability, operation, call span), lambdas made
     in it included; [ro_refs] its references to named functions and spawned
-    actors, (name as written, call span or the block's). *)
+    actors, (name as written, call span or the block's, how it is used). *)
+type ref_use = Ref_call | Ref_value | Ref_spawn
 type restrict_owner = {
   ro_owner : string;
   ro_ops : (string * string * Ast.span) list;
-  ro_refs : (string * Ast.span) list;
+  ro_refs : (string * Ast.span * ref_use) list;
 }
 
 (** A bound to check: its capability paths, the span of the [needs] clause

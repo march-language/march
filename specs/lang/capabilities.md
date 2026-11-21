@@ -1045,8 +1045,11 @@ capability operation at all).
 **The compile-time check.** When every entry is written out (a literal scope expression such as
 `IO.Console` or `IO.FileRead("/srv/")`, or `()`), the block is a *literal* restrict, and the
 compiler checks it like a function with a `needs` clause: every operation in the block, every
-function it calls directly (with everything that function reaches), and every lambda made
-inside it must use only the kinds the scope names. A violation is the error `cap_restrict`:
+direct call of a module-level function (with everything that function reaches), and every
+lambda or local `fn` made inside it must use only the kinds the scope names. A lambda or local
+`fn` made *before* the block and called inside it is a function value brought in, not a direct
+call: it is not charged to the block (see "What keeps the narrowed authority" below). A
+violation is the error `cap_restrict`:
 
 ```
 `println` needs `IO.Console`, which the restrict at main.march:5 does not allow. [cap_restrict]
@@ -1065,9 +1068,9 @@ a function value, is fully proved by the compile-time check, so compiled code (n
 the REPL's JIT and `--target js`) emits no run-time frame for it and pays nothing to enter it.
 Every other restrict is a run-time frame: a literal one builds its layer once per program and
 then costs a few tens of nanoseconds per entry; a computed one parses its scope text at every
-entry (a few hundred nanoseconds). The interpreter always enters the frame. One consequence: a
-direct `Authority.check(...)` call inside a frame-dropped block is not narrowed by the block in
-compiled code (the interpreter does narrow it). Every real capability operation in such a block
+entry (a few hundred nanoseconds). The interpreter always enters the frame. One consequence:
+`Authority.check(...)` inside a frame-dropped block, called directly or through a function the
+block calls, is not narrowed by the block in compiled code (the interpreter does narrow it). Every real capability operation in such a block
 has already been proved to lie within the block's kinds, so nothing the block can do is
 affected.
 
@@ -1075,9 +1078,13 @@ affected.
 block keep the block's authority after it ends: a lambda made inside and called later from
 outside still runs narrowed, and an actor spawned inside is restricted for life, across
 supervisor restarts. Function values and pids *brought in* from outside keep their own: a lambda
-made before the block and called inside runs under the authority it was made under, not the
-block's (see [Run-time authority](#run-time-authority)). A value made by module-level code
-captures nothing and runs under its caller's authority, so inside a block it runs restricted.
+or local `fn` made before the block and called inside runs under the authority it was made
+under, not the block's (a `fn` expression captures the authority where it is evaluated; see
+[Run-time authority](#run-time-authority)). A value made by module-level code captures nothing
+and runs under its caller's authority, so inside a block it runs restricted. That includes a
+`restrict` written at module level (`let reader = restrict IO.FileRead("/srv/") do fn p -> ...
+end`): module-level code holds no authority of its own to park in the value, so the lambda it
+makes captures nothing, and it runs under whoever calls it, not narrowed by that block.
 There is no revocation: a value made inside a block cannot be widened again or cancelled later.
 
 **Not yet.** A spawn budget (`IO.Spawn(max(n))`) is not part of the scope language, so a block

@@ -1,0 +1,39 @@
+-- A function value made inside a MODULE-LEVEL restrict captures nothing
+-- (design §21: module-level code has no authority to park), so it runs
+-- under the authority of whoever calls it: allowed when main calls it,
+-- refused when it is called inside a function's restrict. The same lambda
+-- made inside a function's restrict keeps the narrowed authority.
+mod RestrictModuleLevelClosureCapturesNothing do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(target : String) : String do
+    match Authority.check("IO.FileRead", target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  let top_reader = restrict IO.FileRead("/srv/") do
+    fn p -> probe(p)
+  end
+
+  fn under_restrict(p : String) : String do
+    restrict IO.FileRead("/srv/") do
+      top_reader(p)
+    end
+  end
+
+  fn fn_reader() : String -> String do
+    restrict IO.FileRead("/srv/") do
+      fn p -> probe(p)
+    end
+  end
+
+  fn main() do
+    println("main calls the module-level value: " ++ top_reader("/etc/hosts"))
+    println("a restrict calls it: " ++ under_restrict("/etc/hosts"))
+    let f = fn_reader()
+    println("made in a function's restrict: " ++ f("/etc/hosts"))
+  end
+end

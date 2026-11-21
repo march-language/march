@@ -1236,16 +1236,14 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           (List.rev (March_ast.Calls.builtin_candidate_calls ~bound:scope body))
       in
       let calls = List.rev (March_ast.Calls.calls_in_expr [] body) in
-      let refs =
-        List.sort_uniq String.compare
-          (free_vars_expr scope body @ March_ast.Calls.spawned_actor_names [] body)
-      in
+      let spawned = March_ast.Calls.spawned_actor_names [] body in
+      let refs = List.sort_uniq String.compare (free_vars_expr scope body @ spawned) in
       let ro_refs =
         List.map
           (fun r ->
              match List.find_opt (fun (n, _, _) -> n = r) calls with
-             | Some (_, nsp, _) -> (r, nsp)
-             | None -> (r, kw))
+             | Some (_, nsp, _) -> (r, nsp, Ref_call)
+             | None -> (r, kw, if List.mem r spawned then Ref_spawn else Ref_value))
           refs
       in
       Hashtbl.replace env.restrict_owners key { ro_owner = owner; ro_ops = ops; ro_refs };
@@ -1300,9 +1298,44 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       | Ast.ELet (b, _) :: rest ->
         go scope b.Ast.bind_expr;
         block (free_vars_pattern b.Ast.bind_pat @ scope) rest
+      | (Ast.ELetFn (name, _, _, _, _) as e) :: rest ->
+        (* As in [free_vars_block]: a local fn is in scope for the rest of
+           its block.  One made before a restrict and called in it is a
+           function value brought in (design §5), not a direct call. *)
+        go scope e;
+        block (name.Ast.txt :: scope) rest
       | e :: rest -> go scope e; block scope rest
     in
-    List.iter (fun (bound, e) -> go bound e) bodies
+    (* Most bodies hold no restrict at all (the whole stdlib, and every
+       program written before phase 5), so test for one first without the
+       scope bookkeeping: the walk below allocates a scope list per binder
+       (final review F8). *)
+    let rec has (e : Ast.expr) : bool =
+      match e with
+      | Ast.ERestrict _ -> true
+      | Ast.EVar _ | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> false
+      | Ast.ELam (_, x, _) | Ast.ELetFn (_, _, _, x, _) | Ast.EField (x, _, _)
+      | Ast.EAnnot (x, _, _) | Ast.ESpawn (x, _) | Ast.EAssert (x, _) | Ast.ESigil (_, x, _)
+      | Ast.ERefineMsg (x, _, _) | Ast.EDbg (Some x, _) -> has x
+      | Ast.ELet (b, _) -> has b.Ast.bind_expr
+      | Ast.EBlock (es, _) | Ast.ECon (_, es, _) | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) ->
+        List.exists has es
+      | Ast.EMatch (scrut, branches, _) ->
+        has scrut
+        || List.exists
+             (fun (br : Ast.branch) ->
+                Option.fold ~none:false ~some:has br.Ast.branch_guard || has br.Ast.branch_body)
+             branches
+      | Ast.ELetQ (_, a, b, _) | Ast.ELetStar (_, a, b, _) | Ast.EPipe (a, b, _)
+      | Ast.ESend (a, b, _) -> has a || has b
+      | Ast.EApp (f, args, _) -> has f || List.exists has args
+      | Ast.ERecord (fields, _) -> List.exists (fun (_, x) -> has x) fields
+      | Ast.ERecordUpdate (base, fields, _) -> has base || List.exists (fun (_, x) -> has x) fields
+      | Ast.EIf (c, t, f, _) -> has c || has t || has f
+      | Ast.ECond (arms, _) -> List.exists (fun (c, b) -> has c || has b) arms
+      | Ast.EProof (p, _) -> List.exists has (Ast.proof_children p)
+    in
+    List.iter (fun (bound, e) -> if has e then go bound e) bodies
   in
   (* Record one non-[DFn] expression owner: its own builtin-implied caps and
      its reference edges, with [bound] seeding [free_vars_expr] exactly the way

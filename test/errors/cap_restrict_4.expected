@@ -1,0 +1,12 @@
+exit: 1
+-- CAPABILITY --------------- errors/cap_restrict_4.march
+
+`File.read` needs `IO.FileRead`, which the restrict at cap_restrict_4.march:8 does not allow. [cap_restrict]
+help: add `IO.FileRead` to the restrict, or use `File.read` as a value outside the block.
+
+8 |     restrict IO.Console do
+        ^^^^^^^^
+
+    run `march --explain cap_restrict`
+
+

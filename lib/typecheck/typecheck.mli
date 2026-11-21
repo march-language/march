@@ -243,10 +243,11 @@ type bound_origin =
   | Iface_method of { iface : string; impl_ty : string option }
   | Impl_method of { iface : string; impl_ty : string }
   | Restrict_block of string
+type ref_use = Ref_call | Ref_value | Ref_spawn
 type restrict_owner = {
   ro_owner : string;
   ro_ops : (string * string * Ast.span) list;
-  ro_refs : (string * Ast.span) list;
+  ro_refs : (string * Ast.span * ref_use) list;
 }
 type fn_bound = { fb_caps : string list; fb_span : Ast.span; fb_site : Ast.span; fb_origin : bound_origin }
 type cap_mismatch_site = {

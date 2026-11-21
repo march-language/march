@@ -131,10 +131,11 @@ type bound_origin =
   | Iface_method of { iface : string; impl_ty : string option }
   | Impl_method of { iface : string; impl_ty : string }
   | Restrict_block of string
+type ref_use = Ref_call | Ref_value | Ref_spawn
 type restrict_owner = {
   ro_owner : string;
   ro_ops : (string * string * Typecheck_types.Ast.span) list;
-  ro_refs : (string * Typecheck_types.Ast.span) list;
+  ro_refs : (string * Typecheck_types.Ast.span * ref_use) list;
 }
 type fn_bound = {
   fb_caps : string list;

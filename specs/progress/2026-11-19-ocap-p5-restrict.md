@@ -50,6 +50,23 @@ interpreter, `--jit`, the REPL, compiled code and `--target js`.
   the `restrict` and scope-value sections; `surface-syntax.md` and `grammar.md` the form and the
   keyword.
 
+- **Final-review fixes.** (F1) The literal-restrict reach check charged prints with
+  `IO.FileRead` when the enclosing function was named `go`: `free_vars_block` (and the
+  restrict walker and `Cap_rows.seed_of_body`) did not put a local `fn` in scope for the rest
+  of its block, so every stdlib local `fn go` loop was recorded as a call of the program's
+  top-level `go` and that function's kinds leaked into `println` and every helper reaching such
+  a loop (also into `needs` bounds and `march caps`). Pinned in `test_restrict_reach`,
+  `test/errors/cap_restrict_3`, and `restrict_refuses_scoped`'s `go` helper; plus the missing
+  pins (inner restrict past outer, interface method, actor spawn, `IO.Console + 1`). (F2, F3)
+  The chapter now says a closure made in a module-level `restrict` captures nothing, and that
+  only direct calls of module-level functions are charged to a block while a lambda or local
+  `fn` made before it is a value brought in; fixtures
+  `restrict_module_level_closure_captures_nothing` and `restrict_local_fn_brought_in`. (F4)
+  The `Authority.check` caveat covers a call through a helper. (F6) `cap_restrict`'s help for
+  a function used as a value or a spawn names that use (`cap_restrict_4`). (F7) The `let?`
+  hint renders the entry as written (`type_mismatch_59`). (F8) `record_restricts` skips a body
+  with no `restrict` before its scope walk.
+
 ## Performance (macOS arm64, 14 cores, against merge-base 7552b97ec)
 
 - `scripts/perf-ab.sh --runs 15` over `fib tree_transform binary_trees list_ops
@@ -71,6 +88,6 @@ interpreter, `--jit`, the REPL, compiled code and `--target js`.
   `specs/todos/2026-11-17-ocap-scoped-fn-needs-literal-check.md`.
 - Tail calls out of a framed restrict body: `specs/todos/2026-11-19-ocap-restrict-tail-calls.md`.
 - Perf and coverage minors: `specs/todos/2026-11-19-ocap-p5-restrict-follow-ups.md`.
-- By design: a direct `Authority.check` inside a frame-dropped restrict is not narrowed in
-  compiled code (the block's real operations are proved statically); a literal `..` follows the
+- By design: `Authority.check` inside a frame-dropped restrict (directly or through a helper)
+  is not narrowed in compiled code (the block's real operations are proved statically); a literal `..` follows the
   `needs` grammar (folded lexically) while a computed one is a `ScopeError`.

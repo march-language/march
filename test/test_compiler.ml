@@ -19082,7 +19082,74 @@ let test_restrict_reach () =
   scope_rejects "cap_bound" "the function's bound still sees the block"
     (in_mod "  fn f() needs () do\n    restrict IO.Console do println(\"x\") end\n  end");
   scope_clean "a computed restrict is checked at run time only"
-    (in_mod "  fn f(s : Scope) do\n    restrict s do println(\"x\") end\n  end")
+    (in_mod "  fn f(s : Scope) do\n    restrict s do println(\"x\") end\n  end");
+  (* Final review F1.  A local `fn go` defined in a block was not in scope for
+     the rest of that block in [free_vars_block], so its calls were recorded
+     as references to a TOP-LEVEL `go`.  Much of the stdlib writes local
+     `fn go` loops (Sort.reverse_list, List.range, ...), so a user function
+     named `go` that reads a file leaked `IO.FileRead` into the row of
+     `println` and of every helper that reached such a loop, and a restrict
+     inside `go` blamed calls that only print.  [rev] stands in for those
+     stdlib loops and [File.read] is a stub (charged by [entry_cap_table]
+     at the call): these programs have no stdlib. *)
+  let rows_mod body =
+    Printf.sprintf
+      "mod M do\n  needs IO.Console\n  needs IO.FileRead\n\
+      \  mod File do\n    fn read(p : String) : String do p end\n  end\n\
+      \  pfn rev(xs : List(Int)) : List(Int) do\n\
+      \    fn go(l : List(Int), acc : List(Int)) : List(Int) do\n\
+      \      match l do\n      Nil -> acc\n      Cons(h, t) -> go(t, Cons(h, acc))\n      end\n\
+      \    end\n\
+      \    go(xs, Nil)\n\
+      \  end\n\
+      \  pfn say(s : String) do\n    let _ = rev(Nil)\n    println(s)\n  end\n%s\nend"
+      body
+  in
+  scope_clean "a kind the function uses BEFORE the block is not charged to it"
+    (rows_mod "  fn go() do\n    let y = File.read(\"/srv/x\")\n    restrict IO.Console do\n      println(\"direct\")\n    end\n    y\n  end");
+  scope_clean "a kind the function uses AFTER the block is not charged to it"
+    (rows_mod "  fn go() do\n    restrict IO.Console do\n      say(\"s\")\n    end\n    File.read(\"/srv/x\")\n  end");
+  scope_clean "a called user fn that only prints is within IO.Console"
+    (rows_mod "  fn go() do\n    let y = File.read(\"/srv/x\")\n    restrict IO.Console do\n      say(\"s\")\n      println(\"direct\")\n    end\n    y\n  end");
+  let violation =
+    rows_mod "  fn go() do\n    restrict IO.Console do\n      let x = File.read(\"/srv/x\")\n      say(\"hi\")\n      println(\"hi\")\n      x\n    end\n  end"
+  in
+  Alcotest.(check (list string)) "a true violation blames only the offending call, with its own kind"
+    [ "`File.read` needs `IO.FileRead`" ]
+    (List.map
+       (fun m -> String.sub m 0 (String.index m ','))
+       (scope_messages violation));
+  (* Final review F3: a local fn made BEFORE the block is a value brought in
+     (design §5), not a direct call charged to the block; one made INSIDE the
+     block is the block's own. *)
+  scope_clean "a local fn made before the block is brought in"
+    (rows_mod "  fn f() do\n    fn helper(p : String) : String do\n      File.read(p)\n    end\n    restrict IO.Console do\n      println(helper(\"/srv/x\"))\n    end\n  end");
+  scope_rejects "cap_restrict" "a local fn made inside the block is charged to it"
+    (rows_mod "  fn f() do\n    restrict IO.Console do\n      fn helper(p : String) : String do\n        File.read(p)\n      end\n      println(helper(\"/srv/x\"))\n    end\n  end");
+  (* Pins the Task 3 review listed. *)
+  let inner_past_outer =
+    in_mod "  fn f() do\n    restrict IO.Clock do\n      restrict IO.Clock, IO.Console do println(\"x\") end\n    end\n  end"
+  in
+  scope_rejects "cap_restrict" "an inner restrict cannot reach past the outer one" inner_past_outer;
+  Alcotest.(check bool) "the outer restrict is the one that refuses" true
+    (List.exists (fun m -> has_sub m "`println` needs `IO.Console`, which the restrict at")
+       (scope_messages inner_past_outer));
+  scope_rejects "cap_restrict" "an interface method called inside a restrict is charged to it"
+    "mod M do\n  needs IO.Console\n\
+    \  interface Greet(a) do\n    fn greet : a -> Unit\n  end\n\
+    \  impl Greet(Int) do\n    fn greet(n) do println(int_to_string(n)) end\n  end\n\
+    \  fn f() do\n    restrict IO.Clock do greet(1) end\n  end\nend";
+  let spawned =
+    "mod M do\n  needs IO.Console\n  needs IO.Spawn\n\
+    \  actor Loud do\n    state { n : Int }\n    init { n: 0 }\n\
+    \    on Ping() do\n      println(\"ping\")\n      state\n    end\n  end\n\
+    \  fn f() do\n    restrict IO.Spawn do\n      let _ = spawn(Loud)\n      ()\n    end\n  end\nend"
+  in
+  scope_rejects "cap_restrict" "an actor spawned inside a restrict is charged to it" spawned;
+  Alcotest.(check bool) "the spawned actor's handler kind is the one refused" true
+    (List.exists (fun m -> has_sub m "needs `IO.Console`") (scope_messages spawned));
+  scope_rejects "type_mismatch" "`IO.Console + 1` is not a scope union"
+    (in_mod "  fn f() do\n    restrict IO.Console + 1 do 1 end\n  end")
 
 (** `restart` must stay usable as an ordinary identifier.
 

@@ -1,0 +1,4 @@
+main calls the module-level value: allowed /etc/hosts
+a restrict calls it: IO.FileRead("/etc/hosts") refused by the restrict at restrict_module_level_closure_captures_nothing.march:22 (IO.FileRead("/srv/"))
+made in a function's restrict: IO.FileRead("/etc/hosts") refused by the restrict at restrict_module_level_closure_captures_nothing.march:28 (IO.FileRead("/srv/"))
+exit 0

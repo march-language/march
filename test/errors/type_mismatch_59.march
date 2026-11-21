@@ -1,0 +1,10 @@
+mod Main do
+  needs IO.NetConnect
+
+  -- The let? hint shows the entry as it was written.
+  fn fetch(host : String) : Int do
+    restrict IO.NetConnect(host, methods(get)) do
+      0
+    end
+  end
+end

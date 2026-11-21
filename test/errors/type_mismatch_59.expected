@@ -1,0 +1,12 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_59.march
+
+expected `Scope` but got `Result(Scope, ScopeError)`. [type_mismatch]
+
+6 |     restrict IO.NetConnect(host, methods(get)) do
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    A computed scope expression can fail, so `restrict` cannot take it directly. Bind it with `let?` first: `let? s = IO.NetConnect(host, methods(get))`, then `restrict s do ... end`.
+    run `march --explain type_mismatch`
+
+

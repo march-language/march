@@ -1,0 +1,12 @@
+exit: 1
+-- CAPABILITY --------------- errors/cap_restrict_3.march
+
+`File.read` needs `IO.FileRead`, which the restrict at cap_restrict_3.march:14 does not allow. [cap_restrict]
+help: add `IO.FileRead` to the restrict, or move the call out of the block.
+
+16 |       let inside = File.read("/srv/inside")
+                        ^^^^^^^^^
+
+    run `march --explain cap_restrict`
+
+

@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/cap_restrict_3.march","start_line":16,"start_col":19,"end_line":16,"end_col":28,"message":"`File.read` needs `IO.FileRead`, which the restrict at cap_restrict_3.march:14 does not allow.\nhelp: add `IO.FileRead` to the restrict, or move the call out of the block.","code":"cap_restrict","fix":null,"labels":[],"notes":[],"category":"CAPABILITY"}

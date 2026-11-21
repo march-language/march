@@ -62,7 +62,7 @@ git log is authoritative for exact commits.
   Every runtime (interpreter, `--jit`, the REPL, compiled, `--target js`) behaves the same.
   Entering a block with a scoped literal costs about 13 ns, one over a computed `Scope` about
   0.4 µs (`bench/restrict_enter*.march`). See
-  [Capabilities]({{ site.baseurl }}/docs/capabilities/#restrict).
+  [Capabilities](docs/capabilities.md#restrict).
 - **Run-time authority (object capabilities, phase 4).** Every capability operation is now
   also checked while the program runs, against the authority in force, in the interpreter,
   `--jit`, the REPL, compiled binaries and `--target js` alike. A refusal is the operation's
@@ -1275,6 +1275,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A function named like a stdlib loop no longer leaks its capabilities into the stdlib.**
+  A local `fn go(...)` (or any local `fn`) was not in scope for the rest of its block in the
+  compiler's capability bookkeeping, so the stdlib's local `fn go` loops were recorded as calls
+  of the program's own top-level `go`. A program whose `go` read a file had `println` and every
+  function reaching such a loop charged with `IO.FileRead`: a function `needs` bound or a
+  `restrict` block that only prints was refused, and `march caps` over-reported. Local `fn`s
+  are now scoped like `let`s.
 - **Diagnostics and refusals from a file loaded into the REPL name the file.** `march repl
   FILE`, the TUI and `:reload` lexed the file without its name, so a capability refusal read
   `refused by ... at .:18` and other errors and stack traces for its declarations named no

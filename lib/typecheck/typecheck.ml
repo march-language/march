@@ -4841,15 +4841,45 @@ let rec infer_expr env (e : Ast.expr) : ty =
              (match repr t with
               | TCon ("Result", [ s; _ ])
                 when (match repr s with TCon ("Scope", []) -> true | _ -> false) ->
+                (* The hint shows the entry as written when it is a scope
+                   expression or a name (final review F7), and a neutral
+                   placeholder otherwise. *)
+                let rec render (e : Ast.expr) : string option =
+                  let args xs =
+                    let rs = List.map render xs in
+                    if List.for_all Option.is_some rs then
+                      Some (String.concat ", " (List.map Option.get rs))
+                    else None
+                  in
+                  match e with
+                  | Ast.EVar n -> Some n.Ast.txt
+                  | Ast.ELit (Ast.LitString str, _) -> Some (Printf.sprintf "%S" str)
+                  | Ast.ECon (c, [], _) -> Some c.Ast.txt
+                  | Ast.ECon (c, xs, _) -> Option.map (Printf.sprintf "%s(%s)" c.Ast.txt) (args xs)
+                  | Ast.EApp (Ast.EVar f, xs, _)
+                    when f.Ast.txt <> ""
+                      && (match f.Ast.txt.[0] with
+                          | 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false) ->
+                    Option.map (Printf.sprintf "%s(%s)" f.Ast.txt) (args xs)
+                  | Ast.EField (x, f, _) ->
+                    Option.map (fun r -> r ^ "." ^ f.Ast.txt) (render x)
+                  | _ -> None
+                in
+                let bind =
+                  match render entry with
+                  | Some r -> Printf.sprintf "`let? s = %s`" r
+                  | None -> "`let? s = <the scope expression>`"
+                in
                 Err.report env.errors
                   { Err.severity = Err.Error; span = esp;
                     message =
                       Printf.sprintf "expected `Scope` but got `%s`." (pp_ty t);
                     labels = [];
                     notes =
-                      [ "A computed scope expression can fail, so `restrict` cannot \
-                         take it directly. Bind it with `let?` first: \
-                         `let? s = IO.FileRead(dir)`, then `restrict s do ... end`." ];
+                      [ Printf.sprintf
+                          "A computed scope expression can fail, so `restrict` cannot \
+                           take it directly. Bind it with `let?` first: \
+                           %s, then `restrict s do ... end`." bind ];
                     code = Err.Code.type_mismatch; fix = None }
               | _ ->
                 unify env ~span:esp
@@ -10202,29 +10232,38 @@ let check_restrict_reach ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (
        in
        let culprits =
          List.filter_map
-           (fun (c, op, sp) -> if outside c then Some (op, c, sp) else None)
+           (fun (c, op, sp) -> if outside c then Some (op, c, sp, Ref_call) else None)
            ro.ro_ops
          @ List.concat_map
-             (fun (r, sp) ->
+             (fun (r, sp, use) ->
                 match row_of r with
                 | Some row ->
                   List.filter_map
-                    (fun c -> if outside c then Some (r, c, sp) else None)
+                    (fun c -> if outside c then Some (r, c, sp, use) else None)
                     (List.sort_uniq String.compare row.March_caps.Cap_rows.caps)
                 | None -> [])
              ro.ro_refs
        in
        let seen = Hashtbl.create 4 in
        List.iter
-         (fun (who, c, sp) ->
+         (fun (who, c, sp, use) ->
             if not (Hashtbl.mem seen (who, c)) then begin
               Hashtbl.replace seen (who, c) ();
               let span = if sp = Ast.dummy_span then fb.fb_span else sp in
+              (* A function used as a value has no call to move (final
+                 review F6): the value made in the block keeps its
+                 authority, so it is the use that must leave. *)
+              let move =
+                match use with
+                | Ref_call -> "move the call out of the block"
+                | Ref_spawn -> Printf.sprintf "spawn `%s` outside the block" who
+                | Ref_value -> Printf.sprintf "use `%s` as a value outside the block" who
+              in
               Err.error ~code:Err.Code.cap_restrict env.errors ~span
                 (Printf.sprintf
                    "`%s` needs `%s`, which the restrict at %s does not allow.\n\
-                    help: add `%s` to the restrict, or move the call out of the block."
-                   who c where c)
+                    help: add `%s` to the restrict, or %s."
+                   who c where c move)
             end)
          culprits)
     blocks

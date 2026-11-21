@@ -600,6 +600,15 @@ and free_vars_block (bound : string list) (es : Ast.expr list) : string list =
     let used_in_rhs = free_vars_expr bound b.Ast.bind_expr in
     let pat_bound = free_vars_pattern b.Ast.bind_pat in
     used_in_rhs @ free_vars_block (pat_bound @ bound) rest
+  (* A local `fn go(...) do ... end` in a block is in scope for the rest of
+     the block, as a `let` is.  Without this, the stdlib's many local `fn go`
+     loops recorded their calls as references to whatever TOP-LEVEL `go` the
+     program declared, and [record_fn_refs] charged that function's
+     capabilities to every caller of the loop: `println` and every helper
+     reaching a stdlib loop picked up a user `go`'s `IO.FileRead`
+     (ocap phase 5 final review F1). *)
+  | (Ast.ELetFn (name, _, _, _, _) as e) :: rest ->
+    free_vars_expr bound e @ free_vars_block (name.txt :: bound) rest
   | e :: rest ->
     free_vars_expr bound e @ free_vars_block bound rest
 
