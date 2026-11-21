@@ -518,6 +518,9 @@ let ffi_resource_tbl : (string, unit) Hashtbl.t = Hashtbl.create 16
     Reset at the start of each [eval_module_env] run. *)
 let module_registry : (string, value) Hashtbl.t = Hashtbl.create 64
 
+(** Layers of literal [restrict] sites, built once per site (ocap phase 5). *)
+let restrict_layers : (string * int * int * string, value) Hashtbl.t = Hashtbl.create 16
+
 (** Callback set by the driver (main.ml / REPL) to load a stdlib module
     on demand.  When set, [ensure_module_loaded] calls this to parse,
     desugar, typecheck, and eval the module, populating [module_registry]. *)
@@ -2204,6 +2207,17 @@ and eval_expr_inner (env : env) (e : expr) : value =
      parser builds both as an ordinary [EApp] of the builtin, and no program
      can rebind the operator symbols, so the name alone identifies them.
      TIR lowering does the same (lower_expr.ml). *)
+  | EApp (EVar { txt = "+"; _ }, [ _; _ ], _) when (match March_caps.Scope_expr.classify e with
+      | March_caps.Scope_expr.Literal _ -> true | _ -> false) ->
+    (* a [+] chain of literal scope entries folds to one literal *)
+    ensure_module_loaded "Scope";
+    (match March_caps.Scope_expr.classify e with
+     | March_caps.Scope_expr.Literal entries ->
+       let text = match March_ast.Cap_request.request_of_entries entries with
+         | "", _ -> "()" | t, _ -> t in
+       apply (lookup "Scope.literal" env) [ VString text ]
+     | _ -> assert false)
+
   | EApp (EVar { txt = ("&&" | "||") as op; _ }, [a; b], _) ->
     (match op, eval_expr env a with
      | "&&", VBool false -> VBool false
@@ -2278,6 +2292,28 @@ and eval_expr_inner (env : env) (e : expr) : value =
      | v -> march_stack_pop (); v
      | exception (Eval_error _ | Match_failure _ | Assert_failure _ as e) -> raise e
      | exception e -> march_stack_pop (); raise e)
+
+  | ECon (name, _, _) when March_caps.Scope_expr.is_cap_path name.txt ->
+    (* A scope expression (ocap phase 5): Scope.literal / Scope.build. *)
+    ensure_module_loaded "Scope";
+    (match March_caps.Scope_expr.classify e with
+     | March_caps.Scope_expr.Literal entries ->
+       let text = match March_ast.Cap_request.request_of_entries entries with
+         | "", _ -> "()" | t, _ -> t in
+       apply (lookup "Scope.literal" env) [ VString text ]
+     | March_caps.Scope_expr.Computed { kind; strings; options } ->
+       let strs = List.map (fun x -> match eval_expr env x with
+           | VString s -> s | _ -> eval_error "a scope argument must be a String") strings in
+       let lst l = List.fold_right (fun x acc -> VCon ("Cons", [ VString x; acc ])) l (VCon ("Nil", [])) in
+       let src o = match String.index_opt o '=' with
+         | None -> o
+         | Some i ->
+           let k = String.sub o 0 i and v = String.sub o (i + 1) (String.length o - i - 1) in
+           if k = "methods" then Printf.sprintf "%s(%s)" k (String.concat ", " (String.split_on_char ',' v))
+           else Printf.sprintf "%s(%s)" k (March_ast.Cap_request.quote v) in
+       apply (lookup "Scope.build" env) [ VString kind; lst strs; lst (List.map src options) ]
+     | March_caps.Scope_expr.Not_scope ->
+       eval_error "a capability path in expression position is not a scope expression")
 
   | ECon (name, args, con_sp) ->  (* E-Con — core-march.md §4.2 *)
     let arg_vals = List.map (eval_expr env) args in
@@ -2435,9 +2471,38 @@ and eval_expr_inner (env : env) (e : expr) : value =
            | None -> eval_error "no member '%s' in module '%s'" field.txt mod_name))
      | _ -> eval_error "field access on non-record value"))
 
-  | ERestrict _ ->
-    (* Task 5 of the ocap phase 5 plan implements restrict in the interpreter. *)
-    eval_error "restrict is not yet implemented in the interpreter"
+  | ERestrict (es, body, sp) ->
+    (* ocap phase 5: a ByRestrict(where) frame around [body], entered like
+       [framed_call]'s (always: the interpreter has no drop rule).  A literal
+       restrict's layer is built once per site; a computed one's at each entry
+       from the union of its entries.  [where] is [<basename>:<line>] of the
+       keyword, as the type checker and [Lower] spell it. *)
+    let where_ = Filename.basename sp.file ^ ":" ^ string_of_int sp.start_line in
+    ensure_module_loaded "Authority";
+    ensure_module_loaded "Scope";
+    let mk text =
+      apply (lookup "Authority.restrict_layer" env) [ VString where_; VString text ] in
+    let layer =
+      match March_caps.Scope_expr.restrict_text es with
+      | Some text ->
+        let key = (sp.file, sp.start_line, sp.start_col, text) in
+        (match Hashtbl.find_opt restrict_layers key with
+         | Some l -> l
+         | None -> let l = mk text in Hashtbl.replace restrict_layers key l; l)
+      | None ->
+        let entries = List.filter (function ETuple ([], _) -> false | _ -> true) es in
+        let scopes = List.map (eval_expr env) entries in
+        let union = lookup "Scope.union" env in
+        let u = match scopes with
+          | [] -> eval_error "a computed restrict with no entries"
+          | a :: rest -> List.fold_left (fun acc v -> apply union [ acc; v ]) a rest in
+        mk (match apply (lookup "Scope.text" env) [ u ] with
+            | VString t -> t
+            | _ -> eval_error "Scope.text: expected a string")
+    in
+    let saved = apply (lookup "Authority.enter_fn" env) [ layer ] in
+    Fun.protect ~finally:(fun () -> Eval_builtins.cap_slot := saved)
+      (fun () -> eval_expr env body)
 
   | EIf (cond, then_, else_, sp) ->
     (match eval_expr env cond with

@@ -885,7 +885,7 @@ let test_restrict_lambda_captures () =
   Alcotest.(check bool) "cap_save follows Authority.enter_fn" true
     (pos Tir_names.enter_fn_name >= 0 && pos "cap_save" > pos Tir_names.enter_fn_name)
 
-(* Every runtime but the interpreter (ocap phase 5 Task 5 adds it): a frame
+(* Every runtime: a frame
    kept for a call of a module-level function value (which captures nothing,
    so runs under the restrict), none needed for a closure made outside (it
    keeps its own authority), a dropped frame pushes no layer, and a closure
@@ -904,8 +904,15 @@ let test_restrict_every_runtime () =
   in
   List.iter
     (fun (mode, outs) ->
-       if mode <> "interp" then
-         List.iter (fun out -> Alcotest.(check string) mode want out) outs)
+       (* The interpreter always enters the frame (no drop rule, by design),
+          so the third line, the layer count inside a block the compiled
+          runtimes drop, is 1 there and 0 elsewhere. *)
+       let want =
+         if mode = "interp" then
+           String.concat "\n"
+             (List.mapi (fun i l -> if i = 2 then "1" else l) (String.split_on_char '\n' want))
+         else want in
+       List.iter (fun out -> Alcotest.(check string) mode want out) outs)
     (Test_authority_differential.run_modes ~envs:[ "" ]
        ~src:({|mod RestrictRt do
   needs IO.Console

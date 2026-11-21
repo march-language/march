@@ -5736,6 +5736,51 @@ let test_process_wait_race () =
   Alcotest.(check bool) ("one Ok, one Closed:\n" ^ out) true
     (contains process_wait_race_expected out)
 
+(* ocap phase 5 Task 5: restrict and scope values in the interpreter. *)
+let restrict_probe_src body = {|mod Test do
+  needs IO.FileRead
+  fn probe(kind : String, p : String) : String do
+    match Authority.check(kind, p) do
+    Ok(_) -> "ok"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+|} ^ body ^ "\nend"
+
+let restrict_env src =
+  eval_with_stdlib
+    [ load_stdlib_file_for_test "list.march"; load_stdlib_file_for_test "scope.march" ] src
+
+let test_restrict_refuses_computed_target_eval () =
+  let env = restrict_env (restrict_probe_src {|  fn run() do
+    restrict IO.FileRead("/srv/") do probe("IO.FileRead", "/etc/x") end
+  end|}) in
+  let got = vstr (call_fn env "run" []) in
+  let has sub =
+    let n = String.length sub and m = String.length got in
+    let rec go i = i + n <= m && (String.sub got i n = sub || go (i + 1)) in go 0 in
+  Alcotest.(check bool) ("refused by the restrict: " ^ got) true
+    (has "IO.FileRead(\"/etc/x\") refused by the restrict at .:10 (IO.FileRead(\"/srv/\"))")
+
+let test_restrict_union_eval () =
+  let env = restrict_env {|mod Test do
+  fn run() do Scope.to_string(IO.Console + IO.Clock) end
+end|} in
+  Alcotest.(check string) "union" "IO.Console, IO.Clock" (vstr (call_fn env "run" []))
+
+let test_restrict_restores_after_eval () =
+  let env = restrict_env (restrict_probe_src {|  fn run() do
+    let a = restrict IO.FileRead("/srv/") do probe("IO.FileRead", "/etc/x") end
+    let b = probe("IO.FileRead", "/etc/x")
+    a ++ "|" ++ b
+  end|}) in
+  let got = vstr (call_fn env "run" []) in
+  let suffix = "|ok" in
+  let n = String.length suffix and m = String.length got in
+  Alcotest.(check bool) ("admitted after: " ^ got) true
+    (m >= n && String.sub got (m - n) n = suffix)
+
+
 let eval_suites =
   [
       ( "handle primitives", [
@@ -5808,6 +5853,9 @@ let eval_suites =
         ] );
       ( "eval",
         [
+          Alcotest.test_case "restrict refuses computed target" `Quick (with_reset test_restrict_refuses_computed_target_eval);
+          Alcotest.test_case "restrict union"      `Quick (with_reset test_restrict_union_eval);
+          Alcotest.test_case "restrict restores after" `Quick (with_reset test_restrict_restores_after_eval);
           Alcotest.test_case "dotted module name"  `Quick (with_reset test_eval_dotted_module);
           Alcotest.test_case "literal"             `Quick test_eval_literal;
           Alcotest.test_case "arithmetic"          `Quick test_eval_arithmetic;
