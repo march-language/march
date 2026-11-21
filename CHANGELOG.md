@@ -21,6 +21,12 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Freeing is fast past the first gigabyte of heap.** `free` decides whether a pointer
+  belongs to March's allocator with an inline range check, which knew only mimalloc's first
+  1 GiB arena; with a larger heap nearly every free fell through to
+  `mi_is_in_heap_region`. The bounds of every arena are now cached the same way: on a
+  4.5 GB, 500,000-citizen Ur city the simulation thread had spent about 23% of its time in
+  that check.
 - **Setting a native array kept in a record writes in place.** A function that reads an
   array field out of a record and sets it (`let lanes = r.lanes` ... `{ ..., lanes:
   NativeArray.set_int(lanes, i, v) }`) copied the whole array on every set: the record
