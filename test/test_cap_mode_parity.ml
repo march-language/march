@@ -126,9 +126,8 @@ end
 |}
     bound
 
-(* A literal restrict's reach (ocap phase 5).  Only the reject: the accept
-   twin runs the block, which needs restrict's lowering and evaluation
-   (phase 5 Tasks 4 and 5), and is added with them. *)
+(* A literal restrict's reach (ocap phase 5): the reject (`restrict ()`
+   around a println) and its accept twin (`restrict IO.Console`). *)
 let restrict_reach scope =
   Printf.sprintf
     {|mod Main do
@@ -330,6 +329,8 @@ let fixtures =
     fx "fn_bound_ok" [] (fn_bound "IO.Console") ~repl:(fn_bound_repl "IO.Console");
     fx "restrict_reach" [ "cap_restrict" ] (restrict_reach "()")
       ~repl:(restrict_reach_repl "()");
+    fx "restrict_reach_ok" [] (restrict_reach "IO.Console")
+      ~repl:(restrict_reach_repl "IO.Console");
     (* §21: the REPL runs with full authority, so no grant fixture there. *)
     fx "main_grant" [ "cap_grant_exceeded" ] (main_grant "cap : Cap(IO.Console)")
       ~skip:no_entry;

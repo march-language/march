@@ -88,10 +88,27 @@ mod Scope do
     None ->
       let text = entry_text(kind, strings, options)
       match Authority.parse(text) do
-      Ok(_) -> Ok(ScopeText(text))
+      Ok(_) ->
+        match dotdot_path(kind, strings) do
+        Some(s) -> Err(ScopeError(kind ++ ": the path \"" ++ s ++ "\" has a `..` segment"))
+        None -> Ok(ScopeText(text))
+        end
       Err(e) -> Err(ScopeError(kind ++ ": " ++ e))
       end
     end
+  end
+
+  -- A computed path with a `..` segment (design §8): `IO.FileRead(base ++ p)`
+  -- with `p = "../etc/"` would otherwise fold to a scope outside `base`.
+  pfn dotdot_path(kind : String, ss : List(String)) : Option(String) do
+    if kind == "IO.FileRead" || kind == "IO.FileWrite" || kind == "IO.FileSystem" do
+      match ss do
+      Nil -> None
+      Cons(s, rest) ->
+        if List.any(string_split(s, "/"), fn seg -> seg == "..") do Some(s)
+        else dotdot_path(kind, rest) end
+      end
+    else None end
   end
 
   pfn bad_string(ss : List(String), first : Bool) : Option(String) do

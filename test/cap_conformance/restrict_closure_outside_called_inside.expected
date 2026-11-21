@@ -1,0 +1,5 @@
+handed in: allowed /etc/hosts | via helper: allowed /etc/hosts | own: IO.FileRead("/etc/hosts") refused by the restrict at restrict_closure_outside_called_inside.march:24 (IO.FileRead("/srv/"))
+handed in: allowed /srv/x | via helper: allowed /srv/x | own: allowed /srv/x
+handed in: allowed HOME | own: IO.Process("HOME") refused by the restrict at restrict_closure_outside_called_inside.march:31 (IO.FileRead)
+via helper: allowed HOME
+exit 0

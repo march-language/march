@@ -1,0 +1,7 @@
+literal: IO.FileRead("/srv/a/")
+computed: IO.FileRead("/srv/b/")
+union: IO.FileRead("/srv/a/"), IO.FileRead("/srv/b/")
+allowed /srv/a/x
+allowed /srv/b/x
+IO.FileRead("/srv/c/x") refused by the restrict at scope_value_union.march:25 (IO.FileRead("/srv/a/"), IO.FileRead("/srv/b/"))
+exit 0

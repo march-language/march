@@ -1,0 +1,5 @@
+allowed /srv/data/a.txt
+IO.FileRead("/srv/other/a.txt") refused by the restrict at restrict_computed_scope.march:19 (IO.FileRead("/srv/data/"))
+IO.FileRead("/etc/hosts") refused by the restrict at restrict_computed_scope.march:19 (IO.FileRead("/srv/data/"))
+allowed /etc/hosts
+exit 0

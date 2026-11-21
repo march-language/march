@@ -1,0 +1,7 @@
+allowed /srv/a/x
+IO.FileRead("/srv/b/x") refused by the restrict at restrict_under_grant.march:20 (IO.FileRead("/srv/a/"), IO.Process)
+IO.FileRead("/etc/hosts") refused by the restrict at restrict_under_grant.march:20 (IO.FileRead("/srv/a/"), IO.Process)
+IO.Process("HOME") refused by the launch grant (IO.Console, IO.FileRead("/srv/"))
+allowed /srv/b/x
+IO.FileRead("/etc/hosts") refused by the launch grant (IO.Console, IO.FileRead("/srv/"))
+exit 0

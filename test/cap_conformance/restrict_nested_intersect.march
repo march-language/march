@@ -1,0 +1,38 @@
+-- Nested restricts intersect (design §9): inside the inner block a target is
+-- allowed only if both layers admit it. A target only the inner layer
+-- refuses names the inner restrict; a kind the inner layer lists but the
+-- outer does not names the outer restrict (listing it widens nothing); a
+-- target both refuse names the innermost first. Between the blocks the
+-- outer layer alone is in force again.
+mod RestrictNestedIntersect do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Process
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn inner(kind : String, target : String) : String do
+    restrict IO.FileRead("/srv/a/"), IO.Process do
+      probe(kind, target)
+    end
+  end
+
+  fn outer(kind : String, target : String) : String do
+    restrict IO.FileRead("/srv/") do
+      "inner: " ++ inner(kind, target) ++ " | outer: " ++ probe(kind, target)
+    end
+  end
+
+  fn main() do
+    println(outer("IO.FileRead", "/srv/a/x"))
+    println(outer("IO.FileRead", "/srv/b/x"))
+    println(outer("IO.Process", "HOME"))
+    println(outer("IO.FileRead", "/etc/hosts"))
+    println(probe("IO.Process", "HOME"))
+  end
+end

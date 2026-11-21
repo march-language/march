@@ -21,6 +21,7 @@ let src = {|mod ScopeFixture do
     println(Scope.to_string(Scope.union(none, none)))
     show_build(Scope.build("IO.FileRead", ["/srv/" ++ "x"], []))
     show_build(Scope.build("IO.FileRead", ["../etc"], []))
+    show_build(Scope.build("IO.FileRead", ["/srv/" ++ "../etc/"], []))
     show_build(Scope.build("IO.FileRead", ["a\"b"], []))
     show_build(Scope.build("IO.FileRead", ["a;b"], []))
     show_build(Scope.build("IO.FileRead", ["/srv/a\\b"], []))
@@ -49,6 +50,7 @@ let expected = String.concat "\n" [
   "()";
   "Ok(IO.FileRead(\"/srv/x\"))";
   "Err(IO.FileRead: the scope `../etc` on `IO.FileRead` is a relative path; give an absolute path, one starting with `/`)";
+  "Err(IO.FileRead: the path \"/srv/../etc/\" has a `..` segment)";
   "Err(IO.FileRead: the string \"a\"b\" contains \")";
   "Err(IO.FileRead: the string \"a;b\" contains ;)";
   "Ok(IO.FileRead(\"/srv/a\\\\b\"))";

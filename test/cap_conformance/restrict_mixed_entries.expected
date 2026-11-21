@@ -1,0 +1,5 @@
+allowed /srv/data/a.txt
+IO.FileRead("/etc/hosts") refused by the restrict at restrict_mixed_entries.march:19 (IO.Process, IO.FileRead("/srv/data/"))
+allowed HOME
+IO.Console("stdout") refused by the restrict at restrict_mixed_entries.march:19 (IO.Process, IO.FileRead("/srv/data/"))
+exit 0

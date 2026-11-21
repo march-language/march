@@ -1,0 +1,39 @@
+-- A restrict over a computed scope value is checked at run time (design
+-- §8): `IO.FileRead(dir)` with a computed `dir` is a `Result(Scope,
+-- ScopeError)`, bound with `let?`, and `restrict s do` then narrows the
+-- block to it, naming the restrict with the scope's text; a target inside
+-- the computed directory is allowed.
+mod RestrictComputedScope do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(target : String) : String do
+    match Authority.check("IO.FileRead", target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn under(dir : String, target : String) : Result(String, ScopeError) do
+    let? s = IO.FileRead(dir)
+    let r = restrict s do
+      probe(target)
+    end
+    Ok(r)
+  end
+
+  fn show_run(r : Result(String, ScopeError)) : String do
+    match r do
+    Ok(s) -> s
+    Err(ScopeError(m)) -> "scope error: " ++ m
+    end
+  end
+
+  fn main() do
+    let base = "/srv"
+    println(show_run(under(base ++ "/data/", "/srv/data/a.txt")))
+    println(show_run(under(base ++ "/data/", "/srv/other/a.txt")))
+    println(show_run(under(base ++ "/data/", "/etc/hosts")))
+    println(probe("/etc/hosts"))
+  end
+end

@@ -1,0 +1,5 @@
+in block: IO.FileRead("/etc/hosts") refused by the restrict at restrict_task_inherits.march:34 (IO.FileRead("/srv/"), IO.Spawn) / IO.FileRead("/etc/hosts") refused by the restrict at restrict_task_inherits.march:34 (IO.FileRead("/srv/"), IO.Spawn)
+made in block: IO.FileRead("/etc/hosts") refused by the restrict at restrict_task_inherits.march:40 (IO.FileRead("/srv/"), IO.Spawn) / allowed
+made in block: IO.FileRead("/etc/hosts") refused by the restrict at restrict_task_inherits.march:40 (IO.FileRead("/srv/"), IO.Spawn) / IO.FileRead("/etc/hosts") refused by the restrict at restrict_task_inherits.march:40 (IO.FileRead("/srv/"), IO.Spawn)
+main: allowed
+exit 0

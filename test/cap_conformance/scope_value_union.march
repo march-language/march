@@ -1,0 +1,40 @@
+-- `+` is the union of two scope values (design §8): a literal plus a
+-- computed value. Each value prints as its scope text, and a restrict over
+-- the union admits what either side admits and refuses the rest, naming
+-- the union's text.
+mod ScopeValueUnion do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(target : String) : String do
+    match Authority.check("IO.FileRead", target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn union_of(dir : String) : Result(Scope, ScopeError) do
+    let? computed = IO.FileRead(dir)
+    let lit = IO.FileRead("/srv/a/")
+    println("literal: " ++ show(lit))
+    println("computed: " ++ show(computed))
+    Ok(lit + computed)
+  end
+
+  fn under(s : Scope, target : String) : String do
+    restrict s do
+      probe(target)
+    end
+  end
+
+  fn main() do
+    match union_of("/srv/" ++ "b/") do
+    Err(ScopeError(m)) -> println("scope error: " ++ m)
+    Ok(u) ->
+      println("union: " ++ show(u))
+      println(under(u, "/srv/a/x"))
+      println(under(u, "/srv/b/x"))
+      println(under(u, "/srv/c/x"))
+    end
+  end
+end

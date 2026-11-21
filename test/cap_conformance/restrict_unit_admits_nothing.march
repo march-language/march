@@ -1,0 +1,44 @@
+-- `restrict ()` admits nothing (design §9: `()` is the empty scope). Its
+-- block calls a function value, so its run-time frame is kept in every
+-- runtime: a lambda made inside the block and called there is refused every
+-- kind by it, and so is that lambda when it is returned and called from
+-- main after the block (design §5: it keeps the authority where it was
+-- made). A lambda made by main and handed in keeps main's authority.
+mod RestrictUnitAdmitsNothing do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Process
+
+  fn target_of(kind : String) : String do
+    if kind == "IO.FileRead" do "/srv/x"
+    else if kind == "IO.Process" do "HOME"
+    else "stdout" end end
+  end
+
+  fn probe(kind : String) : String do
+    match Authority.check(kind, target_of(kind)) do
+    Ok(_) -> "allowed " ++ kind
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn call_with(f : String -> String, kind : String) : String do
+    f(kind)
+  end
+
+  fn nothing(handed : String -> String) : (String -> String, String) do
+    restrict () do
+      let made = fn k -> probe(k)
+      (made, made("IO.FileRead") ++ " | " ++ made("IO.Process")
+             ++ " | handed in: " ++ handed("IO.FileRead"))
+    end
+  end
+
+  fn main() do
+    let (made, inside) = nothing(fn k -> probe(k))
+    println(inside)
+    println(made("IO.FileRead"))
+    println(call_with(made, "IO.Console"))
+    println(probe("IO.FileRead"))
+  end
+end

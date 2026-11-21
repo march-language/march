@@ -1,0 +1,6 @@
+allowed /srv/x
+IO.FileRead("/etc/hosts") refused by the restrict at restrict_refuses_scoped.march:18 (IO.FileRead("/srv/"))
+IO.Process("HOME") refused by the restrict at restrict_refuses_scoped.march:18 (IO.FileRead("/srv/"))
+allowed /etc/hosts
+allowed HOME
+exit 0

@@ -1,0 +1,4 @@
+allowed /srv/x
+IO.FileRead("/etc/hosts") refused by the restrict at restrict_reenter_noop.march:21 (IO.FileRead("/srv/"))
+allowed /etc/hosts
+exit 0

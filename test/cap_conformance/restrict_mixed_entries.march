@@ -1,0 +1,39 @@
+-- A restrict whose entries mix literal scopes, `()` and a computed scope
+-- value is a computed restrict, and it is still enforced at run time
+-- (design §8, §9): its authority is the union of its entries, `()` adds
+-- nothing, and a refusal names the restrict with the union's text.
+mod RestrictMixedEntries do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Process
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn mixed(dir : String, kind : String, target : String) : Result(String, ScopeError) do
+    let? s = IO.FileRead(dir)
+    let r = restrict IO.Process, (), s do
+      probe(kind, target)
+    end
+    Ok(r)
+  end
+
+  fn show_run(r : Result(String, ScopeError)) : String do
+    match r do
+    Ok(s) -> s
+    Err(ScopeError(m)) -> "scope error: " ++ m
+    end
+  end
+
+  fn main() do
+    let dir = "/srv/" ++ "data/"
+    println(show_run(mixed(dir, "IO.FileRead", "/srv/data/a.txt")))
+    println(show_run(mixed(dir, "IO.FileRead", "/etc/hosts")))
+    println(show_run(mixed(dir, "IO.Process", "HOME")))
+    println(show_run(mixed(dir, "IO.Console", "stdout")))
+  end
+end

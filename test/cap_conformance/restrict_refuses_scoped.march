@@ -1,0 +1,30 @@
+-- A scoped restrict narrows the authority for its block (design §9): inside
+-- it a path outside its scope and a kind it does not list are refused, each
+-- naming the restrict at its line with its scope text; a path inside is
+-- allowed; and after the block main's own authority is back.
+mod RestrictRefusesScoped do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Process
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn inside(kind : String, target : String) : String do
+    restrict IO.FileRead("/srv/") do
+      probe(kind, target)
+    end
+  end
+
+  fn main() do
+    println(inside("IO.FileRead", "/srv/x"))
+    println(inside("IO.FileRead", "/etc/hosts"))
+    println(inside("IO.Process", "HOME"))
+    println(probe("IO.FileRead", "/etc/hosts"))
+    println(probe("IO.Process", "HOME"))
+  end
+end
