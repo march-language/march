@@ -659,6 +659,282 @@ let test_spawn_via_value_every_runtime () =
 end
 |}))
 
+(* ── restrict blocks (ocap phase 5, Task 4) ───────────────────────────
+
+   [Lower] lowers a [restrict] to a frame around its body, its layer built
+   by [<encl>$restrict<N>$auth_layer]; [Auth_rt.restricts] drops the frame
+   where the static check proves the block (a literal, unscoped restrict
+   whose block reaches no actor spawn and no call of a function value). *)
+
+let restricts src =
+  let tir = Test_helpers.lower_module_typed src in
+  let sites = Hashtbl.copy Lower.restrict_sites in
+  let out, kept = Auth_rt.restricts tir ~sites in
+  (tir, out, kept, sites)
+
+let restrict_fns (m : Tir.tir_module) =
+  List.filter_map
+    (fun (f : Tir.fn_def) ->
+       if Test_helpers.contains "$restrict" f.Tir.fn_name then Some f.Tir.fn_name else None)
+    m.Tir.tm_fns
+
+let check_framed what (main : Tir.fn_def) framed =
+  let cs = callees main.Tir.fn_body in
+  Alcotest.(check bool) (what ^ ": enters a frame") framed (List.mem Tir_names.enter_fn_name cs);
+  Alcotest.(check bool) (what ^ ": restores") framed (List.mem "cap_restore" cs)
+
+let test_restrict_none_identity () =
+  let tir, out, kept, sites = restricts console_only in
+  Alcotest.(check int) "no sites" 0 (Hashtbl.length sites);
+  Alcotest.(check bool) "kept" false kept;
+  Alcotest.(check bool) "the module is returned physically unchanged" true (out == tir)
+
+let restrict_console = {|mod R1 do
+  needs IO.Console
+  fn main() do
+    restrict IO.Console do
+      println("x")
+    end
+  end
+end
+|}
+
+let test_restrict_dropped () =
+  let tir, out, kept, sites = restricts restrict_console in
+  Alcotest.(check (list string)) "lowering made the layer fn" [ "main$restrict0$auth_layer" ]
+    (restrict_fns tir);
+  (match Hashtbl.find_opt sites "main$restrict0$auth_layer" with
+   | Some rs ->
+     Alcotest.(check (option string)) "literal text" (Some "IO.Console") rs.Lower_state.rs_text;
+     Alcotest.(check bool) "unscoped" false rs.Lower_state.rs_scoped
+   | None -> Alcotest.fail "the restrict site was not recorded");
+  check_framed "lowered" (fn_exn "main" tir) true;
+  Alcotest.(check bool) "kept" false kept;
+  Alcotest.(check (list string)) "no layer fn is left" [] (restrict_fns out);
+  let main = fn_exn "main" out in
+  check_framed "after restricts" main false;
+  Alcotest.(check bool) "the body remains" true (List.mem "println" (callees main.Tir.fn_body))
+
+let restrict_scoped = {|mod R2 do
+  needs IO.FileRead
+  fn main() do
+    restrict IO.FileRead("/a/") do
+      let f = fn p -> File.read(p)
+      let _r = f("/a/x")
+      ()
+    end
+  end
+end
+|}
+
+let test_restrict_scoped_kept () =
+  let _, out, kept, _ = restricts restrict_scoped in
+  Alcotest.(check bool) "kept" true kept;
+  check_framed "scoped" (fn_exn "main" out) true;
+  let layer = fn_exn "main$restrict0$auth_layer" out in
+  Alcotest.(check int) "the layer fn takes nothing" 0 (List.length layer.Tir.fn_params);
+  match layer.Tir.fn_body with
+  | Tir.EApp (f, [ Tir.ALit (March_ast.Ast.LitString w); Tir.ALit (March_ast.Ast.LitString t) ]) ->
+    Alcotest.(check string) "built by restrict_layer" "Authority.restrict_layer" f.Tir.v_name;
+    Alcotest.(check bool) "where is <file>:<line>" true (String.ends_with ~suffix:":4" w);
+    Alcotest.(check string) "canonical text" "IO.FileRead(\"/a/\")" t
+  | _ -> Alcotest.fail "the layer fn is not restrict_layer(where, text)"
+
+let test_restrict_hof_kept () =
+  let _, out, kept, _ = restricts {|mod R3 do
+  needs IO.Console
+  fn twice(x : Int) : Int do x * 2 end
+  fn main() do
+    restrict IO.Console do
+      let ys = List.map([1, 2], twice)
+      println(int_to_string(List.length(ys)))
+    end
+  end
+end
+|} in
+  Alcotest.(check bool) "kept" true kept;
+  check_framed "List.map" (fn_exn "main" out) true;
+  Alcotest.(check bool) "the layer fn stays" true (fn_opt "main$restrict0$auth_layer" out <> None)
+
+let test_restrict_spawn_kept () =
+  let _, out, kept, _ = restricts {|mod R4 do
+  needs IO.Spawn
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+    on Inc() do
+      { count: state.count + 1 }
+    end
+  end
+  fn main() do
+    restrict IO.Spawn do
+      let _pid = spawn(Counter)
+      ()
+    end
+  end
+end
+|} in
+  Alcotest.(check bool) "kept" true kept;
+  check_framed "spawn" (fn_exn "main" out) true
+
+(* A function value made outside the block: the static check does not judge
+   its call, so only the frame can. *)
+let test_restrict_fn_value_kept () =
+  let _, out, kept, _ = restricts {|mod R6 do
+  needs IO.Console
+  fn main() do
+    let g = fn () -> println("x")
+    restrict () do
+      g()
+    end
+  end
+end
+|} in
+  Alcotest.(check bool) "kept" true kept;
+  check_framed "g()" (fn_exn "main" out) true
+
+let restrict_computed = {|mod R5 do
+  needs IO.FileRead
+  fn go(s : Scope) : Unit do
+    restrict s do
+      ()
+    end
+  end
+  fn main() do
+    match IO.FileRead("/a/" ++ "b") do
+    Ok(s) -> go(s)
+    Err(_) -> ()
+    end
+  end
+end
+|}
+
+let test_restrict_computed_kept () =
+  let tir, out, kept, sites = restricts restrict_computed in
+  Alcotest.(check bool) "kept" true kept;
+  Alcotest.(check bool) "nothing dropped, so the module is unchanged" true (out == tir);
+  (match Hashtbl.find_opt sites "go$restrict0$auth_layer" with
+   | Some rs -> Alcotest.(check (option string)) "computed" None rs.Lower_state.rs_text
+   | None -> Alcotest.fail "the computed site was not recorded");
+  Alcotest.(check (list string)) "no layer fn" [] (restrict_fns out);
+  let go = fn_exn "go" out in
+  check_framed "computed" go true;
+  let cs = callees go.Tir.fn_body in
+  Alcotest.(check bool) "its text is the scope's" true (List.mem "Scope.text" cs);
+  Alcotest.(check bool) "its layer is parsed at entry" true (List.mem "Authority.restrict_layer" cs);
+  Alcotest.(check bool) "the computed scope expression is built and checked" true
+    (List.mem "Scope.build" (callees (fn_exn "main" out).Tir.fn_body))
+
+let test_scope_exprs_lowered () =
+  let tir, _, _, sites = restricts {|mod R7 do
+  needs IO.Console
+  needs IO.Clock
+  fn join(a : Scope, b : Scope) : Scope do
+    a + b
+  end
+  fn main() do
+    let s = IO.Console + IO.Clock
+    println(Scope.to_string(join(s, IO.Console)))
+    restrict IO.Console + IO.Clock do
+      println("x")
+    end
+  end
+end
+|} in
+  Alcotest.(check bool) "+ on Scope values is Scope.union" true
+    (List.mem "Scope.union" (callees (fn_exn "join" tir).Tir.fn_body));
+  let lits = ref [] in
+  let rec scan (e : Tir.expr) =
+    match e with
+    | Tir.EApp ({ Tir.v_name = "Scope.literal"; _ }, [ Tir.ALit (March_ast.Ast.LitString t) ]) ->
+      lits := t :: !lits
+    | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> scan a; scan b
+    | Tir.ELetRec (fns, b) -> List.iter (fun (f : Tir.fn_def) -> scan f.Tir.fn_body) fns; scan b
+    | Tir.ECase (_, brs, d) ->
+      List.iter (fun (br : Tir.branch) -> scan br.Tir.br_body) brs; Option.iter scan d
+    | _ -> ()
+  in
+  scan (fn_exn "main" tir).Tir.fn_body;
+  Alcotest.(check (list string)) "a + of literals is one literal" [ "IO.Console, IO.Clock"; "IO.Console" ]
+    (List.rev !lits);
+  match Hashtbl.find_opt sites "main$restrict0$auth_layer" with
+  | Some rs ->
+    Alcotest.(check (option string)) "restrict text" (Some "IO.Console, IO.Clock") rs.Lower_state.rs_text
+  | None -> Alcotest.fail "no site"
+
+(* restricts, then frames and captures as every pipeline runs them. *)
+let restrict_pipeline src =
+  let tir = Test_helpers.lower_module_typed src in
+  let needs = Hashtbl.copy Lower.fn_needs_tbl in
+  let tir, rk = Auth_rt.restricts tir ~sites:(Hashtbl.copy Lower.restrict_sites) in
+  let tir, fk = Auth_rt.frames tir ~needs in
+  (Auth_rt.captures tir ~has_frames:(rk || fk) ~repl:false, rk || fk)
+
+let test_restrict_lambda_captures () =
+  let out, has = restrict_pipeline restrict_scoped in
+  Alcotest.(check bool) "has_frames" true has;
+  let main = fn_exn "main" out in
+  (match lambda_of (rhs_exn "f" main) with
+   | Some (fd, true) -> check_enters "fn p -> File.read(p)" fd
+   | _ -> Alcotest.fail "a lambda made inside a kept restrict is not captured");
+  (* It captures the narrowed authority: saved after the frame's entry. *)
+  let cs = callees main.Tir.fn_body in
+  let pos name =
+    let rec go i = function [] -> -1 | x :: r -> if x = name then i else go (i + 1) r in
+    go 0 cs in
+  Alcotest.(check bool) "cap_save follows Authority.enter_fn" true
+    (pos Tir_names.enter_fn_name >= 0 && pos "cap_save" > pos Tir_names.enter_fn_name)
+
+(* Every runtime but the interpreter (ocap phase 5 Task 5 adds it): a frame
+   kept for a call of a module-level function value (which captures nothing,
+   so runs under the restrict), none needed for a closure made outside (it
+   keeps its own authority), a dropped frame pushes no layer, and a closure
+   made inside a scoped restrict keeps the narrowed authority after the
+   block. *)
+let test_restrict_every_runtime () =
+  let want =
+    String.concat "\n"
+      [ "IO.FileRead(\"/etc/x\") refused by the restrict at launch.march:13 (IO.Console)";
+        "ok";
+        "0";
+        "IO.FileRead(\"/etc/x\") refused by the restrict at launch.march:25 (IO.FileRead(\"/srv/\"))";
+        "ok";
+        "0";
+        "" ]
+  in
+  List.iter
+    (fun (mode, outs) ->
+       if mode <> "interp" then
+         List.iter (fun out -> Alcotest.(check string) mode want out) outs)
+    (Test_authority_differential.run_modes ~envs:[ "" ]
+       ~src:({|mod RestrictRt do
+  needs IO.Console
+  needs IO.FileRead
+|} ^ show_fn ^ {|  let probe_l = fn p -> show(Authority.check("IO.FileRead", p))
+  fn main() do
+    let g = fn p -> show(Authority.check("IO.FileRead", p))
+    let a = restrict IO.Console do
+      probe_l("/etc/x")
+    end
+    println(a)
+    let b = restrict () do
+      g("/etc/x")
+    end
+    println(b)
+    let c = restrict IO.Console do
+      int_to_string(List.length(cap_layers()))
+    end
+    println(c)
+    let h = restrict IO.FileRead("/srv/") do
+      fn p -> show(Authority.check("IO.FileRead", p))
+    end
+    println(h("/etc/x"))
+    println(h("/srv/a"))
+    println(int_to_string(List.length(cap_layers())))
+  end
+end
+|}))
+
 let tests =
   [ ( "auth_rt",
       [ Alcotest.test_case "an unscoped needs clause that reaches no spawn gets no frame" `Quick
@@ -697,4 +973,22 @@ let tests =
         Alcotest.test_case "a function value runs under the authority it was made under" `Quick
           test_capture_every_runtime;
         Alcotest.test_case "an actor spawned through a function value runs under the frame, interp = compiled"
-          `Quick test_spawn_via_value_every_runtime ] ) ]
+          `Quick test_spawn_via_value_every_runtime ] );
+    ( "auth_rt_restrict",
+      [ Alcotest.test_case "a module with no restrict is unchanged" `Quick
+          test_restrict_none_identity;
+        Alcotest.test_case "an unscoped literal restrict the checker proves is dropped" `Quick
+          test_restrict_dropped;
+        Alcotest.test_case "a scoped restrict is kept" `Quick test_restrict_scoped_kept;
+        Alcotest.test_case "a restrict calling List.map with a fn is kept" `Quick
+          test_restrict_hof_kept;
+        Alcotest.test_case "a restrict that spawns an actor is kept" `Quick test_restrict_spawn_kept;
+        Alcotest.test_case "a restrict calling a function value is kept" `Quick
+          test_restrict_fn_value_kept;
+        Alcotest.test_case "a computed restrict is kept" `Quick test_restrict_computed_kept;
+        Alcotest.test_case "scope expressions and + lower to Scope calls" `Quick
+          test_scope_exprs_lowered;
+        Alcotest.test_case "a lambda made in a kept restrict captures the narrowed authority"
+          `Quick test_restrict_lambda_captures;
+        Alcotest.test_case "restrict frames in every compiled runtime" `Quick
+          test_restrict_every_runtime ] ) ]

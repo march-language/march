@@ -94,6 +94,10 @@ type fn_needs = Lower_state.fn_needs = {
     [lower_module] lowered that has one ([Auth_rt.frames]'s input). *)
 val fn_needs_tbl : (string, fn_needs) Hashtbl.t
 
+(** Layer fn name -> its [restrict] block, for every [restrict] the last
+    [lower_module] lowered ([Auth_rt.restricts]'s input). *)
+val restrict_sites : (string, Lower_state.restrict_site) Hashtbl.t
+
 (** {1 Cross-run state}
 
     Lowering keeps module-level tables; a driver that lowers more than once in

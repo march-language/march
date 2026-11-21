@@ -18,14 +18,28 @@ val reaches_indirect_call : Tir.tir_module -> Set.Make(String).t
 val frames :
   Tir.tir_module -> needs:(string, Lower_state.fn_needs) Hashtbl.t -> Tir.tir_module * bool
 
+(** [restricts m ~sites] drops the run-time frame of every [restrict] block
+    the static check already proves (ocap phase 5, decision 7).  [sites] is
+    normally [Lower.restrict_sites].  A literal restrict (its [rs_text] is
+    [Some _]) whose text carries no scope, and whose body calls no actor
+    spawn, no fn of [reaches_actor_spawn] or [reaches_indirect_call], and no
+    function value, is replaced by its body, and its [$auth_layer] fn is
+    removed; every other restrict keeps its frame.  Runs before [frames].
+    Returns the module and whether any frame was kept; with no sites, [m]
+    itself (physically) and [false]. *)
+val restricts :
+  Tir.tir_module -> sites:(string, Lower_state.restrict_site) Hashtbl.t -> Tir.tir_module * bool
+
 (** [captures m ~has_frames ~repl]: a function value runs under the
     authority it was made under, not its caller's (design §5).  Runs right
-    after [frames].  The identity (physically [m]) when [not has_frames &&
+    after [frames], with [has_frames] true when [frames] or [restricts] kept
+    a frame.  The identity (physically [m]) when [not has_frames &&
     not repl]: with no frame every slot holds the launch authority, so a
     capture would change nothing.  Otherwise:
     - a lambda whose body reaches a capability operation, an actor spawn or
       a call of a function value enters the
       authority saved by [cap_save()] at the top of the body that makes it
+      (or right after a [restrict] frame's entry, for one made inside it)
       ([cap_enter] / [cap_restore] around its body; a self-recursive lambda
       keeps its self tail call by moving its body to an uncaptured lambda);
     - a named fn used as a value (an [AVar] of such a fn of [m], or of a

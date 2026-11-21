@@ -94,6 +94,7 @@ let corpus = [
   "nominal_record_actor_drops",      "nominal_record_actor_drops.march";
   "auth_frame",                      "auth_frame.march";
   "auth_capture",                    "auth_capture.march";
+  "auth_restrict",                   "auth_restrict.march";
 ]
 
 (* ── Path resolution ────────────────────────────────────────────────────
@@ -229,13 +230,16 @@ let test_perceus_verifier_checks_rc_balance () =
       (Test_helpers.contains "rc-balance/over-release: `x`" message)
 
 (* Lowering as every pipeline runs it: [Lower.lower_module], then the
+   `restrict` frames of ocap phase 5 ([Auth_rt.restricts]), the
    run-time frames of ocap phase 4 ([Auth_rt.frames]) and the capture of
    authority by function values ([Auth_rt.captures]), which leave a module
    with nothing to frame physically unchanged. *)
 let lower_framed src =
   let tir = Test_helpers.lower_module_typed src in
-  let tir, has_frames = March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
-  March_tir.Auth_rt.captures tir ~has_frames ~repl:false
+  let tir, restricts_kept =
+    March_tir.Auth_rt.restricts tir ~sites:March_tir.Lower.restrict_sites in
+  let tir, frames_kept = March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
+  March_tir.Auth_rt.captures tir ~has_frames:(frames_kept || restricts_kept) ~repl:false
 
 let dump_post_lower src =
   render_module (verified "tir-lower" (lower_framed src))

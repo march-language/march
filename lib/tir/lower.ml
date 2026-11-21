@@ -84,6 +84,7 @@ type fn_needs = Lower_state.fn_needs = {
 }
 
 let fn_needs_tbl = Lower_state.fn_needs_tbl
+let restrict_sites = Lower_state.restrict_sites
 let _default_dispatch = Lower_state._default_dispatch
 let _alias_candidates = Lower_state._alias_candidates
 let _alias_reported = Lower_state._alias_reported
@@ -274,6 +275,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   _lowered_modules := Hashtbl.create 8;
   Hashtbl.reset Lower_state._fn_typed_module_lets;
   Hashtbl.reset Lower_state.fn_needs_tbl;
+  Lower_state.reset_restricts ();
   (* Entry-file top-level fns named like a builtin that has its own C symbol
      get a distinct TIR name (see [Lower_state._builtin_shadows]).  Only
      decls WRITTEN in the entry file count: [m.mod_decls] also carries the
@@ -1389,6 +1391,12 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       end
     end
   in
+  (* The layer fns of the literal `restrict` blocks (ocap phase 5): none,
+     and the list is untouched. *)
+  let all_fns = match !Lower_state.restrict_layer_fns with
+    | [] -> all_fns
+    | fs -> all_fns @ List.rev fs
+  in
   (* A reference to a function-typed module-level let calls it for the
      closure first (see [Lower_decls.call_fn_typed_module_lets]). *)
   let fn_lets = Hashtbl.copy Lower_state._fn_typed_module_lets in
@@ -1435,6 +1443,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         (* Fresh names continue after every earlier one ($lamN, ...), so the
            new fns never collide with the module's. *)
         Lower_state._lower_counter := max !Lower_state._lower_counter !counter;
+        Lower_state.reset_restricts ();
         let fns = ref [] and types = ref [] in
         _fns_ref := fns;
         _types_ref := types;
@@ -1462,7 +1471,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                        fns := fn :: !fns
                      | _ -> ()))
                decls;
-             let new_fns = List.rev !fns in
+             let new_fns = List.rev !fns @ List.rev !Lower_state.restrict_layer_fns in
              let new_fns = match lets with
                | [] -> new_fns
                | _ ->

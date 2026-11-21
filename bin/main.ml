@@ -4896,13 +4896,18 @@ let compile filename =
     in
     let tir = { tir with March_tir.Tir.tm_io_fns = io_modules } in
     (* Ocap phase 4: run-time frames for function `needs` clauses that carry
-       a scope or reach an actor spawn (lib/tir/auth_rt.ml).  After the
+       a scope or reach an actor spawn (lib/tir/auth_rt.ml).  First, phase 5:
+       a `restrict` block keeps its frame only where the static proof is not
+       enough ([Auth_rt.restricts]).  After the
        passes above, which key on a fn's source name and body, and before
        Mono.  A program with no such clause comes back physically unchanged.
        Then function values capture the authority they are made under
        (Task 5); with no frame that is the identity too. *)
-    let tir, has_frames =
+    let tir, restricts_kept =
+      March_tir.Auth_rt.restricts tir ~sites:March_tir.Lower.restrict_sites in
+    let tir, frames_kept =
       March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
+    let has_frames = frames_kept || restricts_kept in
     let tir = March_tir.Auth_rt.captures tir ~has_frames ~repl:false in
     (* Ocap phase 4, Task 4b: a native binary judges capability operations
        with the C runtime's copy of the Authority policy

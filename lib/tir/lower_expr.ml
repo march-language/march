@@ -241,6 +241,52 @@ let retype_var_uses (name : string) (ty : Tir.ty) (body : Tir.expr) : Tir.expr =
   in
   go body
 
+(* ── Scope values and restrict (ocap phase 5) ── *)
+
+let scope_ty : Tir.ty = Tir.TCon ("Scope", [])
+let string_list_ty : Tir.ty = Tir.TCon ("List", [ Tir.TString ])
+
+let is_scope_ty (t : Tir.ty) : bool =
+  match t with Tir.TCon ("Scope", []) -> true | _ -> false
+
+(** A call of the stdlib fn [name] ([Mod.fn]), its module lowered (it may be
+    one nothing else in the program names). *)
+let stdlib_call (env : env) (name : string) (arg_tys : Tir.ty list) (ret : Tir.ty)
+    (args : Tir.atom list) : Tir.expr =
+  (match String.index_opt name '.' with
+   | Some i -> !_ensure_module_lowered env (String.sub name 0 i)
+   | None -> ());
+  Tir.EApp ({ Tir.v_name = name; v_ty = Tir.TFn (arg_tys, ret); v_lin = Tir.Unr }, args)
+
+(** [k] applied to a [List(String)] of [atoms], in order. *)
+let string_list (atoms : Tir.atom list) (k : Tir.atom -> Tir.expr) : Tir.expr =
+  let nil = fresh_var string_list_ty in
+  let rec cons acc = function
+    | [] -> k (Tir.AVar acc)
+    | a :: rest ->
+      let v = fresh_var string_list_ty in
+      Tir.ELet (v, Tir.EAlloc (Tir.TCon ("List.Cons", []), [ a; Tir.AVar acc ]), cons v rest)
+  in
+  Tir.ELet (nil, Tir.EAlloc (Tir.TCon ("List.Nil", [ Tir.TString ]), []), cons nil (List.rev atoms))
+
+(** A scope option in the classifier's encoding ([methods=get,post],
+    [prefix=w.], [no_redirects]) as the source text [Scope.build] joins into
+    the entry ([methods(get, post)], [prefix("w.")], [no_redirects]): the
+    printing [Cap_request.scoped_text] does for a [needs] entry. *)
+let option_source (o : string) : string =
+  match String.index_opt o '=' with
+  | None -> o
+  | Some i ->
+    let k = String.sub o 0 i and v = String.sub o (i + 1) (String.length o - i - 1) in
+    if k = "methods" then Printf.sprintf "%s(%s)" k (String.concat ", " (String.split_on_char ',' v))
+    else Printf.sprintf "%s(%s)" k (March_ast.Cap_request.quote v)
+
+(** The canonical text of literal scope entries; [()] for none. *)
+let literal_scope_text (entries : March_caps.Scope_expr.entry list) : string * bool =
+  match March_ast.Cap_request.request_of_entries entries with
+  | "", scoped -> ("()", scoped)
+  | t, scoped -> (t, scoped)
+
 (* ── CPS-based ANF lowering ────────────────────────────────────── *)
 
 (** Lower an expression, ensuring the result is an atom.
@@ -355,6 +401,98 @@ and lower_atoms_k (env : env) (es : Ast.expr list) (k : Tir.atom list -> Tir.exp
     lower_to_atom_k env e (fun a ->
       lower_atoms_k env rest (fun rest_atoms ->
         k (a :: rest_atoms)))
+
+(** A scope expression ([March_caps.Scope_expr.classify] is [Literal] or
+    [Computed]) as the [Scope] value it stands for. *)
+and lower_scope_expr (env : env) (e : Ast.expr) : Tir.expr =
+  match March_caps.Scope_expr.classify e with
+  | March_caps.Scope_expr.Literal entries ->
+    let text, _ = literal_scope_text entries in
+    stdlib_call env "Scope.literal" [ Tir.TString ] scope_ty [ Tir.ALit (Ast.LitString text) ]
+  | March_caps.Scope_expr.Computed { kind; strings; options } ->
+    lower_atoms_k env strings (fun satoms ->
+        string_list satoms (fun strings_atom ->
+            string_list
+              (List.map (fun o -> Tir.ALit (Ast.LitString (option_source o))) options)
+              (fun options_atom ->
+                 stdlib_call env "Scope.build"
+                   [ Tir.TString; string_list_ty; string_list_ty ]
+                   (Tir.TCon ("Result", [ scope_ty; Tir.TCon ("ScopeError", []) ]))
+                   [ Tir.ALit (Ast.LitString kind); strings_atom; options_atom ])))
+  | March_caps.Scope_expr.Not_scope ->
+    (* The type checker reports a malformed scope expression
+       ([invalid_cap_scope]), so none reaches lowering. *)
+    failwith "internal compiler error: a capability path in expression position \
+              is not a scope expression"
+
+(** [restrict es do body end] (the whole is [e], spanning from the
+    [restrict] keyword at [sp]) as a [ByRestrict(where)] frame around
+    [body], where [where] is [<source basename>:<line>] of the keyword (the
+    type checker's spelling):
+
+    {v
+      let l = <layer> in let s = Authority.enter_fn(l) in
+      let r = <body> in cap_restore(s); r
+    v}
+
+    A literal restrict's layer is the new top-level fn
+    [<encl>$restrict<N>$auth_layer() = Authority.restrict_layer(where, text)],
+    built once per site like a function frame's ([Tir_names.is_auth_layer_fn]);
+    a computed one's is [Authority.restrict_layer(where, Scope.text(<union of
+    the entries>))], parsed at each entry.  Every site is recorded in
+    [Lower_state.restrict_sites]; [Auth_rt.restricts] drops the frame where
+    the static proof suffices. *)
+and lower_restrict (env : env) (e : Ast.expr) (es : Ast.expr list) (body : Ast.expr)
+    (sp : Ast.span) : Tir.expr =
+  let where_ = Filename.basename sp.Ast.file ^ ":" ^ string_of_int sp.Ast.start_line in
+  let host = Lower_state.current_host ~mod_prefix:env.mod_prefix () in
+  let layer_name = Lower_state.fresh_restrict_layer_name ~host in
+  let layer_ty = Tir.TCon ("Layer", []) and auth_ty = Tir.TCon ("CapAuthRef", []) in
+  let restrict_layer args =
+    stdlib_call env "Authority.restrict_layer" [ Tir.TString; Tir.TString ] layer_ty args in
+  let frame (layer : Tir.expr) : Tir.expr =
+    let l = fresh_var layer_ty and s = fresh_var auth_ty in
+    let r = fresh_var (ty_of_expr env e) and u = fresh_var Tir.TUnit in
+    let enter = stdlib_call env Tir_names.enter_fn_name [ layer_ty ] auth_ty [ Tir.AVar l ] in
+    let body' = lower_expr env body in
+    Tir.ELet (l, layer,
+      Tir.ELet (s, enter,
+        Tir.ELet (r, body',
+          Tir.ELet (u, Tir.EApp ({ Tir.v_name = "cap_restore"; v_ty = Tir.TFn ([ auth_ty ], Tir.TUnit);
+                                   v_lin = Tir.Unr }, [ Tir.AVar s ]),
+            Tir.EAtom (Tir.AVar r)))))
+  in
+  match March_caps.Scope_expr.restrict_entries es with
+  | Some entries ->
+    let text, scoped = literal_scope_text entries in
+    Hashtbl.replace Lower_state.restrict_sites layer_name
+      { Lower_state.rs_where = where_; rs_text = Some text; rs_scoped = scoped };
+    let layer_fn : Tir.fn_def =
+      { fn_name = layer_name; fn_params = []; fn_ret_ty = layer_ty;
+        fn_body = restrict_layer [ Tir.ALit (Ast.LitString where_); Tir.ALit (Ast.LitString text) ];
+        fn_kind = Tir.FnNormal } in
+    Lower_state.restrict_layer_fns := layer_fn :: !Lower_state.restrict_layer_fns;
+    Provenance.note_span layer_name sp;
+    frame (Tir.EApp ({ Tir.v_name = layer_name; v_ty = Tir.TFn ([], layer_ty); v_lin = Tir.Unr }, []))
+  | None ->
+    Hashtbl.replace Lower_state.restrict_sites layer_name
+      { Lower_state.rs_where = where_; rs_text = None; rs_scoped = true };
+    (* [()] adds nothing to a union. *)
+    let entries = List.filter (function Ast.ETuple ([], _) -> false | _ -> true) es in
+    lower_atoms_k env entries (fun atoms ->
+        let rec union acc = function
+          | [] ->
+            let t = fresh_var Tir.TString in
+            Tir.ELet (t, stdlib_call env "Scope.text" [ scope_ty ] Tir.TString [ acc ],
+              frame (restrict_layer [ Tir.ALit (Ast.LitString where_); Tir.AVar t ]))
+          | a :: rest ->
+            let v = fresh_var scope_ty in
+            Tir.ELet (v, stdlib_call env "Scope.union" [ scope_ty; scope_ty ] scope_ty [ acc; a ],
+              union (Tir.AVar v) rest)
+        in
+        match atoms with
+        | [] -> failwith "internal compiler error: a computed restrict with no entries"
+        | a :: rest -> union a rest)
 
 (** Translate an AST expression to a TIR expression in ANF. *)
 and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
@@ -638,9 +776,24 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     let body = lower_expr env (Ast.EBlock (rest, sp)) in
     Tir.ESeq (e', body)
 
-  (* --- restrict: lowered by Task 4 of the ocap phase 5 plan --- *)
-  | Ast.ERestrict _ ->
-    failwith "restrict is not yet implemented in lowering (ocap phase 5, task 4)"
+  (* --- Scope values and `restrict` (ocap phase 5) ---
+     A scope expression (a constructor written with a capability path,
+     classified by [March_caps.Scope_expr], the classifier the type checker
+     and the interpreter share) is a [Scope] value: [Scope.literal(text)]
+     when every argument is literal, [Scope.build(kind, strings, options)]
+     (a [Result(Scope, ScopeError)]) when one is computed.  [+] at type
+     [Scope] is [Scope.union] (a [+] of literals folds to one literal).  A
+     [restrict] block enters a [ByRestrict(where)] frame around its body:
+     see [lower_restrict]. *)
+  | Ast.ECon ({ txt; _ }, _, _) when March_caps.Scope_expr.is_cap_path txt ->
+    lower_scope_expr env e
+  | Ast.EApp (Ast.EVar { txt = "+"; _ }, [ a; b ], _) when is_scope_ty (ty_of_expr env e) ->
+    (match March_caps.Scope_expr.classify e with
+     | March_caps.Scope_expr.Literal _ -> lower_scope_expr env e
+     | _ ->
+       lower_atoms_k env [ a; b ] (fun atoms ->
+           stdlib_call env "Scope.union" [ scope_ty; scope_ty ] scope_ty atoms))
+  | Ast.ERestrict (es, body, sp) -> lower_restrict env e es body sp
 
   (* --- If → ECase on bool (CPS for condition) --- *)
   | Ast.EIf (cond, then_e, else_e, _) ->

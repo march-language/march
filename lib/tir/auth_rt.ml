@@ -269,6 +269,145 @@ let frames (m : Tir.tir_module) ~(needs : (string, Lower_state.fn_needs) Hashtbl
     end
   end
 
+(* ── restrict blocks (ocap phase 5, Task 4) ───────────────────────────
+
+   [Lower] lowers every [restrict] to a frame around its body
+   ([Lower_expr.lower_restrict]):
+
+   {v
+     let l = <encl>$restrict<N>$auth_layer() in   (or a computed layer)
+     let s = Authority.enter_fn(l) in
+     let r = <body> in cap_restore(s); r
+   v}
+
+   For a literal restrict the type checker proves the block's reach by kind,
+   as it does for a function's `needs`, so the frame is dropped by phase 4's
+   rule applied to the block: kept when the scope text carries a scope, or
+   the block calls an actor spawn, a fn that reaches one or a call of a
+   function value, or itself calls a function value.  The frame machinery
+   the block contains (a nested restrict's layer, [Authority.enter_fn],
+   [Authority.restrict_layer]) is not judged: it is the frame, not the
+   block's reach. *)
+
+(** The body of a restrict frame, given what follows its layer binding, and
+    that frame rebuilt around another body. *)
+let restrict_frame_body (rest : Tir.expr) : (Tir.expr * (Tir.expr -> Tir.expr)) option =
+  match rest with
+  | Tir.ELet
+      ( s, (Tir.EApp (ef, [ Tir.AVar _ ]) as enter),
+        Tir.ELet (r, body, (Tir.ELet (_, Tir.EApp (cr, [ Tir.AVar s' ]), Tir.EAtom (Tir.AVar r'))
+                            as tail)) )
+    when ef.Tir.v_name = Tir_names.enter_fn_name && cr.Tir.v_name = "cap_restore"
+         && s'.Tir.v_name = s.Tir.v_name && r'.Tir.v_name = r.Tir.v_name ->
+    Some (body, fun body' -> Tir.ELet (s, enter, Tir.ELet (r, body', tail)))
+  | _ -> None
+
+let restrict_layer_fn_name = "Authority.restrict_layer"
+
+let restricts (m : Tir.tir_module) ~(sites : (string, Lower_state.restrict_site) Hashtbl.t)
+  : Tir.tir_module * bool =
+  if Hashtbl.length sites = 0 then (m, false)
+  else begin
+    let candidates =
+      Hashtbl.fold
+        (fun name (rs : Lower_state.restrict_site) acc ->
+           if rs.Lower_state.rs_text <> None && not rs.Lower_state.rs_scoped then SSet.add name acc
+           else acc)
+        sites SSet.empty
+    in
+    if SSet.is_empty candidates then (m, true)
+    else begin
+      let defined = Hashtbl.create 256 in
+      List.iter (fun (f : Tir.fn_def) -> Hashtbl.replace defined f.Tir.fn_name ()) m.Tir.tm_fns;
+      let blockers =
+        lazy (SSet.union (reaches_actor_spawn m) (reaches_indirect_call m)) in
+      let machinery n =
+        Hashtbl.mem sites n || n = Tir_names.enter_fn_name || n = restrict_layer_fn_name in
+      let blocked n =
+        (not (machinery n))
+        && ((List.mem n spawn_builtins && not (Hashtbl.mem defined n))
+            || SSet.mem n (Lazy.force blockers))
+      in
+      let droppable bound body =
+        (not (calls_value_under bound body))
+        && (let hit = ref false in
+            iter_calls (fun n -> if blocked n then hit := true) body;
+            not !hit)
+      in
+      let dropped = ref SSet.empty and kept = ref SSet.empty in
+      let add (v : Tir.var) b = SSet.add v.Tir.v_name b in
+      (* [e] with every droppable frame replaced by its body; physically [e]
+         when nothing under it changed. *)
+      let rec go bound (e : Tir.expr) : Tir.expr =
+        match e with
+        | Tir.ELet (l, Tir.EApp (lf, []), rest) when SSet.mem lf.Tir.v_name candidates ->
+          (match restrict_frame_body rest with
+           | Some (body, rebuild) ->
+             let body' = go bound body in
+             if droppable bound body' then begin
+               dropped := SSet.add lf.Tir.v_name !dropped;
+               body'
+             end else begin
+               kept := SSet.add lf.Tir.v_name !kept;
+               if body' == body then e else Tir.ELet (l, Tir.EApp (lf, []), rebuild body')
+             end
+           | None ->
+             kept := SSet.add lf.Tir.v_name !kept;
+             let rest' = go (add l bound) rest in
+             if rest' == rest then e else Tir.ELet (l, Tir.EApp (lf, []), rest'))
+        | Tir.ELet (v, a, b) ->
+          let a' = go bound a and b' = go (add v bound) b in
+          if a' == a && b' == b then e else Tir.ELet (v, a', b')
+        | Tir.ESeq (a, b) ->
+          let a' = go bound a and b' = go bound b in
+          if a' == a && b' == b then e else Tir.ESeq (a', b')
+        | Tir.ELetRec (fns, b) ->
+          let bound =
+            List.fold_left (fun bd (fd : Tir.fn_def) -> SSet.remove fd.Tir.fn_name bd) bound fns in
+          let fns' =
+            List.map
+              (fun (fd : Tir.fn_def) ->
+                 let body' = go (List.fold_right add fd.Tir.fn_params bound) fd.Tir.fn_body in
+                 if body' == fd.Tir.fn_body then fd else { fd with Tir.fn_body = body' })
+              fns
+          in
+          let b' = go bound b in
+          if b' == b && List.for_all2 ( == ) fns fns' then e else Tir.ELetRec (fns', b')
+        | Tir.ECase (sc, brs, d) ->
+          let brs' =
+            List.map
+              (fun (br : Tir.branch) ->
+                 let body' = go (List.fold_right add br.Tir.br_vars bound) br.Tir.br_body in
+                 if body' == br.Tir.br_body then br else { br with Tir.br_body = body' })
+              brs
+          in
+          let d' = Option.map (go bound) d in
+          let same_d = match d, d' with Some x, Some y -> x == y | _ -> true in
+          if same_d && List.for_all2 ( == ) brs brs' then e else Tir.ECase (sc, brs', d')
+        | other -> other
+      in
+      let fns =
+        List.map
+          (fun (f : Tir.fn_def) ->
+             let body' =
+               go (List.fold_right add f.Tir.fn_params SSet.empty) f.Tir.fn_body in
+             if body' == f.Tir.fn_body then f else { f with Tir.fn_body = body' })
+          m.Tir.tm_fns
+      in
+      (* A layer fn goes once no call of it is left (a body lowered twice
+         keeps one if either copy kept its frame). *)
+      let gone = SSet.diff !dropped !kept in
+      let any_kept =
+        Hashtbl.fold (fun name _ acc -> acc || not (SSet.mem name gone)) sites false in
+      if SSet.is_empty gone then (m, any_kept)
+      else
+        ( { m with
+            Tir.tm_fns =
+              List.filter (fun (f : Tir.fn_def) -> not (SSet.mem f.Tir.fn_name gone)) fns },
+          any_kept )
+    end
+  end
+
 (* ── Capture (Task 5) ─────────────────────────────────────────────────
 
    A function value runs under the authority it was made under, not the
@@ -354,7 +493,8 @@ let captures (m : Tir.tir_module) ~(has_frames : bool) ~(repl : bool) : Tir.tir_
        capture [$c = cap_save()] is bound once at the top of the body (fn,
        lambda or local fn) that makes the captured value: the authority is
        the same anywhere in one body (a frame is entered only in a
-       wrapper's own code, and a captured lambda's own body is a body of
+       wrapper's own code or by a [restrict] block, whose rest is treated as
+       a body of its own, and a captured lambda's own body is a body of
        its own), and binding it there keeps it in scope for as long as the
        value can be called.  Binding it inside the value's own [let]
        right-hand side would end its scope at the allocation, and a closure
@@ -543,6 +683,13 @@ let captures (m : Tir.tir_module) ~(has_frames : bool) ~(repl : bool) : Tir.tir_
         in
         let b' = flush (go ctx ~init ~host bound' b) in
         if b' == b && List.for_all2 ( == ) fns fns' then (e, []) else (Tir.ELetRec (fns', b'), [])
+      | Tir.ELet (sv, (Tir.EApp (ef, [ Tir.AVar _ ]) as a), b)
+        when ef.Tir.v_name = Tir_names.enter_fn_name ->
+        (* A frame entered mid-body (a [restrict] block, [restricts]): a value
+           made after it captures the authority it enters, so it is saved
+           again right after the entry. *)
+        let b' = process_body ~init ~host (add sv bound) b in
+        if b' == b then (e, []) else (Tir.ELet (sv, a, b'), [])
       | Tir.ELet (v, a, b) ->
         (* The right-hand side's pending lets float in front of this let. *)
         let a', pending = go ctx ~init:(init || Lower_state.is_module_init_binder v) ~host bound a in
