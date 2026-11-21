@@ -24,3 +24,8 @@ items the phase-5 reviews deferred; none changes what a program is allowed to do
   `Authority.path_kind`'s list of path kinds; add a cross-reference or share it. `Scope.build`'s
   doc does not say that `\` is accepted and escaped, nor that a computed `..` is rejected while a
   literal one follows the `needs` grammar.
+- **`cap_restrict` diagnostic spans.** When a block calls a local `fn go` and later the top-level
+  `go`, the error is right but the caret lands on the first `go()` (the reference span is looked up
+  by name in an unscoped call list, `lib/typecheck/typecheck_caps.ml`, restrict walker). A function
+  used as a value is reported at the `restrict` keyword rather than at the reference. The `let?`
+  hint renders string literals with OCaml `%S`, so non-ASCII text shows as byte escapes.
