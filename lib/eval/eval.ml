@@ -2207,7 +2207,16 @@ and eval_expr_inner (env : env) (e : expr) : value =
      parser builds both as an ordinary [EApp] of the builtin, and no program
      can rebind the operator symbols, so the name alone identifies them.
      TIR lowering does the same (lower_expr.ml). *)
-  | EApp (EVar { txt = "+"; _ }, [ _; _ ], _) when (match March_caps.Scope_expr.classify e with
+  | EApp (EVar { txt = "+"; _ }, [ a; b ], _)
+    when (* cheap pre-check: a literal scope [+] has a cap-path ECon, [()] or
+            a [+] node on BOTH sides; a plain [x + 1] costs only these tests *)
+      (let maybe_scope = function
+         | ECon (n, _, _) -> March_caps.Scope_expr.is_cap_path n.txt
+         | ETuple ([], _) -> true
+         | EApp (EVar { txt = "+"; _ }, [ _; _ ], _) -> true
+         | _ -> false in
+       maybe_scope a && maybe_scope b)
+      && (match March_caps.Scope_expr.classify e with
       | March_caps.Scope_expr.Literal _ -> true | _ -> false) ->
     (* a [+] chain of literal scope entries folds to one literal *)
     ensure_module_loaded "Scope";
