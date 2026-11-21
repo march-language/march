@@ -215,6 +215,25 @@ type bound_origin =
   | Fn_decl
   | Iface_method of { iface : string; impl_ty : string option }
   | Impl_method of { iface : string; impl_ty : string }
+  | Restrict_block of string
+      (** a literal `restrict` block (ocap phase 5): its kinds bound the
+          block's own reach; the payload is where it is,
+          [<source basename>:<line>] *)
+
+(** A literal `restrict` block's own reach, recorded beside its bound point
+    rather than in [own_cap_closures]/[fn_refs]: nothing calls a block, and
+    the closure tables are projected unfiltered (the hot-reload manifest,
+    `march caps`), so a block must not appear there as a function.
+    [ro_owner] is the enclosing function's key (its references resolve
+    against that function's module); [ro_ops] are the block's own
+    capability operations, (capability, operation, call span), lambdas made
+    in it included; [ro_refs] its references to named functions and spawned
+    actors, (name as written, call span or the block's). *)
+type restrict_owner = {
+  ro_owner : string;
+  ro_ops : (string * string * Ast.span) list;
+  ro_refs : (string * Ast.span) list;
+}
 
 (** A bound to check: its capability paths, the span of the [needs] clause
     that set it (the interface's, for an inherited bound), the bounded
@@ -853,6 +872,10 @@ type env = {
       Recorded by [check_module_needs]; read by [check_fn_bounds], which holds
       each function's row under its bound.  Shared (mutated in place) across
       every env copy.  See specs/plans/2026-11-01-per-function-needs-bounds.md. *)
+  restrict_owners : (string, restrict_owner) Hashtbl.t;
+  (** Each literal `restrict` block's own reach, keyed like its entry in
+      [fn_bound_points] ([<fn>$restrict@<line>:<col>]).  Recorded by
+      [check_module_needs]; read by [check_fn_bounds]. *)
   local_mods : string list StrMap.t;
   (** In-file nested modules → their PRIVATE value/function member names.
       Populated by the [Ast.DMod] export step.  A same-file qualified reference
@@ -963,6 +986,7 @@ let make_env errors type_map = {
   role_grants = Hashtbl.create 8;
   fn_grant_points = Hashtbl.create 16;
   fn_bound_points = Hashtbl.create 16;
+  restrict_owners = Hashtbl.create 4;
   local_mods = StrMap.empty;
   offer_conts = ref [];
   offer_labels = [];
@@ -2674,6 +2698,7 @@ let instantiate ?use_span ?use_name level env = function
     in
     let inst_cs = List.map (function
         | CNum t -> CNum (inst t)
+        | CAdd t -> CAdd (inst t)
         | COrd t -> COrd (inst t)
         | CInterface (n, t) -> CInterface (n, inst t)
         | CADTBound (n, t) -> CADTBound (n, inst t)

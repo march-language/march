@@ -1,0 +1,60 @@
+---
+layout: docs
+title: "cap_restrict"
+permalink: /docs/errors/cap_restrict/
+---
+
+# `cap_restrict`: code inside a `restrict` block reaches past the block's scope
+
+`restrict SCOPE do ... end` narrows authority for a block and everything it
+reaches. When every scope in the list is written out (`IO.Console`,
+`IO.FileRead("/srv/")`, `()`), the compiler checks the block like a function
+with a `needs` clause: each operation in the block, each function it calls
+directly (with everything that function reaches), and each lambda made inside
+it must use only the capabilities the scope names. This error reports a call
+that needs a capability the scope leaves out.
+
+## A program that triggers it
+
+```march
+mod Main do
+  needs IO.Console
+
+  fn main() do
+    restrict () do
+      println("hello")
+    end
+  end
+end
+```
+
+## The fix
+
+Name the capability the block uses in its scope, or move the call out of the
+block:
+
+```march
+mod Main do
+  needs IO.Console
+
+  fn main() do
+    restrict IO.Console do
+      println("hello")
+    end
+  end
+end
+```
+
+## Why the rule exists
+
+A `restrict` block promises that the code inside it cannot do more than its
+scope says. Checking that at compile time turns a run-time refusal into an
+error you see before the program runs. Any code may restrict itself: no
+`needs` line is required to write `restrict`, and naming a capability the
+module does not have is not an error, because authority inside the block is
+the intersection of the scope and what the code already holds.
+
+A scope computed at run time (`IO.FileRead(dir)`) is checked when the block
+is entered, not here.
+
+See also: [the language reference](../capabilities.md).

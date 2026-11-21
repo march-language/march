@@ -1,0 +1,7 @@
+mod Main do
+  fn first_line() : Int do
+    restrict IO.FileRead("src/") do
+      0
+    end
+  end
+end

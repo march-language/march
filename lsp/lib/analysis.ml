@@ -705,6 +705,7 @@ let build_consumption_map (_type_map : (Ast.span, Tc.ty) Hashtbl.t)
       scan_expr f; List.iter scan_expr args
     | Ast.EIf (c, t, f, _) ->
       scan_expr c; scan_expr t; scan_expr f
+    | Ast.ERestrict (es, b, _) -> List.iter scan_expr es; scan_expr b
     | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) ->
       scan_expr a; scan_expr b
     | _ -> ()
@@ -794,6 +795,7 @@ let build_linearity_map (decls : Ast.decl list) (always_linear : string list)
       List.iter (fun (br : Ast.branch) -> scan_expr br.Ast.branch_body) brs
     | Ast.EApp (f, args, _) -> scan_expr f; List.iter scan_expr args
     | Ast.EIf (c, t, f, _) -> scan_expr c; scan_expr t; scan_expr f
+    | Ast.ERestrict (es, b, _) -> List.iter scan_expr es; scan_expr b
     | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> scan_expr a; scan_expr b
     | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _)
     | Ast.EDbg (Some e, _) | Ast.ESpawn (e, _) -> scan_expr e
@@ -854,6 +856,7 @@ let build_reuse_hints (decls : Ast.decl list) : Ast.span list =
       List.iter (fun (br : Ast.branch) -> scan_expr br.branch_body) brs
     | Ast.EApp (f, args, _) -> scan_expr f; List.iter scan_expr args
     | Ast.EIf (c, t, f, _) -> scan_expr c; scan_expr t; scan_expr f
+    | Ast.ERestrict (es, b, _) -> List.iter scan_expr es; scan_expr b
     | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> scan_expr x; scan_expr y
     | _ -> ()
   in
@@ -881,6 +884,7 @@ let build_call_graph (decls : Ast.decl list) : cg_node list =
       | Ast.EMatch (subj, brs, _) ->
         go subj; List.iter (fun (br : Ast.branch) -> go br.Ast.branch_body) brs
       | Ast.EIf (c, t, f, _) -> go c; go t; go f
+      | Ast.ERestrict (es, b, _) -> List.iter go es; go b
       | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> go x; go y
       | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
         List.iter go es
@@ -1038,6 +1042,7 @@ let collect_fold_ranges (m : Ast.module_) : (int * int * string) list =
     | Ast.ELetFn (_, _, _, body, sp) -> add sp "region"; go_expr body
     | Ast.ELam (_, body, _) -> go_expr body
     | Ast.EIf (c, t, f, _) -> go_expr c; go_expr t; go_expr f
+    | Ast.ERestrict (es, b, _) -> List.iter go_expr es; go_expr b
     | Ast.EApp (f, args, _) -> go_expr f; List.iter go_expr args
     | _ -> ()
   in
@@ -1107,6 +1112,7 @@ let collect_annotation_sites (m : Ast.module_) : annotation_site list =
       go_expr subj;
       List.iter (fun br -> go_expr br.Ast.branch_body) brs
     | Ast.EIf (c, t, f, _)      -> go_expr c; go_expr t; go_expr f
+    | Ast.ERestrict (es, b, _) -> List.iter go_expr es; go_expr b
     | Ast.EApp (f, args, _)      -> go_expr f; List.iter go_expr args
     | _ -> ()
   in
@@ -1231,6 +1237,8 @@ let rec send_copy_check (type_map : (Ast.span, Tc.ty) Hashtbl.t) (e : Ast.expr) 
   | Ast.EIf (c, t, f, _) ->
     send_copy_check type_map c
       (send_copy_check type_map t (send_copy_check type_map f acc))
+  | Ast.ERestrict (es, b, _) ->
+    List.fold_left (fun a e -> send_copy_check type_map e a) (send_copy_check type_map b acc) es
   | Ast.EMatch (subj, brs, _) ->
     let acc = send_copy_check type_map subj acc in
     List.fold_left (fun a (br : Ast.branch) ->
@@ -1484,6 +1492,7 @@ let indirect_call_check (params : string list) (e : Ast.expr) acc =
       List.fold_left (fun a (br : Ast.branch) -> go br.Ast.branch_body a)
         (go subj acc) brs
     | Ast.EIf (c, t, f, _) -> go f (go t (go c acc))
+    | Ast.ERestrict (es, b, _) -> go b (List.fold_left (fun a e -> go e a) acc es)
     | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> go y (go x acc)
     | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
       List.fold_left (fun a e -> go e a) acc es
@@ -1531,6 +1540,7 @@ let recursive_alloc_check fn_name (body : Ast.expr) acc =
         List.iter (fun (br : Ast.branch) -> walk ~in_arm:true br.Ast.branch_body) brs
       | Ast.EIf (c, t, f, _) ->
         walk ~in_arm c; walk ~in_arm:true t; walk ~in_arm:true f
+      | Ast.ERestrict (es, b, _) -> List.iter (walk ~in_arm) es; walk ~in_arm b
       | Ast.EApp (f, args, _) -> walk ~in_arm f; List.iter (walk ~in_arm) args
       | Ast.ELet (b, _) -> walk ~in_arm b.Ast.bind_expr
       | Ast.EBlock (es, _) -> List.iter (walk ~in_arm) es
@@ -1606,6 +1616,7 @@ let parallelizable_check (e : Ast.expr) acc =
     | Ast.EMatch (subj, brs, _) ->
       walk subj; List.iter (fun (br : Ast.branch) -> walk br.Ast.branch_body) brs
     | Ast.EIf (c, t, f, _) -> walk c; walk t; walk f
+    | Ast.ERestrict (es, b, _) -> List.iter walk es; walk b
     | Ast.ELet (b, _) -> walk b.Ast.bind_expr
     | Ast.EBlock (es, _) -> List.iter walk es
     | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> walk x; walk y
@@ -2187,6 +2198,7 @@ let collect_h_sigils ~(src : string) (decls : Ast.decl list) : h_sigil list =
       ex s; List.iter (fun (br : Ast.branch) -> ex br.Ast.branch_body) brs
     | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> ex c; ex b) arms
     | Ast.EIf (c, t, f, _) -> ex c; ex t; ex f
+    | Ast.ERestrict (es, b, _) -> List.iter ex es; ex b
     | Ast.EPipe (a2, b2, _) | Ast.ESend (a2, b2, _) -> ex a2; ex b2
     | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> ex e) fs
     | Ast.ERecordUpdate (e2, fs, _) -> ex e2; List.iter (fun (_, e) -> ex e) fs
@@ -2905,6 +2917,7 @@ let analyse ~filename ~src : t =
       | Ast.ELetFn (_, _, _, body, _) | Ast.ELam (_, body, _) -> augment_expr body
       | Ast.EIf (c, t, f, _) ->
         augment_expr c; augment_expr t; augment_expr f
+      | Ast.ERestrict (es, b, _) -> List.iter augment_expr es; augment_expr b
       | Ast.EApp (f, args, _) ->
         augment_expr f; List.iter augment_expr args
       | _ -> ()
@@ -2996,6 +3009,8 @@ let analyse ~filename ~src : t =
             collect_calls_expr br.branch_body a) acc brs
       | Ast.EIf (c, t, f, _) ->
         collect_calls_expr c (collect_calls_expr t (collect_calls_expr f acc))
+      | Ast.ERestrict (es, b, _) ->
+        List.fold_left (fun a e -> collect_calls_expr e a) (collect_calls_expr b acc) es
       | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) ->
         collect_calls_expr a (collect_calls_expr b acc)
       | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
@@ -3103,6 +3118,7 @@ let analyse ~filename ~src : t =
         List.iter (fun (br : Ast.branch) -> scan_for_dead_code br.branch_body) brs
       | Ast.EIf (c, t, f, _) ->
         scan_for_dead_code c; scan_for_dead_code t; scan_for_dead_code f
+      | Ast.ERestrict (es, b, _) -> List.iter scan_for_dead_code es; scan_for_dead_code b
       | Ast.EApp (f, args, _) ->
         scan_for_dead_code f; List.iter scan_for_dead_code args
       | _ -> ()
@@ -3194,6 +3210,7 @@ let analyse ~filename ~src : t =
         collect_dm_expr body
       | Ast.EIf (c, t, f, _) ->
         collect_dm_expr c; collect_dm_expr t; collect_dm_expr f
+      | Ast.ERestrict (es, b, _) -> List.iter collect_dm_expr es; collect_dm_expr b
       | Ast.EMatch (subj, brs, _) ->
         collect_dm_expr subj;
         List.iter (fun (br : Ast.branch) -> collect_dm_expr br.branch_body) brs

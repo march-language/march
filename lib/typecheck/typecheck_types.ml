@@ -128,12 +128,16 @@ and tvar =
 
 (** Lightweight type-class constraints.
     [CNum t] asserts t must be Int or Float (arithmetic).
+    [CAdd t] asserts t must be Int, Float or Scope: [+] only, since [+] on
+    two [Scope]s is their union (ocap phase 5, decision 4).  It defaults to
+    Int and reports a String exactly as [CNum] does.
     [COrd t] asserts t must be Int, Float, or String (ordered).
     [CInterface (name, t)] asserts t must implement interface [name].
     [CADTBound (adt, t)] asserts t must be a constructor of ADT named [adt].
     [CTNatBound t] asserts t must be a type-level natural number (TNat). *)
 type constraint_ =
   | CNum of ty
+  | CAdd of ty
   | COrd of ty
   | CInterface of string * ty
   | CADTBound of string * ty

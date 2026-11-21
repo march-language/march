@@ -126,6 +126,7 @@ and session_ty =
 and tvar = Unbound of int * int | Link of ty
 type constraint_ =
     CNum of ty
+  | CAdd of ty
   | COrd of ty
   | CInterface of string * ty
   | CADTBound of string * ty

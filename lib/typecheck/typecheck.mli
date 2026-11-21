@@ -120,6 +120,7 @@ and session_ty =
 and tvar = Unbound of int * int | Link of ty
 type constraint_ =
     CNum of ty
+  | CAdd of ty
   | COrd of ty
   | CInterface of string * ty
   | CADTBound of string * ty
@@ -241,6 +242,12 @@ type bound_origin =
   | Fn_decl
   | Iface_method of { iface : string; impl_ty : string option }
   | Impl_method of { iface : string; impl_ty : string }
+  | Restrict_block of string
+type restrict_owner = {
+  ro_owner : string;
+  ro_ops : (string * string * Ast.span) list;
+  ro_refs : (string * Ast.span) list;
+}
 type fn_bound = { fb_caps : string list; fb_span : Ast.span; fb_site : Ast.span; fb_origin : bound_origin }
 type cap_mismatch_site = {
   cm_span : Ast.span;
@@ -340,6 +347,7 @@ type env = {
   role_grants : (string * string, string list * Ast.span) Hashtbl.t;
   fn_grant_points : (string, string list * Ast.span) Hashtbl.t;
   fn_bound_points : (string, fn_bound) Hashtbl.t;
+  restrict_owners : (string, restrict_owner) Hashtbl.t;
   local_mods : string list StrMap.t;
   offer_conts : (session_ty ref * (string * session_ty) list) list ref;
   offer_labels :

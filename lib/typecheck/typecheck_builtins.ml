@@ -620,6 +620,11 @@ let builtin_bindings : (string * scheme) list =
     let a = fresh_var 0 in
     Poly ([get_id a], [CNum a], f a)
   in
+  (* ∀a:Add. f(a) — a must be Int, Float or Scope: [+] alone *)
+  let poly1_add f =
+    let a = fresh_var 0 in
+    Poly ([get_id a], [CAdd a], f a)
+  in
   (* ∀a:Ord. f(a) — a must be Int, Float, or String (legacy COrd path) *)
   let _poly1_ord f =
     let a = fresh_var 0 in
@@ -648,7 +653,7 @@ let builtin_bindings : (string * scheme) list =
   in
   [
     (* Arithmetic: Num-constrained so they work on Int and Float *)
-    ("+",  poly1_num (fun a -> TArrow (a, TArrow (a, a))));
+    ("+",  poly1_add (fun a -> TArrow (a, TArrow (a, a))));
     ("-",  poly1_num (fun a -> TArrow (a, TArrow (a, a))));
     ("*",  poly1_num (fun a -> TArrow (a, TArrow (a, a))));
     ("/",  poly1_num (fun a -> TArrow (a, TArrow (a, a))));

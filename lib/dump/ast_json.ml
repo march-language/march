@@ -180,6 +180,8 @@ let rec resolved_ty_to_json (t : T.ty) : string =
 let constraint_to_json : T.constraint_ -> string = function
   | T.CNum t ->
     Dump.json_obj [ ("kind", Dump.json_string "CNum"); ("ty", resolved_ty_to_json t) ]
+  | T.CAdd t ->
+    Dump.json_obj [ ("kind", Dump.json_string "CAdd"); ("ty", resolved_ty_to_json t) ]
   | T.COrd t ->
     Dump.json_obj [ ("kind", Dump.json_string "COrd"); ("ty", resolved_ty_to_json t) ]
   | T.CInterface (n, t) ->

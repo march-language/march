@@ -18810,14 +18810,6 @@ let csrf_suite =
         test_csrf_get_form_never_injected;
     ] )
 
-(** `restart` must stay usable as an ordinary identifier.
-
-    Reserving it outright broke stdlib/dist_supervisor.march, which names both a
-    record field and a function parameter `restart` (:31, :54, :55) — in the very
-    module that models restart policy. The token filter demotes it back to an
-    identifier unless the next token is one of the three policy words, so both
-    spellings coexist. This test pins the identifier half; the supervise-child
-    test below pins the keyword half. *)
 (* ---- restrict: the block form (ocap phase 5) ---- *)
 (* Parse [src] as the body of a function, the way real code reaches it. *)
 let parse_restrict_expr_of src =
@@ -18864,8 +18856,24 @@ let test_restrict_is_expression () =
   let src = "mod T do\n  fn f() do\n    let x = restrict () do 1 end\n    x\n  end\nend" in
   let m = March_parser.Parse.module_of_lexbuf (Lexing.from_string src) in
   match m.mod_decls with
-  | [March_ast.Ast.DFn _] -> ()
+  | [March_ast.Ast.DFn (def, _)] ->
+    (match def.March_ast.Ast.fn_clauses with
+     | [ { March_ast.Ast.fc_body =
+             March_ast.Ast.EBlock
+               (March_ast.Ast.ELet ({ March_ast.Ast.bind_expr = March_ast.Ast.ERestrict _; _ }, _)
+                :: _, _); _ } ] -> ()
+     | _ -> Alcotest.fail "expected `let x = restrict ...` to bind an ERestrict")
   | _ -> Alcotest.fail "expected one fn"
+
+(* `restrict` is a keyword now: it can no longer name a variable. *)
+let test_restrict_not_an_identifier () =
+  let src = "mod T do\n  fn f() do\n    let restrict = 1\n    restrict\n  end\nend" in
+  let failed =
+    match March_parser.Parse.module_of_lexbuf (Lexing.from_string src) with
+    | _ -> false
+    | exception (March_errors.Errors.ParseError _ | March_parser.Parser.Error) -> true
+  in
+  Alcotest.(check bool) "`let restrict = 1` is a parse error" true failed
 
 let test_restrict_span_starts_at_keyword () =
   match parse_restrict_expr_of "restrict () do 1 end" with
@@ -18873,6 +18881,217 @@ let test_restrict_span_starts_at_keyword () =
     Alcotest.(check int) "start col" 0 sp.March_ast.Ast.start_col
   | _ -> Alcotest.fail "expected ERestrict"
 
+(* ---- scope expressions and restrict: typing and the static reach check ---- *)
+
+module SE = March_caps.Scope_expr
+
+(* The entries a `needs` line gives for [entries_src], as (path, scope). *)
+let needs_entries entries_src =
+  let m = parse_module (Printf.sprintf "mod T do\n  needs %s\nend" entries_src) in
+  List.concat_map
+    (function March_ast.Ast.DNeeds (caps, _) -> caps | _ -> [])
+    m.March_ast.Ast.mod_decls
+
+let show_entries es =
+  List.map
+    (fun (p, sc) ->
+       March_ast.Cap_request.path_text p ^ Option.fold ~none:"" ~some:(fun s -> "|" ^ s) sc)
+    es
+
+let classify_src src = SE.classify (parse_restrict_expr_of src)
+
+let check_literal name src =
+  match classify_src src with
+  | SE.Literal es ->
+    Alcotest.(check (list string)) name (show_entries (needs_entries src)) (show_entries es)
+  | SE.Computed _ -> Alcotest.failf "%s: Computed, expected Literal" name
+  | SE.Not_scope -> Alcotest.failf "%s: Not_scope, expected Literal" name
+
+let test_scope_expr_literal () =
+  check_literal "IO.Console" "IO.Console";
+  check_literal "IO.FileRead" "IO.FileRead(\"/a/\")";
+  check_literal "IO.NetConnect with methods" "IO.NetConnect(\"h\", methods(get))";
+  check_literal "IO.NetConnect with options"
+    "IO.NetConnect(\"api.x.com\", methods(get, head), no_redirects)";
+  check_literal "two names" "IO.Mut(\"a\", \"b\")";
+  check_literal "options alone" "IO.Registry(prefix(\"w.\"))"
+
+let test_scope_expr_computed () =
+  match classify_src "IO.FileRead(tools)" with
+  | SE.Computed { kind; strings = [ March_ast.Ast.EVar n ]; options = [] } ->
+    Alcotest.(check string) "kind" "IO.FileRead" kind;
+    Alcotest.(check string) "string" "tools" n.March_ast.Ast.txt
+  | _ -> Alcotest.fail "expected Computed"
+
+let test_scope_expr_union () =
+  (match classify_src "IO.Console + IO.FileRead(\"/a/\")" with
+   | SE.Literal es ->
+     Alcotest.(check (list string)) "two entries"
+       [ "IO.Console"; "IO.FileRead|/a/" ] (show_entries es)
+   | _ -> Alcotest.fail "expected Literal");
+  (match classify_src "IO.Console + IO.FileRead(tools)" with
+   | SE.Not_scope -> ()
+   | _ -> Alcotest.fail "a + with a computed side is an ordinary + on Scope")
+
+let test_scope_expr_not_scope () =
+  (match classify_src "Some(1)" with
+   | SE.Not_scope -> ()
+   | _ -> Alcotest.fail "Some(1) is not a scope");
+  (match classify_src "IO.FileRead(\"/a/\", prefix(tools))" with
+   | SE.Not_scope -> ()
+   | _ -> Alcotest.fail "a non-literal option is Not_scope")
+
+let test_scope_expr_restrict_text () =
+  let entries src =
+    match parse_restrict_expr_of src with
+    | March_ast.Ast.ERestrict (es, _, _) -> es
+    | _ -> Alcotest.fail "expected ERestrict"
+  in
+  Alcotest.(check (option string)) "literal"
+    (Some "IO.Console, IO.FileRead(\"/a/\")")
+    (SE.restrict_text (entries "restrict IO.Console, IO.FileRead(\"/a/\") do 1 end"));
+  Alcotest.(check (option string)) "empty" (Some "()")
+    (SE.restrict_text (entries "restrict () do 1 end"));
+  Alcotest.(check (option string)) "computed" None
+    (SE.restrict_text (entries "restrict tools do 1 end"))
+
+(* [src] typechecked with the two types a scope expression has in front of
+   it: [Scope] (stdlib/scope.march's declaration, without the functions that
+   need the rest of the stdlib) and the Prelude's [ScopeError]. *)
+let scope_decls =
+  lazy
+    (parse_and_desugar
+       "mod Stub do\n\
+       \  type ScopeError = ScopeError(String)\n\
+       \  mod Scope do\n\
+       \    opaque type Scope = ScopeText(String)\n\
+       \  end\n\
+        end").March_ast.Ast.mod_decls
+
+let scope_typecheck src =
+  let m = parse_and_desugar src in
+  let m = { m with March_ast.Ast.mod_decls = Lazy.force scope_decls @ m.March_ast.Ast.mod_decls } in
+  fst (March_typecheck.Typecheck.check_module m)
+
+let scope_errors src =
+  List.filter
+    (fun (d : March_errors.Errors.diagnostic) -> d.March_errors.Errors.severity = March_errors.Errors.Error)
+    (scope_typecheck src).March_errors.Errors.diagnostics
+
+let scope_error_codes src =
+  List.map (fun (d : March_errors.Errors.diagnostic) ->
+      March_errors.Code.slug_of d.March_errors.Errors.code) (scope_errors src)
+
+let scope_messages src =
+  List.map (fun (d : March_errors.Errors.diagnostic) ->
+      String.concat "\n" (d.March_errors.Errors.message :: d.March_errors.Errors.notes))
+    (scope_errors src)
+
+let scope_clean name src =
+  Alcotest.(check (list string)) name [] (scope_error_codes src)
+
+let scope_rejects code name src =
+  let codes = scope_error_codes src in
+  if not (List.mem code codes) then
+    Alcotest.failf "%s: expected %s, got [%s]" name code (String.concat "; " codes)
+
+let has_sub s sub =
+  let n = String.length sub and h = String.length s in
+  let rec go i = i + n <= h && (String.sub s i n = sub || go (i + 1)) in
+  go 0
+
+let in_mod body = Printf.sprintf "mod M do\n  needs IO.Console\n%s\nend" body
+
+let test_scope_expr_typing () =
+  scope_clean "a literal scope is a Scope"
+    (in_mod "  fn f() do\n    let s : Scope = IO.Console\n    s\n  end");
+  scope_clean "a computed scope is a Result"
+    (in_mod "  fn f(d : String) do\n    let r : Result(Scope, ScopeError) = IO.FileRead(d)\n    r\n  end");
+  scope_clean "+ on two Scopes"
+    (in_mod "  fn f() do\n    let s : Scope = IO.Console\n    let t : Scope = IO.FileRead(\"/a/\")\n    let u : Scope = s + t\n    u\n  end");
+  scope_clean "1 + 2 still defaults to Int"
+    (in_mod "  fn f() do\n    let x = 1 + 2\n    let y : Int = x\n    y\n  end");
+  scope_rejects "type_mismatch" "a computed scope is not a Scope"
+    (in_mod "  fn f(d : String) do\n    let s : Scope = IO.FileRead(d)\n    s\n  end");
+  scope_rejects "invalid_cap_scope" "a relative path scope"
+    (in_mod "  fn f() do\n    let s : Scope = IO.FileRead(\"rel/\")\n    s\n  end");
+  scope_rejects "invalid_cap_scope" "a non-literal option"
+    (in_mod "  fn f(p : String) do\n    let s = IO.Registry(prefix(p))\n    s\n  end");
+  scope_rejects "unknown_capability" "an unknown capability"
+    (in_mod "  fn f() do\n    let s = IO.Consle\n    s\n  end")
+
+let test_scope_plus_on_string_unchanged () =
+  let src = in_mod "  fn f() do\n    let x = \"a\" + \"b\"\n    x\n  end" in
+  Alcotest.(check (list string)) "the + on String diagnostic"
+    [ "String does not implement Num (only Int and Float do).\n`+` needs it here.\n\
+       March joins strings with `++`, not `+`. To put a number in a string, convert \
+       it first: `\"total: \" ++ int_to_string(n)`." ]
+    (List.filter_map
+       (fun (d : March_errors.Errors.diagnostic) ->
+          if d.March_errors.Errors.severity = March_errors.Errors.Error then
+            Some (String.concat "\n" (d.March_errors.Errors.message :: d.March_errors.Errors.notes))
+          else None)
+       (typecheck src).March_errors.Errors.diagnostics)
+
+let test_restrict_typing () =
+  scope_clean "restrict has its block's type"
+    (in_mod "  fn f() : Int do\n    restrict () do 1 end\n  end");
+  scope_clean "a computed restrict takes a Scope"
+    (in_mod "  fn f(s : Scope) : Int do\n    restrict s do 1 end\n  end");
+  scope_rejects "type_mismatch" "a restrict entry must be a Scope"
+    (in_mod "  fn f() : Int do\n    restrict 1 do 1 end\n  end");
+  let src =
+    in_mod "  fn f(d : String) : Int do\n    restrict IO.FileRead(d) do 1 end\n  end"
+  in
+  scope_rejects "type_mismatch" "a Result(Scope, ScopeError) entry" src;
+  Alcotest.(check bool) "the hint names let?" true
+    (List.exists (fun m -> has_sub m "let?") (scope_messages src))
+
+let test_restrict_reach () =
+  scope_clean "the block's reach is within its kinds"
+    (in_mod "  fn f() do\n    restrict IO.Console do println(\"x\") end\n  end");
+  scope_clean "a nested restrict within its kinds"
+    (in_mod "  fn f() do\n    restrict IO.Console do\n      restrict IO.Console, IO.Clock do println(\"x\") end\n    end\n  end");
+  scope_clean "listing a kind the module lacks is not a widening"
+    (in_mod "  fn f() do\n    restrict IO.Console, IO.FileRead(\"/a/\") do println(\"x\") end\n  end");
+  scope_clean "no needs line is required to restrict"
+    "mod M do\n  fn f() : Int do\n    restrict () do 1 end\n  end\nend";
+  let direct =
+    in_mod "  fn f() do\n    restrict IO.Clock do println(\"x\") end\n  end"
+  in
+  scope_rejects "cap_restrict" "an operation outside the restrict" direct;
+  Alcotest.(check bool) "names the operation, the kind and the restrict" true
+    (List.exists
+       (fun m -> has_sub m "`println` needs `IO.Console`, which the restrict at"
+                 && has_sub m "does not allow")
+       (scope_messages direct));
+  let helper =
+    in_mod "  pfn log(s : String) do println(s) end\n  fn f() do\n    restrict () do log(\"x\") end\n  end"
+  in
+  scope_rejects "cap_restrict" "a direct call whose row reaches outside" helper;
+  Alcotest.(check bool) "names the callee" true
+    (List.exists (fun m -> has_sub m "`log` needs `IO.Console`") (scope_messages helper));
+  scope_rejects "cap_restrict" "a lambda made inside reaches outside"
+    (in_mod "  fn f() do\n    let g = restrict () do fn () -> println(\"x\") end\n    g\n  end");
+  scope_clean "a local shadowing a top-level fn is not a call of it"
+    (in_mod "  pfn log(s : String) do println(s) end\n  fn f() do\n    let log = fn s -> s\n    restrict () do log(\"x\") end\n  end");
+  scope_clean "a parameter shadowing a top-level fn is not a call of it"
+    (in_mod "  pfn log(s : String) do println(s) end\n  fn f(log : String -> String) do\n    restrict () do log(\"x\") end\n  end");
+  scope_clean "the block's reach still counts for the function"
+    (in_mod "  fn f() needs IO.Console do\n    restrict IO.Console do println(\"x\") end\n  end");
+  scope_rejects "cap_bound" "the function's bound still sees the block"
+    (in_mod "  fn f() needs () do\n    restrict IO.Console do println(\"x\") end\n  end");
+  scope_clean "a computed restrict is checked at run time only"
+    (in_mod "  fn f(s : Scope) do\n    restrict s do println(\"x\") end\n  end")
+
+(** `restart` must stay usable as an ordinary identifier.
+
+    Reserving it outright broke stdlib/dist_supervisor.march, which names both a
+    record field and a function parameter `restart` (:31, :54, :55) — in the very
+    module that models restart policy. The token filter demotes it back to an
+    identifier unless the next token is one of the three policy words, so both
+    spellings coexist. This test pins the identifier half; the supervise-child
+    test below pins the keyword half. *)
 let test_restart_still_usable_as_identifier () =
   let src = {|mod Test do
     type Policy = Always | Never
@@ -21063,6 +21282,16 @@ let compiler_suites =
           Alcotest.test_case "parse restrict nested"    `Quick test_parse_restrict_nested;
           Alcotest.test_case "restrict is an expression" `Quick test_restrict_is_expression;
           Alcotest.test_case "restrict span at keyword" `Quick test_restrict_span_starts_at_keyword;
+          Alcotest.test_case "restrict not an identifier" `Quick test_restrict_not_an_identifier;
+          Alcotest.test_case "scope_expr literal"        `Quick test_scope_expr_literal;
+          Alcotest.test_case "scope_expr computed"       `Quick test_scope_expr_computed;
+          Alcotest.test_case "scope_expr union"          `Quick test_scope_expr_union;
+          Alcotest.test_case "scope_expr not a scope"    `Quick test_scope_expr_not_scope;
+          Alcotest.test_case "scope_expr restrict text"  `Quick test_scope_expr_restrict_text;
+          Alcotest.test_case "scope_expr typing"         `Quick test_scope_expr_typing;
+          Alcotest.test_case "scope_expr + on String unchanged" `Quick test_scope_plus_on_string_unchanged;
+          Alcotest.test_case "restrict typing"           `Quick test_restrict_typing;
+          Alcotest.test_case "restrict reach"            `Quick test_restrict_reach;
         ] );
       ( "sha256_builtin_type", [
           Alcotest.test_case "sha256(Bytes) : String, not Bytes"               `Quick test_sha256_builtin_returns_string;

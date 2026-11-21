@@ -1198,6 +1198,112 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     List.filter_map (function Ast.FPDefault (_, e) -> Some e | _ -> None)
       c.Ast.fc_params
   in
+  (* ocap phase 5 (decision 6): a literal `restrict` block is its own owner.
+     Its reach is its own operations, its direct calls' rows and the lambdas
+     made in it (charged to the block, as a lambda is charged to the function
+     that makes it), and [Typecheck.check_fn_bounds] holds that reach under
+     the block's kinds.  The block's own record lives in [restrict_owners],
+     never in the closure tables: the enclosing function's row already holds
+     the block (its body is part of the function's), so nothing about the
+     function changes.  [bound] is the owner's parameters; the walk adds every
+     binder in scope at the block, exactly as [free_vars_expr] scopes them, so
+     a local that shadows a top-level function is not a call of it.  The
+     entries were validated where they were typed (a scope expression is
+     checked by [infer_expr], restrict or not); an unknown capability bounds
+     nothing.  A computed restrict is checked at run time only. *)
+  let record_restricts ~(owner : string) (bodies : (string list * Ast.expr) list) : unit =
+    let record scope (entries : (Ast.name list * string option) list) body (sp : Ast.span) =
+      let key = Printf.sprintf "%s$restrict@%d:%d" owner sp.Ast.start_line sp.Ast.start_col in
+      let kw =
+        { sp with Ast.end_line = sp.Ast.start_line;
+                  end_col = sp.Ast.start_col + String.length "restrict" }
+      in
+      let kinds =
+        List.sort_uniq String.compare
+          (List.filter_map
+             (fun (p, _) ->
+                let c = cap_path_of_names p in
+                if March_caps.Cap_lattice.suggest_cap c = None then Some c else None)
+             entries)
+      in
+      let ops =
+        List.filter_map
+          (fun (n, csp) ->
+             match cap_of_builtin_call n with
+             | Some c -> Some (c, n, csp)
+             | None ->
+               Option.map (fun c -> (c, n, csp)) (List.assoc_opt n entry_cap_table))
+          (List.rev (March_ast.Calls.builtin_candidate_calls ~bound:scope body))
+      in
+      let calls = List.rev (March_ast.Calls.calls_in_expr [] body) in
+      let refs =
+        List.sort_uniq String.compare
+          (free_vars_expr scope body @ March_ast.Calls.spawned_actor_names [] body)
+      in
+      let ro_refs =
+        List.map
+          (fun r ->
+             match List.find_opt (fun (n, _, _) -> n = r) calls with
+             | Some (_, nsp, _) -> (r, nsp)
+             | None -> (r, kw))
+          refs
+      in
+      Hashtbl.replace env.restrict_owners key { ro_owner = owner; ro_ops = ops; ro_refs };
+      Hashtbl.replace env.fn_bound_points key
+        { fb_caps = kinds; fb_span = kw; fb_site = kw;
+          fb_origin =
+            Restrict_block (Filename.basename sp.Ast.file ^ ":" ^ string_of_int sp.Ast.start_line) }
+    in
+    let rec go scope (e : Ast.expr) : unit =
+      let go' = go scope in
+      match e with
+      | Ast.ERestrict (es, b, sp) ->
+        (match March_caps.Scope_expr.restrict_entries es with
+         | Some entries -> record scope entries b sp
+         | None -> ());
+        List.iter go' es;
+        go' b
+      | Ast.ELam (ps, body, _) ->
+        go (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps @ scope) body
+      | Ast.EBlock (es, _) -> block scope es
+      | Ast.ELet (b, _) -> go' b.Ast.bind_expr
+      | Ast.EMatch (scrut, branches, _) ->
+        go' scrut;
+        List.iter
+          (fun (br : Ast.branch) ->
+             let inner = free_vars_pattern br.Ast.branch_pat @ scope in
+             Option.iter (go inner) br.Ast.branch_guard;
+             go inner br.Ast.branch_body)
+          branches
+      | Ast.ELetFn (name, ps, _, body, _) ->
+        go ((name.Ast.txt :: List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps)
+            @ scope) body
+      | Ast.ELetQ (p, result, cont, _) | Ast.ELetStar (p, result, cont, _) ->
+        go' result;
+        go (free_vars_pattern p @ scope) cont
+      | Ast.EApp (f, args, _) -> go' f; List.iter go' args
+      | Ast.ECon (_, args, _) | Ast.ETuple (args, _) | Ast.EAtom (_, args, _) ->
+        List.iter go' args
+      | Ast.ERecord (fields, _) -> List.iter (fun (_, x) -> go' x) fields
+      | Ast.ERecordUpdate (base, fields, _) ->
+        go' base; List.iter (fun (_, x) -> go' x) fields
+      | Ast.EIf (c, t, f, _) -> go' c; go' t; go' f
+      | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go' c; go' b) arms
+      | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> go' a; go' b
+      | Ast.EField (x, _, _) | Ast.EAnnot (x, _, _) | Ast.ESpawn (x, _)
+      | Ast.EAssert (x, _) | Ast.ESigil (_, x, _) | Ast.ERefineMsg (x, _, _)
+      | Ast.EDbg (Some x, _) -> go' x
+      | Ast.EProof (p, _) -> List.iter go' (Ast.proof_children p)
+      | Ast.EVar _ | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> ()
+    and block scope = function
+      | [] -> ()
+      | Ast.ELet (b, _) :: rest ->
+        go scope b.Ast.bind_expr;
+        block (free_vars_pattern b.Ast.bind_pat @ scope) rest
+      | e :: rest -> go scope e; block scope rest
+    in
+    List.iter (fun (bound, e) -> go bound e) bodies
+  in
   (* Record one non-[DFn] expression owner: its own builtin-implied caps and
      its reference edges, with [bound] seeding [free_vars_expr] exactly the way
      [record_fn_refs] does for a clause's parameters. *)
@@ -1206,7 +1312,8 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     let body_caps = List.concat_map (builtin_caps_of_expr ~bound) es in
     record_fn_caps qname (body_caps @ List.concat_map (entry_caps_of_expr ~bound) es);
     record_body_caps qname sp body_caps;
-    record_fn_refs qname (List.map (fun e -> (bound, e)) es)
+    record_fn_refs qname (List.map (fun e -> (bound, e)) es);
+    record_restricts ~owner:qname (List.map (fun e -> (bound, e)) es)
   in
   (* An [impl]'s target type, keyed the way lib/tir/lower.ml keys it when it
      builds the [Iface$Ty.method] mangled symbol — same four cases, same
@@ -1519,6 +1626,9 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           record_body_caps fn_qname sp body_caps;
           record_fn_refs fn_qname
             [ (List.map (fun (p : Ast.param) -> p.param_name.txt) h.Ast.ah_params,
+               h.Ast.ah_body) ];
+          record_restricts ~owner:fn_qname
+            [ (List.map (fun (p : Ast.param) -> p.param_name.txt) h.Ast.ah_params,
                h.Ast.ah_body) ]
         ) (Ast.actor_body_handlers actor);
       (* Bridge the actor-NAME node to its handler functions, so a `spawn(A)`
@@ -1791,6 +1901,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         record_fn_caps qname closure_caps;
         record_body_caps qname dfn_sp own_caps;
         record_fn_refs qname own_refs;
+        record_restricts ~owner:qname own_refs;
         (match arity_mangled_base def.fn_name.txt with
          | None -> ()
          | Some base ->

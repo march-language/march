@@ -130,6 +130,12 @@ type bound_origin =
   | Fn_decl
   | Iface_method of { iface : string; impl_ty : string option }
   | Impl_method of { iface : string; impl_ty : string }
+  | Restrict_block of string
+type restrict_owner = {
+  ro_owner : string;
+  ro_ops : (string * string * Typecheck_types.Ast.span) list;
+  ro_refs : (string * Typecheck_types.Ast.span) list;
+}
 type fn_bound = {
   fb_caps : string list;
   fb_span : Typecheck_types.Ast.span;
@@ -296,6 +302,7 @@ type env = {
     (string, string list * Typecheck_types.Ast.span)
     Hashtbl.t;
   fn_bound_points : (string, fn_bound) Hashtbl.t;
+  restrict_owners : (string, restrict_owner) Hashtbl.t;
   local_mods : string list StrMap.t;
   offer_conts :
     (Typecheck_types.session_ty ref *

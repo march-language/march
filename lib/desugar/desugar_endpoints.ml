@@ -1862,6 +1862,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
            | EBlock (es, s) -> EBlock (List.map thread es, s)
            | ELet (b, s) -> ELet ({ b with bind_expr = thread b.bind_expr }, s)
            | EIf (c, t, f, s) -> EIf (thread c, thread t, thread f, s)
+           | ERestrict (es, b, s) -> ERestrict (List.map thread es, thread b, s)
            | EMatch (scrut, branches, s) ->
              EMatch (thread scrut, List.map (fun br -> { br with branch_body = thread br.branch_body }) branches, s)
            | ECon (c, args, s) -> ECon (c, List.map thread args, s)
@@ -1879,6 +1880,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
            | EBlock (es, _) -> List.exists (mentions p) es
            | ELet (b, _) -> mentions p b.bind_expr
            | EIf (c, t, f, _) -> mentions p c || mentions p t || mentions p f
+           | ERestrict (es, b, _) -> List.exists (mentions p) es || mentions p b
            | EMatch (scrut, branches, _) -> mentions p scrut || List.exists (fun br -> mentions p br.branch_body) branches
            | ECon (_, args, _) | ETuple (args, _) -> List.exists (mentions p) args
            | _ -> false
