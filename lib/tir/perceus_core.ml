@@ -1782,7 +1782,20 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
             && not (StringSet.mem src.Tir.v_name env.borrowed_field_vars)
             && not (StringSet.mem src.Tir.v_name env.closure_fvs)
             && not (String.equal src.Tir.v_name v.Tir.v_name)
-            && not (used_only_as_field_source src.Tir.v_name e2)
+            && (not (used_only_as_field_source src.Tir.v_name e2)
+                (* When [e2] hands a native array to a call, every field
+                   read out of [src] takes its own reference too, even when
+                   [src] is only ever projected.  With no borrowed alias left
+                   pointing into it, [src] can be released after its last read
+                   instead of at the end of the scope, so a set on an array
+                   field that [src] held the other reference to writes in
+                   place rather than copying the whole array ([let lanes =
+                   r.lanes .. { walk: r.walk, lanes: set_int(lanes, i, v) }]).
+                   A field stored into the result would be dup'd there anyway;
+                   one only read costs a dup and a drop.  Borrow inference owns
+                   a parameter whose array field is consumed (Borrow.owned_in)
+                   so that this applies to it. *)
+                || Borrow.consumes_native_array e2)
           | _ -> false)
     in
     let is_borrowed_field = is_borrowed_field && not dup_owned_field in

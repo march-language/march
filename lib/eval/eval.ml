@@ -208,6 +208,35 @@ let bare_slot_exact : (string * string, unit) Hashtbl.t = Hashtbl.create 16
 let is_colliding_type_name (short_name : string) : bool =
   Hashtbl.mem type_collision_set short_name
 
+(** The interpreter's builtin ADTs: no [DType] declares them (their ctors are
+    pre-registered in [ctor_type_tbl]), and the prelude's `impl Show(Option(a))`
+    and siblings sit at the top level, keyed by the bare name. *)
+let builtin_adt_names = [ "Option"; "Result"; "List" ]
+
+(** short name -> the source file of the entry module's own TOP-LEVEL variant
+    of that builtin-ADT name (`type Option = Has(Int) | Empty` in `mod Main`).
+    The entry module and the prelude are both unwrapped to the top level, so
+    the module prefix cannot tell the user's type (or its impls) from the
+    builtin's: the declaration's file does.  Filled by
+    [compute_type_collision_set]. *)
+let entry_builtin_shadow : (string, string) Hashtbl.t = Hashtbl.create 4
+
+(** The entry module's name, for [entry_shadow_identity]. *)
+let entry_module_name : string ref = ref ""
+
+(** The dispatch identity of the type [short] declared, or implemented, by a
+    top-level declaration whose span is in [file]: [Main.Option] when it is
+    the entry module's own variant named like a builtin ADT, so its
+    constructors and its Show/Eq/... impls get dispatch slots of their own
+    instead of taking over the builtin's (the typechecker's identity for the
+    same type, [Typecheck_nominal]).  [None] for anything else, nested
+    declarations included: their module prefix already qualifies them. *)
+let entry_shadow_identity (short : string) (file : string) : string option =
+  match Hashtbl.find_opt entry_builtin_shadow short with
+  | Some f when f = file && !entry_module_name <> "" ->
+    Some (!entry_module_name ^ "." ^ short)
+  | _ -> None
+
 (** (module-prefix, bare ctor name) -> declaring type's SHORT name, populated
     ONLY for a ctor that is BOTH (a) declared PUBLIC by a colliding type (see
     [type_collision_set]) AND (b) shared by name with another PUBLIC
@@ -400,6 +429,12 @@ let handler_for_msg (actor_name : string) (handlers : actor_handler list) (tag :
 let compute_type_collision_set (decls : decl list) : unit =
   Hashtbl.reset type_collision_set;
   Hashtbl.reset colliding_ctor_type_by_module;
+  Hashtbl.reset entry_builtin_shadow;
+  List.iter (function
+      | DType (_, name, _, TDVariant _, sp) | DAlwaysLinearType (_, name, _, TDVariant _, sp)
+        when List.mem name.txt builtin_adt_names ->
+        Hashtbl.replace entry_builtin_shadow name.txt sp.file
+      | _ -> ()) decls;
   (* short type name -> (module_prefix, qualified_name, visibility, ctor_names)
      list, one entry per distinct qualified declaration seen. *)
   let by_short : (string, (string * string * visibility * string list) list) Hashtbl.t =
@@ -1270,8 +1305,20 @@ and match_list (pats : pattern list) (vs : value list) : (string * value) list o
     current [module_stack]-derived qualified name. Shared by every [DType]/
     [DAlwaysLinearType] eval site so the qualification rule can't drift
     between them. *)
-let register_type_ctors (name_txt : string) (variants : variant list) : unit =
+let register_type_ctors ?(decl_file = "") (name_txt : string) (variants : variant list) : unit =
+  let shadow_id =
+    if !module_stack = [] then entry_shadow_identity name_txt decl_file else None in
   List.iter (fun (v : variant) ->
+      (* The entry module's own variant named like a builtin ADT: its
+         constructors dispatch by its identity ([entry_shadow_identity]).  A
+         constructor spelled like the builtin's (`Some`) cannot tell which
+         type a bare-tagged value has, so it is ambiguous instead. *)
+      (match shadow_id with
+       | Some id ->
+         if Hashtbl.mem ctor_type_tbl v.var_name.txt then
+           Hashtbl.replace ambiguous_ctor_tags v.var_name.txt ()
+         else Hashtbl.replace ctor_qualified_type_tbl v.var_name.txt id
+       | None -> ());
       (* A constructor name two types declare cannot tell the interpreter
          which type a bare-tagged value belongs to: [find_impl_for] must not
          trust its qualified type. *)
@@ -2962,6 +3009,7 @@ let reset_scheduler_state () : unit =
   Hashtbl.reset bare_slot_exact;
   Hashtbl.reset type_collision_set;
   Hashtbl.reset colliding_ctor_type_by_module;
+  Hashtbl.reset entry_builtin_shadow;
   closure_prefix_override := None;
   (* Pre-register builtin constructor → type mappings so Show dispatch works *)
   List.iter (fun (ctor, ty) -> Hashtbl.replace ctor_type_tbl ctor ty)
@@ -3921,10 +3969,10 @@ let rec eval_decl (env : env) (d : decl) : env =
      | Some bs -> bs @ env
      | None    -> eval_error "top-level let binding pattern failed")
 
-  | DType (_, name, _, td, _) ->
+  | DType (_, name, _, td, dsp) ->
     (* Populate ctor_type_tbl so dispatch can find the type from a constructor value. *)
     (match td with
-     | TDVariant variants -> register_type_ctors name.txt variants
+     | TDVariant variants -> register_type_ctors ~decl_file:dsp.file name.txt variants
      | TDRecord fields ->
        (* Register record type by its field names for Json derive dispatch *)
        let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
@@ -4192,9 +4240,12 @@ let rec eval_decl (env : env) (d : decl) : env =
        using bare [type_name] unchanged (see [ctor_qualified_type_tbl]'s doc
        comment for why qualifying it in place would be unsafe there). *)
     let dispatch_type_name =
-      if type_name <> "" && is_colliding_type_name type_name
-      then current_doc_prefix () ^ type_name
-      else type_name
+      match (if !module_stack = [] then entry_shadow_identity type_name sp.file else None) with
+      | Some id -> id   (* the entry module's own `type Option`'s impl *)
+      | None ->
+        if type_name <> "" && is_colliding_type_name type_name
+        then current_doc_prefix () ^ type_name
+        else type_name
     in
     let is_json_iface =
       String.length idef.impl_iface.txt >= 4
@@ -4371,10 +4422,10 @@ let rec eval_decl (env : env) (d : decl) : env =
 
   | DSig _ | DInterface _ | DNeeds _ | DProofCap _ | DTransitions _ | DOpts _ -> env
 
-  | DAlwaysLinearType (_, name, _, td, _) ->
+  | DAlwaysLinearType (_, name, _, td, dsp) ->
     (* Treat like DType at runtime — register constructors/records for dispatch. *)
     (match td with
-     | TDVariant variants -> register_type_ctors name.txt variants
+     | TDVariant variants -> register_type_ctors ~decl_file:dsp.file name.txt variants
      | TDRecord fields ->
        let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
        let key = String.concat "," (List.sort String.compare field_names) in
@@ -4585,6 +4636,7 @@ let eval_module_env ?launch (m : module_) : env =
      consult it as they go. Also resets it, so a later test run in the same
      process (all run_eval tests share this one OCaml process) never sees a
      stale collision entry left over from an unrelated earlier module. *)
+  entry_module_name := m.mod_name.txt;
   compute_type_collision_set m.mod_decls;
 
   (* Pass 1: stubs.  Installed per source-file run (see
@@ -4727,10 +4779,10 @@ let eval_module_env ?launch (m : module_) : env =
       env_ref := env';
       make_recursive_env env_ref rest env'
 
-    | DType (_, name, _, td, _) :: rest ->
+    | DType (_, name, _, td, dsp) :: rest ->
       (* Populate ctor_type_tbl and record_type_tbl for dispatch *)
       (match td with
-       | TDVariant variants -> register_type_ctors name.txt variants
+       | TDVariant variants -> register_type_ctors ~decl_file:dsp.file name.txt variants
        | TDRecord fields ->
          let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
          let key = String.concat "," (List.sort String.compare field_names) in

@@ -24,6 +24,25 @@ git log is authoritative for exact commits.
 - **`restrict` is now a reserved word** (it opens a `restrict ... do ... end` block; see
   Added). `SessionTheory.restrict` is renamed `SessionTheory.restrict_role`; any other program
   that names a function or variable `restrict` must rename it.
+- **Freeing is fast past the first gigabyte of heap.** `free` decides whether a pointer
+  belongs to March's allocator with an inline range check, which knew only mimalloc's first
+  1 GiB arena; with a larger heap nearly every free fell through to
+  `mi_is_in_heap_region`. The bounds of every arena are now cached the same way: on a
+  4.5 GB, 500,000-citizen Ur city the simulation thread had spent about 23% of its time in
+  that check.
+- **Setting a native array kept in a record writes in place.** A function that reads an
+  array field out of a record and sets it (`let lanes = r.lanes` ... `{ ..., lanes:
+  NativeArray.set_int(lanes, i, v) }`) copied the whole array on every set: the record
+  still held a second reference. The record is now released after its last read, so a
+  record handed over whole leaves the array one reference and the set writes in place
+  (Ur's lane updates: 1.67 s to 0.19 s on a 200,000-element array). The
+  `{ r with lanes: set_int(r.lanes, ...) }` form still copies, since the update reads
+  `r` after the set; read the fields out first.
+- **`forge test FILE` runs only the files you name.** The compiled runner put all of
+  `test/` on the library path, and the compiler loads every file there, so naming one
+  test file compiled and ran the whole suite. Naming part of the suite now compiles
+  just those files plus `test/`'s helper modules (any non-test `.march` file).
+  `forge test` with no arguments, or naming every test file, runs the suite as before.
 
 - **A Float `if` or `match` with a record field arm no longer allocates.** When one
   branch was a field read such as `event.progress`, compiled code boxed the result of
@@ -1169,6 +1188,11 @@ git log is authoritative for exact commits.
 - The Actors chapter no longer says `Actor.register` needs no capability: all four registry
   functions need `IO.Registry` (or `needs IO`). The 0.6.0 upgrade guide notes that an actor
   message can now be qualified by its actor.
+- The home page REPL's example buttons are Actors, Pipes, Pattern matching, `let?`,
+  Protocols, Comprehensions, Ping-pong (two actors), Safe HTML (`~H` escaping), CRDT (a
+  replicated counter merging) and BigInt (50!). The old `let?` example never reached its
+  error case (its "failing" input divided cleanly), and the std dev example printed its
+  Floats as `(5, 2)`.
 - The home page badge shows v0.7.0 (it still said v0.6.0). The docs index links four pages
   it had left out: Error Messages, Tetris Playground, From a Protocol to a Cluster, and What
   a Deploy Is Allowed to Do. Getting Started, the Language Tour and the "Coming from FP" page
@@ -1286,6 +1310,20 @@ git log is authoritative for exact commits.
   FILE`, the TUI and `:reload` lexed the file without its name, so a capability refusal read
   `refused by ... at .:18` and other errors and stack traces for its declarations named no
   file. They now name it, as the batch compiler does.
+- **A compiled cancel token no longer reads as cancelled before it is cancelled.** Using a
+  `task_cancel_token_new()` token more than once (`task_is_cancelled(t)` and then
+  `task_cancel(t)`) made compiled code answer `true` to the first query, and a task spawned
+  with `task_spawn_with_cancel` on a fresh token was skipped as if cancelled, so its
+  `task_await` never returned. The interpreter was right. Tokens are now released correctly
+  as well: each `task_cancel`, `task_is_cancelled` and `task_spawn_with_cancel` call used to
+  leak a reference to its token.
+- **A type of your own named `List`, `Option` or `Result` no longer hides the builtin one.**
+  A top-level `type List` with `derive Eq` was rejected ("`List` expects 0 type argument(s)
+  but got 1", in code generated for the file); a `type Result` inside a nested module made
+  `Result(Int, String)` in the enclosing module an error; and in the interpreter a top-level
+  `type Option` with `derive Show` ran its own `show` on the builtin `Some(1)`, which panicked.
+  The user type is now its own type in all three places, and the builtin keeps its arity,
+  constructors and `Show`/`Eq` impls beside it.
 - **A hot deploy that changes an actor's state with no migration is refused under every
   `@compat` policy.** `@compat(forward)` (added fields) and `@compat(any)` used to let such a
   deploy through with no migration, so each running actor kept its old state record while the

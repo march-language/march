@@ -10193,6 +10193,16 @@ void *march_send_after(void *actor, void *msg, int64_t delay_ms) {
     return tok;
 }
 
+/* task_cancel_token_new() : CancelToken -- a march_alloc'd cell, rc=1, owned
+ * by the caller (see struct march_cancel_token in march_scheduler.h for why it
+ * must be a real March cell and not a malloc'd struct). */
+march_cancel_token *march_cancel_token_new(void) {
+    march_cancel_token *tok = (march_cancel_token *)march_alloc(sizeof(march_cancel_token));
+    tok->tag = MARCH_CANCEL_TOKEN_TAG;
+    atomic_init(&tok->cancelled, 0);
+    return tok;
+}
+
 /* cancel_timer(ref) — see march_runtime.h's doc comment for the RC
  * contract: consumes (and releases) the one reference to tok it receives. */
 void march_timer_cancel(void *tok) {

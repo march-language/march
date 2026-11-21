@@ -11043,6 +11043,52 @@ let write_march_source ~name src_text =
   close_out oc;
   (project_root, main_exe, src, tmp)
 
+(* ── CancelToken is a real RC'd cell (2026-11-11 todo, P2) ──────────────
+   The runtime's cancel token was a malloc'd {int cancelled; int refcount},
+   but a CancelToken is a March value, so Perceus's inc_rc on a token used
+   twice added 1 to word 0 -- the [cancelled] flag.  Compiled,
+   `task_is_cancelled(b)` answered true before `task_cancel(b)`, and a task
+   spawned with a fresh token saw it as already cancelled.  Run interpreted
+   and compiled and require the same, expected, output. *)
+let cancel_token_rc_src = {|mod CancelTok do
+  needs IO.Console
+  needs IO.Spawn
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let b = task_cancel_token_new()
+    println(to_string(task_is_cancelled(b)))
+    println(to_string(task_is_cancelled(b)))
+    task_cancel(b)
+    println(to_string(task_is_cancelled(b)))
+    println(to_string(task_is_cancelled(b)))
+    let other = task_cancel_token_new()
+    let t = Authority.must(Task.async_cancellable(fn () -> 42, other))
+    println(to_string(task_is_cancelled(other)))
+    println(to_string(task_await(t)))
+    println(to_string(task_is_cancelled(other)))
+    println(to_string(task_is_cancelled(b)))
+  end
+end
+|}
+
+let test_cancel_token_rc_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"cancel_tok" cancel_token_rc_src in
+  let expected = "false\nfalse\ntrue\ntrue\nfalse\nOk(42)\nfalse\ntrue" in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreted" expected interp_out;
+  let bin = Filename.concat tmp "cancel_tok_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    (* Bounded: with the bug the spawned task skipped its body (its token
+       read as cancelled) and task_await never returned. *)
+    let run_out = read_cmd_output (Printf.sprintf
+      "perl -e 'alarm 30; exec @ARGV' %s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string) "compiled matches the interpreter" expected run_out
+
 (* ── HTTP request-line / header injection (2026-11-09 todo, P1) ──────────
    `http_serialize_request` used to copy the method, host, path, query and
    headers into the request verbatim, so a CR/LF/space in any of them
@@ -12723,6 +12769,69 @@ let test_float_case_join_mixed_arms_keep_ptr_slot () =
       "\\(%case_r[0-9]+\\) = load ptr, ptr %res_slot[0-9]+\n[^\n]*call double @march_unbox_float(ptr \\1)\n[^\n]*call void @[_a-z]*march[_a-z]*decrc_local(ptr \\1)" in
   Alcotest.(check bool) "the merge unboxes its box and frees it" true
     (match Str.search_forward re fn_ir 0 with _ -> true | exception Not_found -> false)
+
+(* A record whose native array field is read out and set copied the whole
+   array on every set: borrow inference left [lane_set]'s record borrowed (it
+   is only ever projected), so the caller still held it, and the array had a
+   second reference when [native_int_arr_set] ran.  Owned, with every field
+   read taking its own reference, the record is released before the set and
+   a record the caller handed over whole leaves the array one reference, so
+   the set writes in place
+   (specs/progress/2026-11-20-array-field-set-in-place.md). *)
+let array_field_fns = {|
+  type Occ = { name : String, lanes : NativeIntArr, tags : List(Int), tick : Int }
+  pfn lane_set(o : Occ, i : Int, v : Int) : Occ do
+    let lanes = o.lanes
+    let name = o.name
+    let tags = o.tags
+    let tick = o.tick
+    { name: name, lanes: NativeArray.set_int(lanes, i, v), tags: tags, tick: tick + 1 }
+  end
+  pfn step(o : Occ, i : Int, n : Int) : Occ do
+    if i >= n do o else
+      let o = lane_set(o, i % 100, i)
+      step(lane_set(o, i, NativeArray.get_int(o.lanes, i % 100) + String.byte_size(o.name)), i + 1, n)
+    end
+  end
+|}
+
+let array_field_main = {|
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let o = step({ name: "walkers", lanes: NativeArray.make_int(2000, 0), tags: [1, 2, 3], tick: 0 }, 0, 1500)
+    println(o.name ++ " " ++ int_to_string(o.tick) ++ " " ++ int_to_string(NativeArray.get_int(o.lanes, 1499))
+      ++ " " ++ int_to_string(NativeArray.sum_int(o.lanes)) ++ " " ++ int_to_string(List.length(o.tags)))
+    ()
+  end
+|}
+
+let test_array_field_set_releases_record_first () =
+  let (project_root, main_exe, src, _tmp) = write_march_source ~name:"march_arrayfield_ir"
+    (float_join_src ~name:"ArrayFieldIr" ~needs:"" array_field_fns array_field_main)
+  in
+  let fn_ir = ir_define (float_join_cli_ir ~project_root ~main_exe ~src) "lane_set" in
+  Alcotest.(check bool) "lane_set is in the IR" true (fn_ir <> "");
+  let at pat = try Some (Str.search_forward (Str.regexp_string pat) fn_ir 0) with Not_found -> None in
+  match at "call void @__drop$R4_", at "native_int_arr_set" with
+  | None, _ -> Alcotest.fail "lane_set never releases its record (borrowed: the set copies the array)"
+  | _, None -> Alcotest.fail "lane_set has no array set"
+  | Some drop, Some set ->
+    Alcotest.(check bool) "the record is released before the array set" true (drop < set)
+
+let test_array_field_set_matches_interpreter_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_arrayfield_parity"
+    (float_join_src ~name:"ArrayFieldParity" ~needs:"" array_field_fns array_field_main)
+  in
+  let cd = Printf.sprintf "cd %s && " (Filename.quote project_root) in
+  let interp = read_cmd_output (Printf.sprintf "%s%s %s 2>&1" cd
+      (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check bool) "the interpreter printed the result" true
+    (ir_contains interp "walkers 3000" && not (ir_contains interp "rror"));
+  let bin = Filename.concat tmp "arrayfieldparitybin" in
+  match compile_march_or_skip ~cmd_prefix:cd ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    Alcotest.(check string) "compiled output equals the interpreter's" interp
+      (read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)))
 
 let test_float_case_join_matches_interpreter_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_floatjoin_parity"
@@ -14534,6 +14643,112 @@ let test_builtin_named_user_type_compiled () =
                            beside the builtins" opt)
           (builtin_named_user_type_expected ^ "\nEXIT:0") run_out)
     [0; 2]
+
+(* ── A user type named like a builtin ADT, beside the builtin ──────────────
+   Three ways the builtin and a same-named user variant used to meet:
+   - a top-level `type List` with `derive Eq` claimed the bare `List` in the
+     typechecker's type table, so every builtin `List(a)` it did not resolve
+     to the user's declaration (generated code, stdlib signatures) "expects 0
+     type argument(s) but got 1"
+     (specs/progress/2026-11-16-toplevel-type-list-breaks-generated-code.md);
+   - a nested `type Result` exported its bare name over the builtin's, so
+     `Result(Int, String)` in the enclosing module was rejected
+     (specs/progress/2026-11-16-nested-type-named-like-builtin-leaks-to-parent-scope.md);
+   - interpreted, a top-level `type Option`'s derived `show` took over the
+     builtin `Option`'s dispatch slot, so `to_string(Some(1))` panicked
+     (specs/progress/2026-11-16-interp-user-option-show-captures-builtin.md).
+   Each program runs interpreted and compiled at --opt 0 and 2. *)
+let builtin_shadow_list_src = {|mod Main do
+  needs IO.Console
+  type List = Link(Int, List) | End
+  derive Show, Eq for List
+  fn total(l : List, acc : Int) : Int do
+    match l do
+      End -> acc
+      Link(n, rest) -> total(rest, acc + n)
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let l = Link(1, Link(2, Link(3, End)))
+    println(int_to_string(total(l, 0)))
+    println(to_string(l))
+    println(to_string(l == End))
+    println(to_string(l == Link(1, Link(2, Link(3, End)))))
+    println(to_string([1, 2]))
+    println(to_string([1, 2] == [1, 2]))
+    println(to_string(List.head_opt([4])))
+  end
+end
+|}
+
+let builtin_shadow_list_expected =
+  "6\nLink(1, Link(2, Link(3, End)))\nfalse\ntrue\n[1, 2]\ntrue\nSome(4)"
+
+let builtin_shadow_nested_result_src = {|mod Main do
+  needs IO.Console
+  mod Inner do
+    type Result = Won(Int) | Lost
+    derive Show for Result
+    fn won(n : Int) : Result do Won(n) end
+  end
+  fn main(c : Cap(IO.Console)) do
+    println(to_string(Inner.won(3)))
+    let r : Result(Int, String) = Ok(1)
+    println(to_string(r))
+    let e : Result(Int, String) = Err("no")
+    println(to_string(e))
+  end
+end
+|}
+
+let builtin_shadow_nested_result_expected = "Won(3)\nOk(1)\nErr(no)"
+
+let builtin_shadow_option_src = {|mod Main do
+  needs IO.Console
+  type Option = Has(Int) | Nada
+  derive Show, Eq for Option
+  fn main(c : Cap(IO.Console)) do
+    println(to_string(Has(3)))
+    println(to_string(Nada))
+    println(to_string(Has(3) == Has(3)))
+    println(to_string(List.head_opt([1])))
+    println(to_string(List.head_opt([1]) == Some(1)))
+    println(to_string(string_to_int("x")))
+  end
+end
+|}
+
+let builtin_shadow_option_expected = "Has(3)\nNada\ntrue\nSome(1)\ntrue\nNone"
+
+let check_builtin_shadow_program ~name ~src ~expected =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) (name ^ ": interpreter") expected interp_out;
+  List.iter (fun opt ->
+      let bin = Filename.concat tmp (Printf.sprintf "%s_o%d" name opt) in
+      match compile_march_or_skip
+              ~cmd_prefix:(Printf.sprintf "cd %s && MARCH_VERIFY_TIR=1 " (Filename.quote project_root))
+              ~extra_args:(Printf.sprintf "--opt %d" opt) ~main_exe ~bin ~src () with
+      | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+      | Some bin ->
+        let run_out = read_cmd_output
+            (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+        Alcotest.(check string) (Printf.sprintf "%s: compiled --opt %d" name opt)
+          (expected ^ "\nEXIT:0") run_out)
+    [0; 2]
+
+let test_builtin_shadow_toplevel_list () =
+  check_builtin_shadow_program ~name:"march_shadow_list"
+    ~src:builtin_shadow_list_src ~expected:builtin_shadow_list_expected
+
+let test_builtin_shadow_nested_result () =
+  check_builtin_shadow_program ~name:"march_shadow_nested_result"
+    ~src:builtin_shadow_nested_result_src ~expected:builtin_shadow_nested_result_expected
+
+let test_builtin_shadow_option_show () =
+  check_builtin_shadow_program ~name:"march_shadow_option"
+    ~src:builtin_shadow_option_src ~expected:builtin_shadow_option_expected
 
 (* ── Payload atoms (`:ok(n)`) compiled ─────────────────────────────────────
    Every atom has the one type `Atom`, but a payload atom (`:ok(7)`) is a heap
@@ -21334,6 +21549,10 @@ let codegen_suites =
             test_float_case_join_matches_interpreter_compiled;
           Alcotest.test_case "compiled Float-valued join loop does not leak" `Slow
             test_float_case_join_no_leak_compiled;
+          Alcotest.test_case "a record's array field set releases the record first" `Quick
+            test_array_field_set_releases_record_first;
+          Alcotest.test_case "compiled array field sets equal the interpreter" `Slow
+            test_array_field_set_matches_interpreter_compiled;
           Alcotest.test_case "a type in an extern signature stays boxed" `Quick test_unboxed_aggregate_ffi_type_stays_boxed;
           Alcotest.test_case "module-declared aggregate is unboxed" `Quick test_module_unboxed_aggregate;
           Alcotest.test_case "C-built module aggregate stays boxed" `Quick test_module_unboxed_c_built_stays_boxed;
@@ -22006,6 +22225,10 @@ let codegen_suites =
           Alcotest.test_case "compiled guarded 3-arm match parity (shared-JP bloat fix)" `Quick
             test_compiled_guarded_match_parity;
         ] );
+      ( "cancel_token_codegen", [
+          Alcotest.test_case "compiled CancelToken is a real RC'd cell" `Quick
+            test_cancel_token_rc_compiled;
+        ] );
       ( "check_diagnostic_determinism", [
           Alcotest.test_case "repeated --check has byte-identical diagnostics" `Quick
             test_check_diagnostic_display_deterministic;
@@ -22133,6 +22356,12 @@ let codegen_suites =
       ( "builtin_named_user_type_codegen", [
           Alcotest.test_case "user type named like a builtin ADT keeps its identity" `Quick
             test_builtin_named_user_type_compiled;
+          Alcotest.test_case "top-level `type List` + derive Eq keeps the builtin List" `Quick
+            test_builtin_shadow_toplevel_list;
+          Alcotest.test_case "nested `type Result` does not hide the builtin outside" `Quick
+            test_builtin_shadow_nested_result;
+          Alcotest.test_case "top-level `type Option` derive Show leaves the builtin's" `Quick
+            test_builtin_shadow_option_show;
         ] );
       ( "payload_atom_codegen", [
           Alcotest.test_case "payload atoms match, show and compare compiled" `Quick

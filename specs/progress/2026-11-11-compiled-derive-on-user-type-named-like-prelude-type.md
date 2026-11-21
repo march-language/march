@@ -52,9 +52,9 @@ the builtin `Option` from `List.head_opt` and from `string_to_int`), checked aga
 interpreter and compiled at `--opt 0` and `2`. RED on `bd2ff7958`: the compile error above.
 
 Not fixed here, filed separately (all reproduce before this change):
-`todos/2026-11-16-nested-type-named-like-builtin-leaks-to-parent-scope.md`,
-`todos/2026-11-16-toplevel-type-list-breaks-generated-code.md` and
-`todos/2026-11-16-interp-user-option-show-captures-builtin.md`.
+`progress/2026-11-16-nested-type-named-like-builtin-leaks-to-parent-scope.md`,
+`progress/2026-11-16-toplevel-type-list-breaks-generated-code.md` and
+`progress/2026-11-16-interp-user-option-show-captures-builtin.md` (all three since fixed).
 
 ### Follow-up: the layout split the TIR verifier caught (2026-11-16)
 

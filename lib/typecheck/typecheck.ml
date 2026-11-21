@@ -8389,11 +8389,7 @@ let rec check_decl env (d : Ast.decl) : env =
            name.txt);
       env
     end else
-    let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
-    let env1 =
-      let id = Typecheck_nominal.decl_identity name in
-      if id = name.txt then env1
-      else { env1 with types = StrMap.add id (List.length params) env1.types } in
+    let env1 = { env with types = add_decl_type name (List.length params) env.types } in
     (match typedef with
      | Ast.TDVariant variants ->
        let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
@@ -8911,8 +8907,22 @@ let rec check_decl env (d : Ast.decl) : env =
        Opaque types listed in the sig have their constructors hidden: only the
        type name is exported, not the constructors (encapsulation). *)
     let proof_cap_type_keys = List.map fst inner_env.proof_caps in
+    (* A public type this module declares under an identity of its own
+       because its short name is a base type's (`type Result` in `mod Inner`)
+       is not exported under the BARE name: in the enclosing module a bare
+       `Result` still means the builtin (the lexical rule of
+       [Typecheck_nominal]), and the bare key carried the user type's arity
+       over the builtin's.  [inner_env] never registered it ([add_decl_type]);
+       the bare key there is the base type's, inherited, and needs no export. *)
+    let shadows_base_bare k =
+      StrMap.mem k env.types
+      && List.exists (function
+          | Ast.DType (_, n, _, _, _) | Ast.DAlwaysLinearType (_, n, _, _, _) ->
+            n.Ast.txt = k
+            && Typecheck_nominal.shadows_base (Typecheck_nominal.decl_identity n)
+          | _ -> false) decls in
     let new_types = StrMap.filter (fun k _ ->
-        is_pub k || List.mem k proof_cap_type_keys
+        (is_pub k || List.mem k proof_cap_type_keys) && not (shadows_base_bare k)
       ) inner_env.types in
     (* A QUALIFIED key this module merely inherited from the enclosing scope
        (still the very list the outer env holds) is not this module's to
@@ -12817,7 +12827,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
           ) env inner_decls
       | Ast.DType (_, name, params, typedef, _)
       | Ast.DAlwaysLinearType (_, name, params, typedef, _) ->
-        let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
+        let env1 = { env with types = add_decl_type name (List.length params) env.types } in
         (match typedef with
          | Ast.TDVariant variants ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
@@ -13239,7 +13249,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
           ) env inner_decls
       | Ast.DType (_, name, params, typedef, _)
       | Ast.DAlwaysLinearType (_, name, params, typedef, _) ->
-        let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
+        let env1 = { env with types = add_decl_type name (List.length params) env.types } in
         (match typedef with
          | Ast.TDVariant variants ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in

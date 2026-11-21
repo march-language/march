@@ -2123,6 +2123,11 @@ __attribute__((weak)) void march_signal_drain(void) { }
  * failing to link. */
 __attribute__((weak)) void march_incrc(void *p) { (void)p; }
 
+/* march_decrc lives in march_runtime.c (STRONG); the same standalone-unit-test
+ * fallback, for march_cancel_token_unref. */
+void march_decrc(void *p);
+__attribute__((weak)) void march_decrc(void *p) { (void)p; }
+
 /* Releases one reference to an authority slot value (march_runtime.c,
  * STRONG); the same standalone-unit-test fallback as above. */
 __attribute__((weak)) void march_cap_release(void *layers) { (void)layers; }
@@ -5329,16 +5334,8 @@ void march_sched_preempt_stop(void) {
 
 /* ── Phase 5B: cancellation tokens ──────────────────────────────────── */
 
-march_cancel_token *march_cancel_token_new(void) {
-    march_cancel_token *tok = (march_cancel_token *)malloc(sizeof(march_cancel_token));
-    if (!tok) {
-        fputs("march_cancel_token: OOM\n", stderr);
-        march_abort(__func__);
-    }
-    atomic_init(&tok->cancelled, 0);
-    atomic_init(&tok->refcount, 1);
-    return tok;
-}
+/* march_cancel_token_new lives in march_runtime.c: the token is a
+ * march_alloc'd cell (see the struct's comment in march_scheduler.h). */
 
 void march_cancel_token_cancel(march_cancel_token *tok) {
     if (!tok) return;
@@ -5352,15 +5349,12 @@ int64_t march_cancel_token_is_cancelled(march_cancel_token *tok) {
 
 void march_cancel_token_ref(march_cancel_token *tok) {
     if (!tok) return;
-    atomic_fetch_add_explicit(&tok->refcount, 1, memory_order_relaxed);
+    march_incrc(tok);
 }
 
 void march_cancel_token_unref(march_cancel_token *tok) {
     if (!tok) return;
-    int prev = atomic_fetch_sub_explicit(&tok->refcount, 1, memory_order_acq_rel);
-    if (prev == 1) {
-        free(tok);
-    }
+    march_decrc(tok);
 }
 
 /*
@@ -5385,15 +5379,16 @@ static void cancel_trampoline(void *raw) {
     free(w);   /* wrapper no longer needed after we've unpacked it */
 
     /* Check immediately before starting — the scope may have already been
-     * cancelled between spawn time and first execution. */
-    if (tok && march_cancel_token_is_cancelled(tok)) {
-        march_cancel_token_unref(tok);
-        return;
-    }
+     * cancelled between spawn time and first execution.  This is the token's
+     * only reader, so the wrap's reference is released right here: it used
+     * to be released after user_fn returned, but the compiled user_fn
+     * (march_thunk_trampoline) ends in march_sched_exit() and never returns,
+     * so every task_spawn_with_cancel leaked one reference to its token. */
+    int cancelled = tok && march_cancel_token_is_cancelled(tok);
+    if (tok) march_cancel_token_unref(tok);
+    if (cancelled) return;
 
     user_fn(user_arg);
-
-    if (tok) march_cancel_token_unref(tok);
 }
 
 march_proc *march_sched_spawn_with_cancel(void (*fn)(void *), void *arg,
