@@ -87,8 +87,54 @@ static inline int march_mi_in_first_arena(const void *p) {
         && a <  atomic_load_explicit(&march_mi_arena_hi, memory_order_relaxed);
 }
 
+/* The arenas after the first, learnt the same way.  A heap past 1 GiB (a
+ * 500,000-citizen Ur city holds ~4.5 GB) puts most objects in arenas 2..N,
+ * where every free used to pay mi_is_in_heap_region: measured, 23% of the
+ * simulation worker.  A slot is claimed with fetch_add and its bounds stored
+ * relaxed; until both stores land it reads as an empty range (the same
+ * argument as for the first arena), so a reader only ever falls through to the
+ * full test.  Arenas are never unmapped, so a slot never goes stale; a
+ * duplicate (two threads learning one arena) is harmless; past the table's
+ * end the full test still answers. */
+#define MARCH_MI_ARENA_SLOTS 32
+static _Atomic uintptr_t march_mi_more_lo[MARCH_MI_ARENA_SLOTS] = {
+    [0 ... MARCH_MI_ARENA_SLOTS - 1] = UINTPTR_MAX };
+static _Atomic uintptr_t march_mi_more_hi[MARCH_MI_ARENA_SLOTS];
+static _Atomic int march_mi_more_n = 0;
+
+static inline int march_mi_in_known_arena(const void *p) {
+    uintptr_t a = (uintptr_t)p;
+    int n = atomic_load_explicit(&march_mi_more_n, memory_order_relaxed);
+    if (n > MARCH_MI_ARENA_SLOTS) n = MARCH_MI_ARENA_SLOTS;
+    for (int i = 0; i < n; i++)
+        if (a >= atomic_load_explicit(&march_mi_more_lo[i], memory_order_relaxed)
+            && a < atomic_load_explicit(&march_mi_more_hi[i], memory_order_relaxed))
+            return 1;
+    return 0;
+}
+
+static void march_mi_learn_arena(const void *p) {
+    uintptr_t a = (uintptr_t)p;
+    for (int id = 2; id <= 1 + MARCH_MI_ARENA_SLOTS * 4; id++) {
+        size_t sz = 0;
+        void *start = mi_arena_area(id, &sz);
+        if (!start) continue;
+        if (a >= (uintptr_t)start && a < (uintptr_t)start + sz) {
+            int slot = atomic_fetch_add_explicit(&march_mi_more_n, 1, memory_order_relaxed);
+            if (slot < MARCH_MI_ARENA_SLOTS) {
+                atomic_store_explicit(&march_mi_more_lo[slot], (uintptr_t)start, memory_order_relaxed);
+                atomic_store_explicit(&march_mi_more_hi[slot], (uintptr_t)start + sz, memory_order_relaxed);
+            } else {
+                atomic_store_explicit(&march_mi_more_n, MARCH_MI_ARENA_SLOTS, memory_order_relaxed);
+            }
+            return;
+        }
+    }
+}
+
 __attribute__((noinline))
 static int march_mi_owns_slow(const void *p) {
+    if (march_mi_in_known_arena(p)) return 1;
     if (!mi_is_in_heap_region(p)) return 0;
     if (atomic_load_explicit(&march_mi_arena_hi, memory_order_relaxed) == 0) {
         size_t sz = 0;
@@ -98,6 +144,9 @@ static int march_mi_owns_slow(const void *p) {
             atomic_store_explicit(&march_mi_arena_hi, (uintptr_t)start + sz, memory_order_relaxed);
         }
     }
+    if (!march_mi_in_first_arena(p)
+        && atomic_load_explicit(&march_mi_more_n, memory_order_relaxed) < MARCH_MI_ARENA_SLOTS)
+        march_mi_learn_arena(p);
     return 1;
 }
 
