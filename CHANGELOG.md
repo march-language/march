@@ -1299,6 +1299,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A compiled `Csv` open failure is `Err(FileError("<path>: <reason>"))`, as documented.**
+  When the file could not be opened, `Csv.read_all`, `read_csv`, `each_row` and
+  `each_row_with_header` returned the bare reason in a compiled binary (`Ok(Err(No such file or
+  directory))`), so a `Csv.FileError(m)` arm never matched; the interpreter was right. The
+  compiled error is now the same `FileError` value, path included.
 - **A function named like a stdlib loop no longer leaks its capabilities into the stdlib.**
   A local `fn go(...)` (or any local `fn`) was not in scope for the rest of its block in the
   compiler's capability bookkeeping, so the stdlib's local `fn go` loops were recorded as calls

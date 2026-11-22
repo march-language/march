@@ -1320,6 +1320,33 @@ let test_repl_vault_eq_order () =
       [ "true"; "true"; "true"; "true"; "false"; "true" ] answers
   end
 
+(* specs/progress/2026-11-11-repl-eq-on-option-list-result-rejected.md: the
+   todo's own repro.  `==` on Option, List and Result literals failed fragment
+   typechecking ("does not implement interface Eq") until the REPL registered
+   the stdlib impls (#1294).  The Vault session above has no Result and no
+   bare-literal Option; this pins all three plus the tuple control, in order. *)
+let stdlib_eq_session =
+  [ "Some(1) == Some(1)"; "[1] == [1]"; "Ok(1) == Ok(1)"; "(1, 2) == (1, 2)";
+    "Some(1) == None"; "[1] == [2]"; "Ok(1) == Err(1)" ]
+
+let test_repl_stdlib_eq_literals () =
+  if not (clang_available ()) then ()
+  else begin
+    let (out, _) = run_repl_session ~env_prefix:"" stdlib_eq_session in
+    Alcotest.(check bool)
+      ("no stdlib Eq impl unknown to the REPL; output:\n" ^ out) false
+      (contains ~needle:"does not implement interface" out);
+    let answers = List.filter_map (fun l ->
+        let l = String.trim l in
+        match String.index_opt l '=' with
+        | Some i when String.length l > i + 2 ->
+          let v = String.trim (String.sub l (i + 1) (String.length l - i - 1)) in
+          if v = "true" || v = "false" then Some v else None
+        | _ -> None) (String.split_on_char '\n' out) in
+    Alcotest.(check (list string)) ("== on Option/List/Result literals; output:\n" ^ out)
+      [ "true"; "true"; "true"; "true"; "false"; "false"; "false" ] answers
+  end
+
 (* OCaml's [%S] spelled every byte >= 0x80 as a decimal escape, in both
    REPLs: "café" printed as "caf\195\169". *)
 let non_ascii_session = [ {|"café"|}; {|["naïve", "a\tb"]|} ]
@@ -1626,6 +1653,8 @@ let () =
         test_repl_vault_eq_clang;
       Alcotest.test_case "== answers stay right across a session (JIT)" `Slow
         test_repl_vault_eq_order;
+      Alcotest.test_case "== on Option/List/Result literals typechecks (JIT)" `Slow
+        test_repl_stdlib_eq_literals;
       Alcotest.test_case "non-ASCII strings print as text (JIT)" `Slow
         test_repl_non_ascii_jit;
       Alcotest.test_case "non-ASCII strings print as text (interpreter)" `Quick
