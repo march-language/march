@@ -414,12 +414,12 @@ let project ?(grants = []) () =
   if lines <> [] then ignore (grants_file d lines);
   d
 
-let check_in ?(json = false) ~libs d file : int * string =
+let check_in ?(json = false) ?(env = "") ~libs d file : int * string =
   let out = Filename.concat d "check.out" in
   let grants = Filename.concat d "dep-grants" in
   let cmd =
-    Printf.sprintf "cd %s && HOME=%s MARCH_LIB_PATH=%s %s %s %s %s > %s 2>&1"
-      (Filename.quote d) (Filename.quote (Lazy.force private_home))
+    Printf.sprintf "cd %s && %s HOME=%s MARCH_LIB_PATH=%s %s %s %s %s > %s 2>&1"
+      (Filename.quote d) env (Filename.quote (Lazy.force private_home))
       (Filename.quote (String.concat ":" libs))
       (if Sys.file_exists grants then "MARCH_DEP_GRANTS=" ^ Filename.quote grants else "")
       (Filename.quote (main_exe ())) (if json then "--check-json" else "--check")
@@ -537,6 +537,61 @@ let test_grant_change_misses_cache () =
         ~mentions:[ "granted at forge.toml:3" ]
         (check_in ~libs:[ s ] d (app "kind")))
 
+(* Fix round 1: a reference spelled through an `import` or an `alias`, a
+   spawn of a dependency's actor (by its bare name through an import, and
+   qualified), and an interface impl of a dependency type, reached only
+   through a call of its method. *)
+let test_import_and_alias () =
+  with_reset (fun () ->
+      let s = dep "shout" in
+      let d = project ~grants:[ ("shout", s, "()") ] () in
+      expect_fail "`import Shout` then `log(..)`" ~code:"dep_grant_exceeded"
+        ~mentions:[ "`Shout.log` needs `IO.Console`"; "Main.main \xe2\x86\x92 Shout.log" ]
+        (check_in ~libs:[ s ] d (app "import_call"));
+      expect_fail "`alias Shout, as: S` then `S.log(..)`" ~code:"dep_grant_exceeded"
+        ~mentions:[ "`Shout.log` needs `IO.Console`"; "Main.main \xe2\x86\x92 Shout.log" ]
+        (check_in ~libs:[ s ] d (app "alias_call")))
+
+let test_spawn_actor () =
+  with_reset (fun () ->
+      let p = dep "pinger" in
+      let d = project ~grants:[ ("pinger", p, "()") ] () in
+      expect_fail "spawn(Worker) through `import Pinger`" ~code:"dep_grant_exceeded"
+        ~mentions:[ "needs `IO.Console`"; "Main.main \xe2\x86\x92 Worker"; "spawn(Worker)" ]
+        (check_in ~libs:[ p ] d (app "spawn_import"));
+      expect_fail "spawn(Pinger.Worker)" ~code:"dep_grant_exceeded"
+        ~mentions:[ "needs `IO.Console`"; "Main.main \xe2\x86\x92 Pinger.Worker" ]
+        (check_in ~libs:[ p ] d (app "spawn_qualified")))
+
+let test_impl_of_dep_type () =
+  with_reset (fun () ->
+      let l = dep "loud" in
+      let d = project ~grants:[ ("loud", l, "()") ] () in
+      (* Nothing outside the package names a method: its impls are not
+         reached, though the printing one is beyond the grant. *)
+      expect_pass "a dep with impls the app never calls" (check_in ~libs:[ l ] d (app "show_none"));
+      expect_pass "`show` of a dep type (a pure impl)" (check_in ~libs:[ l ] d (app "show_call"));
+      let code, out = check_in ~libs:[ l ] d (app "announce_call") in
+      expect_fail "a call of the dep's printing method" ~code:"dep_grant_exceeded"
+        ~mentions:[ "`announce` in `impl Announce(Box)` needs `IO.Console`";
+                    "Main.main \xe2\x86\x92 Loud.announce \xe2\x86\x92 announce in impl Announce(Box)";
+                    "println(announce(Loud.make()))" ]
+        (code, out);
+      if has_sub out "$" then Alcotest.failf "a mangled impl name leaked:\n%s" out)
+
+(* Decision 7's input for Task 4: within the grant -> proven; beyond it, or
+   calling a function value of untraceable origin -> not. *)
+let test_proven () =
+  with_reset (fun () ->
+      let m = dep "mixed" in
+      let d = project ~grants:[ ("mixed", m, "IO.Clock") ] () in
+      let code, out = check_in ~env:"MARCH_DUMP_DEP_PROVEN=1" ~libs:[ m ] d (app "mixed") in
+      expect_pass "the mixed dep, only `tick` reached" (code, out);
+      let proven k = has_sub out ("dep-proven " ^ k ^ "\n") in
+      if not (proven "Mixed.tick") then Alcotest.failf "Mixed.tick not proven:\n%s" out;
+      if proven "Mixed.shout" then Alcotest.failf "Mixed.shout (IO.Console) proven:\n%s" out;
+      if proven "Mixed.first_of" then Alcotest.failf "Mixed.first_of (unknown) proven:\n%s" out)
+
 let tests =
   [ ( "dep_grants",
       [ Alcotest.test_case "load_none" `Quick test_load_none;
@@ -565,4 +620,8 @@ let tests =
         Alcotest.test_case "callback charged to the app" `Quick test_callback_charged_to_app;
         Alcotest.test_case "grant = []" `Quick test_grant_nothing;
         Alcotest.test_case "root off the library path, JSON" `Quick test_root_off_lib_path_json;
-        Alcotest.test_case "a grant change misses the cache" `Quick test_grant_change_misses_cache ] ) ]
+        Alcotest.test_case "a grant change misses the cache" `Quick test_grant_change_misses_cache;
+        Alcotest.test_case "import and alias spellings" `Quick test_import_and_alias;
+        Alcotest.test_case "a dep actor spawned" `Quick test_spawn_actor;
+        Alcotest.test_case "impls of a dep type" `Quick test_impl_of_dep_type;
+        Alcotest.test_case "proven" `Quick test_proven ] ) ]

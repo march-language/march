@@ -1,0 +1,8 @@
+mod Main do
+  needs IO.Console
+
+  fn main() do
+    let pid = spawn(Pinger.Worker)
+    send(pid, Pinger.Ping())
+  end
+end

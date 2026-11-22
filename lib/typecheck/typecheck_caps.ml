@@ -796,6 +796,19 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         (March_caps.Dep_grants.package_of_file mod_name.Ast.span.Ast.file)
   in
   Option.iter (fun p -> Hashtbl.replace env.grant_module_pkgs cap_qname_prefix p) grant_pkg;
+  (* ... and, under grants, every module's imports and aliases: a call from
+     outside a granted package may name its function through either. *)
+  if March_caps.Dep_grants.active () <> [] then begin
+    let path ns = String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) ns) in
+    let uses = List.filter_map (function
+        | Ast.DUse (ud, _) -> Some (path ud.Ast.use_path) | _ -> None) decls in
+    let aliases = List.filter_map (function
+        | Ast.DAlias (ad, _) -> Some (ad.Ast.alias_name.Ast.txt, path ad.Ast.alias_path)
+        | _ -> None) decls in
+    let u0, a0 =
+      Option.value ~default:([], []) (Hashtbl.find_opt env.grant_module_scopes cap_qname_prefix) in
+    Hashtbl.replace env.grant_module_scopes cap_qname_prefix (u0 @ uses, a0 @ aliases)
+  end;
   let declared_needs = List.concat_map (function
     | Ast.DNeeds (caps, _) -> List.map (fun (p, _) -> cap_path_of_names p) caps
     | _ -> []

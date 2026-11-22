@@ -904,6 +904,12 @@ type env = {
       package.  Recorded by [check_module_needs]; a key belongs to the
       package of its longest dotted prefix found here.  Empty without a
       grants file. *)
+  grant_module_scopes : (string, string list * (string * string) list) Hashtbl.t;
+  (** Under a grants file: each module's (capability-key prefix, [""] for
+      the entry module) imported module paths and its aliases (short name,
+      module path), so [Typecheck.check_dep_grants] resolves a reference
+      spelled through an `import` or an `alias` to the package function it
+      names.  Empty without a grants file. *)
   local_mods : string list StrMap.t;
   (** In-file nested modules → their PRIVATE value/function member names.
       Populated by the [Ast.DMod] export step.  A same-file qualified reference
@@ -1017,6 +1023,7 @@ let make_env errors type_map = {
   restrict_owners = Hashtbl.create 4;
   grant_owners = Hashtbl.create 1;
   grant_module_pkgs = Hashtbl.create 1;
+  grant_module_scopes = Hashtbl.create 1;
   local_mods = StrMap.empty;
   offer_conts = ref [];
   offer_labels = [];

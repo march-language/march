@@ -1,0 +1,8 @@
+mod Main do
+  needs IO.Console
+  alias Shout, as: S
+
+  fn main() do
+    S.log("hello")
+  end
+end

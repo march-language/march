@@ -1,0 +1,14 @@
+-- An actor whose handler prints.
+mod Pinger do
+  needs IO.Console
+
+  actor Worker do
+    state { n : Int }
+    init { n: 0 }
+
+    on Ping() do
+      println("ping")
+      { n: state.n + 1 }
+    end
+  end
+end

@@ -1,0 +1,25 @@
+-- A dependency type with two impls: `Show` (pure, as the built-in
+-- interface's `needs ()` requires) and its own `Announce`, which prints.
+-- Either is reached only through a call of its method.
+mod Loud do
+  needs IO.Console
+
+  type Box = Box(Int)
+
+  interface Announce(a) do
+    fn announce : a -> String
+  end
+
+  impl Show(Box) do
+    fn show(_b) do "box" end
+  end
+
+  impl Announce(Box) do
+    fn announce(_b) do
+      println("announcing a box")
+      "box"
+    end
+  end
+
+  fn make() do Box(1) end
+end

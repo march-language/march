@@ -312,6 +312,7 @@ type env = {
   restrict_owners : (string, restrict_owner) Hashtbl.t;
   grant_owners : (string, grant_owner) Hashtbl.t;
   grant_module_pkgs : (string, string) Hashtbl.t;
+  grant_module_scopes : (string, string list * (string * string) list) Hashtbl.t;
   local_mods : string list StrMap.t;
   offer_conts :
     (Typecheck_types.session_ty ref *

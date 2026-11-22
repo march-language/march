@@ -11245,14 +11245,118 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
       in
       up (if pre = "" then "" else String.sub pre 0 (String.length pre - 1))
     in
-    let resolve owner r = March_caps.Cap_rows.resolve_ref ~scopes:env.fn_scopes rows owner r in
+    (* A reference as the owner's module spells it: the owner's prefix and
+       the raw name first ([Cap_rows.resolve_ref], as the rows resolve it),
+       then through the `import`s and `alias`es of the owner's module and its
+       enclosing modules (`import Shout` then `log(..)`; `alias Shout, as: S`
+       then `S.log(..)`; `use A.B` then `B.f(..)`), the candidates Check 4
+       tries for an import. *)
+    let resolve owner w =
+      match March_caps.Cap_rows.resolve_ref ~scopes:env.fn_scopes rows owner w with
+      | Some r -> Some r
+      | None ->
+        let known k = if Hashtbl.mem rows k then Some k else None in
+        let pre = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes owner in
+        let rec scopes p =
+          p :: (if p = "" then []
+                else match String.rindex_opt p '.' with
+                  | Some i -> scopes (String.sub p 0 i)
+                  | None -> scopes "")
+        in
+        let head, tail =
+          match String.index_opt w '.' with
+          | Some i -> (String.sub w 0 i, Some (String.sub w (i + 1) (String.length w - i - 1)))
+          | None -> (w, None)
+        in
+        let last p = match String.rindex_opt p '.' with
+          | Some i -> String.sub p (i + 1) (String.length p - i - 1) | None -> p in
+        List.find_map (fun m ->
+            let uses, aliases =
+              Option.value ~default:([], []) (Hashtbl.find_opt env.grant_module_scopes m) in
+            let by_alias =
+              List.find_map (fun (short, long) ->
+                  if short <> head then None
+                  else match tail with
+                    | Some t -> (
+                      match known (long ^ "." ^ t) with
+                      | Some k -> Some k
+                      | None ->
+                        March_caps.Cap_rows.resolve_ref ~scopes:env.fn_scopes rows owner
+                          (long ^ "." ^ t))
+                    | None -> known long)
+                aliases
+            in
+            match by_alias with
+            | Some k -> Some k
+            | None ->
+              List.find_map (fun i ->
+                  match known (i ^ "." ^ w) with
+                  | Some k -> Some k
+                  | None -> (
+                    match tail with
+                    | Some t when last i = head -> known (i ^ "." ^ t)
+                    | _ -> None))
+                uses)
+          (scopes (if pre = "" then "" else String.sub pre 0 (String.length pre - 1)))
+    in
     let refs_of k = Option.value ~default:[] (Hashtbl.find_opt env.fn_refs k) in
     let bodies_of k = Option.value ~default:[] (Hashtbl.find_opt env.fn_row_bodies k) in
     (* A key as a reader knows it: the entry module's functions are keyed
        bare (it is unwrapped), so they get its name back. *)
-    let shown k =
-      if String.contains k '.' || Hashtbl.mem env.stdlib_fns k then k
+    (* A body-less node whose every edge leads into one package (an actor's
+       bare-name node, whose edges are its handlers) is that package's, not
+       code outside it: a spawn of the actor by its bare name is the use. *)
+    let node_pkg : (string, string) Hashtbl.t = Hashtbl.create 8 in
+    List.iter (fun k ->
+        if pkg_of_key k = None && not (Hashtbl.mem env.fn_row_bodies k) then
+          match List.filter_map (resolve k) (refs_of k) with
+          | [] -> ()
+          | t :: ts -> (
+            match pkg_of_key t with
+            | Some p when List.for_all (fun t' -> pkg_of_key t' = Some p) ts ->
+              Hashtbl.replace node_pkg k p
+            | _ -> ()))
+      (Hashtbl.fold (fun k _ acc -> k :: acc) env.fn_refs []);
+    let pkg_of_key k =
+      match Hashtbl.find_opt node_pkg k with Some p -> Some p | None -> pkg_of_key k
+    in
+    let shown_plain k =
+      if String.contains k '.' || Hashtbl.mem env.stdlib_fns k
+         || Hashtbl.mem node_pkg k then k
       else entry_mod.Ast.txt ^ "." ^ k
+    in
+    (* An impl method or interface default body is keyed by its mangled name
+       ([<Mod>.<Iface>$<Ty>.<m>]); a reader knows it as [check_fn_bounds]
+       words it.  [Some (m, Some (iface, ty))] for an impl, [Some (m, None)]
+       with the interface for a default body. *)
+    let impl_of k : (string * string * string option) option =
+      match String.index_opt k '$' with
+      | None -> None
+      | Some d -> (
+        match String.index_from_opt k d '.' with
+        | None -> None (* an arity-mangled [f$1] *)
+        | Some dot ->
+          let before = String.sub k 0 d in
+          let iface = match String.rindex_opt before '.' with
+            | Some i -> String.sub before (i + 1) (String.length before - i - 1) | None -> before in
+          let ty = String.sub k (d + 1) (dot - d - 1) in
+          let m = String.sub k (dot + 1) (String.length k - dot - 1) in
+          if String.contains m '.' then None
+          else Some (m, iface, if ty = "default" then None else Some ty))
+    in
+    (* In a chain (inside one pair of backticks). *)
+    let shown k =
+      match impl_of k with
+      | Some (m, iface, Some ty) -> Printf.sprintf "%s in impl %s(%s)" m iface ty
+      | Some (m, iface, None) -> Printf.sprintf "the default %s of interface %s" m iface
+      | None -> shown_plain k
+    in
+    (* As the subject of a sentence, with its own backticks. *)
+    let subject k =
+      match impl_of k with
+      | Some (m, iface, Some ty) -> Printf.sprintf "`%s` in `impl %s(%s)`" m iface ty
+      | Some (m, iface, None) -> Printf.sprintf "the default `%s` of interface `%s`" m iface
+      | None -> Printf.sprintf "`%s`" (shown_plain k)
     in
     (* Where [owner]'s body uses the name [w]: its first call, else its first
        value use (a spawn is a value use of the actor's name). *)
@@ -11312,27 +11416,55 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
     let outside_keys =
       List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) env.fn_refs [])
     in
+    (* A package's dispatch nodes (an interface method's bare name in the
+       module that holds the impls: no body, every edge into an impl), by the
+       method name.  A bare call of that name outside the package may
+       dispatch to one of its impls (the type is not known here), so it is a
+       use of the node; the node itself, and the impls behind it, are not a
+       use by anyone. *)
+    let dispatch_nodes : (string, string * string) Hashtbl.t = Hashtbl.create 8 in
+    List.iter (fun k ->
+        match pkg_of_key k with
+        | Some p when not (Hashtbl.mem env.fn_row_bodies k) ->
+          let targets = List.filter_map (resolve k) (refs_of k) in
+          if targets <> [] && List.for_all (fun t -> impl_of t <> None) targets then
+            let leaf = match String.rindex_opt k '.' with
+              | Some i -> String.sub k (i + 1) (String.length k - i - 1) | None -> k in
+            Hashtbl.add dispatch_nodes leaf (k, p)
+        | _ -> ())
+      outside_keys;
     List.iter (fun k ->
         let pk = pkg_of_key k in
-        (* A dispatch node owns no body: an edge from it into an impl is a
-           use by whatever dispatches, wherever the node is keyed. *)
-        let dispatch = not (Hashtbl.mem env.fn_row_bodies k) in
+        let add p r w =
+          match List.assoc_opt p owners with
+          | None -> ()
+          | Some go ->
+            let sp, use =
+              match use_span k w with
+              | Some x -> x
+              | None -> (Option.value ~default:Ast.dummy_span (site_of r), Ref_value)
+            in
+            go.go_refs <- (r, sp, k, use) :: go.go_refs
+        in
         List.iter (fun w ->
-            match resolve k w with
-            | None -> ()
-            | Some r -> (
-              match pkg_of_key r with
-              | Some p when pk <> Some p || (dispatch && String.contains r '$') -> (
-                match List.assoc_opt p owners with
-                | None -> ()
-                | Some go ->
-                  let sp, use =
-                    match use_span k w with
-                    | Some x -> x
-                    | None -> (Option.value ~default:Ast.dummy_span (site_of r), Ref_value)
-                  in
-                  go.go_refs <- (r, sp, k, use) :: go.go_refs)
-              | _ -> ()))
+            let resolved = resolve k w in
+            (match resolved with
+             | Some r -> (
+               match pkg_of_key r with
+               | Some p when pk <> Some p -> add p r w
+               | _ -> ())
+             | None -> ());
+            (* A bare name that is no plain function here: maybe a method
+               dispatched to a package's impl. *)
+            let plain_fn =
+              match resolved with
+              | Some r -> Hashtbl.mem env.fn_row_bodies r
+              | None -> false
+            in
+            if not (String.contains w '.') && not plain_fn then
+              List.iter (fun (d, p) ->
+                  if pk <> Some p && resolved <> Some d then add p d w)
+                (Hashtbl.find_all dispatch_nodes w))
           (refs_of k))
       outside_keys;
     (* ── Judge each grant ── *)
@@ -11385,10 +11517,11 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
                         | None -> [])
                     in
                     let chain = chain_head r caller @ List.map shown path in
-                    let holder = List.nth chain (List.length chain - 1) in
+                    let holder =
+                      subject (match List.rev path with h :: _ -> h | [] -> r) in
                     let span = if sp = Ast.dummy_span then manifest_span g else sp in
                     report ~code:Err.Code.dep_grant_exceeded ~span ~notes:(notes (entry_of r caller))
-                      (Printf.sprintf "`%s` is granted `%s`, but `%s` needs `%s` (`%s`)."
+                      (Printf.sprintf "`%s` is granted `%s`, but %s needs `%s` (`%s`)."
                          pkg g.G.g_text holder c (render_cap_chain chain))
                   end)
                 (List.sort_uniq String.compare row.March_caps.Cap_rows.caps))
@@ -11419,8 +11552,8 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
                           let span = if sp = Ast.dummy_span then manifest_span g else sp in
                           report ~code:Err.Code.dep_grant_scope ~span
                             ~notes:(notes (entry_of r caller))
-                            (Printf.sprintf "`%s` is granted `%s`, but `%s` %s (`%s`)."
-                               pkg g.G.g_text (shown f.fn) (Scoped_literal_check.describe f)
+                            (Printf.sprintf "`%s` is granted `%s`, but %s %s (`%s`)."
+                               pkg g.G.g_text (subject f.fn) (Scoped_literal_check.describe f)
                                (render_cap_chain chain))
                         end)
                     [ (k, List.map snd (bodies_of k)) ];
@@ -11458,7 +11591,11 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
              && not (March_caps.Cap_rows.reaches_unknown ~scopes:env.fn_scopes ~known:rows
                        ~refs:env.fn_refs ~seed_unknown k)
           then Hashtbl.replace G.proven k ())
-      rows
+      rows;
+    (* For the tests (and Task 4's reader): the proven keys, one per line. *)
+    if Sys.getenv_opt "MARCH_DUMP_DEP_PROVEN" = Some "1" then
+      List.iter (fun k -> Printf.eprintf "dep-proven %s\n" k)
+        (List.sort compare (Hashtbl.fold (fun k () acc -> k :: acc) G.proven []))
 
 (* ── How a local name was bound, and the scope in effect where it was ────
    The runner's body argument is whatever VALUE flows into it, not the

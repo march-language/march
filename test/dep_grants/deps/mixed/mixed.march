@@ -1,0 +1,16 @@
+-- One function within an `IO.Clock` grant, one past it, one that calls a
+-- function value of untraceable origin.
+mod Mixed do
+  needs IO.Clock, IO.Console
+
+  fn tick() do System.now_ms() end
+
+  fn shout() do println("loud") end
+
+  fn first_of(fs) do
+    match List.head(fs) do
+      Some(f) -> f(1)
+      None -> 0
+    end
+  end
+end

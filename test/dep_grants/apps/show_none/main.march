@@ -1,0 +1,5 @@
+mod Main do
+  fn main() do
+    ()
+  end
+end
