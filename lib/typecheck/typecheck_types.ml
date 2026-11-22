@@ -128,12 +128,16 @@ and tvar =
 
 (** Lightweight type-class constraints.
     [CNum t] asserts t must be Int or Float (arithmetic).
+    [CAdd t] asserts t must be Int, Float or Scope: [+] only, since [+] on
+    two [Scope]s is their union (ocap phase 5, decision 4).  It defaults to
+    Int and reports a String exactly as [CNum] does.
     [COrd t] asserts t must be Int, Float, or String (ordered).
     [CInterface (name, t)] asserts t must implement interface [name].
     [CADTBound (adt, t)] asserts t must be a constructor of ADT named [adt].
     [CTNatBound t] asserts t must be a type-level natural number (TNat). *)
 type constraint_ =
   | CNum of ty
+  | CAdd of ty
   | COrd of ty
   | CInterface of string * ty
   | CADTBound of string * ty
@@ -466,6 +470,7 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.ERecordUpdate (_, _, sp) -> sp
   | Ast.EField (_, _, sp)       -> sp
   | Ast.EIf   (_, _, _, sp)     -> sp
+  | Ast.ERestrict (_, _, sp)    -> sp
   | Ast.ECond (_, sp)           -> sp
   | Ast.EPipe (_, _, sp)        -> sp
   | Ast.EAnnot (_, _, sp)       -> sp
@@ -562,6 +567,8 @@ let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
     free_vars_expr bound base @
     List.concat_map (fun (_, ex) -> free_vars_expr bound ex) fields
   | Ast.EField (ex, _, _) -> free_vars_expr bound ex
+  | Ast.ERestrict (es, b, _) ->
+    List.concat_map (free_vars_expr bound) (es @ [ b ])
   | Ast.EIf (c, t, f, _) ->
     free_vars_expr bound c @ free_vars_expr bound t @ free_vars_expr bound f
   | Ast.ECond (arms, _) ->
@@ -593,6 +600,15 @@ and free_vars_block (bound : string list) (es : Ast.expr list) : string list =
     let used_in_rhs = free_vars_expr bound b.Ast.bind_expr in
     let pat_bound = free_vars_pattern b.Ast.bind_pat in
     used_in_rhs @ free_vars_block (pat_bound @ bound) rest
+  (* A local `fn go(...) do ... end` in a block is in scope for the rest of
+     the block, as a `let` is.  Without this, the stdlib's many local `fn go`
+     loops recorded their calls as references to whatever TOP-LEVEL `go` the
+     program declared, and [record_fn_refs] charged that function's
+     capabilities to every caller of the loop: `println` and every helper
+     reaching a stdlib loop picked up a user `go`'s `IO.FileRead`
+     (ocap phase 5 final review F1). *)
+  | (Ast.ELetFn (name, _, _, _, _) as e) :: rest ->
+    free_vars_expr bound e @ free_vars_block (name.txt :: bound) rest
   | e :: rest ->
     free_vars_expr bound e @ free_vars_block bound rest
 

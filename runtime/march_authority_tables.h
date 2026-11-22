@@ -66,7 +66,7 @@ static const struct { const char *kind; int len; } march_auth_name_kinds[] = {
 #define MARCH_AUTH_TID_LIST (-220805026) /* List */
 #define MARCH_AUTH_TID_RESULT (-273346629) /* Result */
 #define MARCH_AUTH_TID_LAYER (-184861742) /* Authority.Layer */
-#define MARCH_AUTH_TID_SCOPE (-81021053) /* Authority.Scope */
+#define MARCH_AUTH_TID_SCOPE (-539569765) /* Authority.CapEntry */
 #define MARCH_AUTH_TID_ARG (-87892741) /* Authority.Arg */
 #define MARCH_AUTH_TID_LIMIT (-546513735) /* CapLimit */
 #define MARCH_AUTH_TID_CAPERR (-440949316) /* CapError */

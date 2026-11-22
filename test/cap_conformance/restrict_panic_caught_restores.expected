@@ -1,0 +1,12 @@
+before: allowed /etc/hosts
+in restrict: IO.FileRead("/etc/hosts") refused by the restrict at restrict_panic_caught_restores.march:28 (IO.Console, IO.FileRead("/srv/"))
+caught
+after restrict: allowed /etc/hosts
+in value: allowed /etc/hosts
+caught, then in restrict: IO.FileRead("/etc/hosts") refused by the restrict at restrict_panic_caught_restores.march:35 (IO.FileRead("/srv/"))
+after value: allowed /etc/hosts
+in restrict: IO.FileRead("/etc/hosts") refused by the restrict at restrict_panic_caught_restores.march:28 (IO.Console, IO.FileRead("/srv/"))
+cleanup: allowed /etc/hosts
+caught
+after cleanup: allowed /etc/hosts
+exit 0

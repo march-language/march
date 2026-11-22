@@ -127,6 +127,16 @@ let check_roundtrip label src =
       (Printf.sprintf "%s: formatted source parses to a DIFFERENT AST:\n%s" label formatted);
   Alcotest.(check string) (label ^ ": idempotent") formatted (fmt formatted)
 
+let test_restrict_roundtrip () =
+  List.iter (fun (label, src) -> check_roundtrip label src) [
+    "restrict literal", "mod T do\nfn f() do\n  restrict IO.Console, IO.FileRead(\"/srv/\") do 1 end\nend\nend";
+    "restrict unit", "mod T do\nfn f() do\n  restrict () do 1 end\nend\nend";
+    "restrict expr", "mod T do\nfn f(tools) do\n  restrict tools do 1 end\nend\nend";
+    "restrict nested", "mod T do\nfn f() do\n  restrict IO.Console do restrict () do 1 end end\nend\nend";
+    "restrict as expression", "mod T do\nfn f() do\n  let x = restrict () do 1 end\n  x\nend\nend";
+    "restrict multi-statement body", "mod T do\nfn f() do\n  restrict () do\n    let a = 1\n    a + 1\n  end\nend\nend";
+  ]
+
 let test_multiline_lambda_let () =
   let src = {|mod Test do
 fn make() : Int -> Int do
@@ -944,6 +954,7 @@ let () =
       test_case "refinement messages" `Quick test_refinement_messages;
       test_case "match expr"      `Quick test_match_expr;
       test_case "if expr"         `Quick test_if_expr;
+      test_case "restrict round-trip" `Quick test_restrict_roundtrip;
       test_case "let binding"     `Quick test_let_binding;
       test_case "pipe chain"      `Quick test_pipe_chain;
       test_case "lambda"          `Quick test_lambda;

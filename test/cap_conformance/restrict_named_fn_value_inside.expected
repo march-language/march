@@ -1,0 +1,5 @@
+allowed
+IO.FileRead("/etc/hosts") refused by the restrict at restrict_named_fn_value_inside.march:18 (IO.FileRead("/srv/"))
+after: IO.FileRead("/etc/hosts") refused by the restrict at restrict_named_fn_value_inside.march:18 (IO.FileRead("/srv/"))
+main: allowed
+exit 0

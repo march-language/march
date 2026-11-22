@@ -253,6 +253,7 @@ let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : b
   | A.ERecordUpdate (r, fs, _) -> free r || List.exists (fun (_, v) -> free v) fs
   | A.EField (r, _, _) -> free r
   | A.EIf (c, t, el, _) -> any [ c; t; el ]
+  | A.ERestrict (es, b, _) -> any (es @ [ b ])
   | A.ECond (arms, _) -> List.exists (fun (c, b) -> free c || free b) arms
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
@@ -544,6 +545,7 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       | A.ERecordUpdate (r, fs, _) -> recur r || List.exists (fun (_, v) -> recur v) fs
       | A.EField (r, _, _) -> recur r
       | A.EIf (c, t, el, _) -> any [ c; t; el ]
+      | A.ERestrict (es, b, _) -> any (es @ [ b ])
       | A.ECond (arms, _) -> List.exists (fun (c, b) -> recur c || recur b) arms
       | A.EPipe (a, b, _) | A.ESend (a, b, _) -> recur a || recur b
       | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
@@ -695,7 +697,7 @@ type check_subject =
 let arg_span (fallback : A.span) : A.expr -> A.span = function
   | A.ELit (_, sp) | A.EApp (_, _, sp) | A.ECon (_, _, sp)
   | A.ETuple (_, sp) | A.ERecord (_, sp) | A.EField (_, _, sp)
-  | A.EIf (_, _, _, sp) | A.EPipe (_, _, sp) | A.EAnnot (_, _, sp)
+  | A.EIf (_, _, _, sp) | A.ERestrict (_, _, sp) | A.EPipe (_, _, sp) | A.EAnnot (_, _, sp)
   | A.EBlock (_, sp) | A.EMatch (_, _, sp) | A.ELam (_, _, sp)
   | A.EAtom (_, _, sp) -> sp
   | A.EVar name -> name.A.span

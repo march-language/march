@@ -12,3 +12,13 @@ What to do: add both forms to the parser and formatter (and the tree-sitter gram
 `IO.Env` a name-kind check against the variable name, and give `IO.Spawn(max(n))` a counter in
 the layer that spawns decrement (shared across the frame's dynamic extent). Keep the three
 policies in step (`test/test_authority_differential.ml`).
+
+**Also a `restrict` budget (added 2026-11-19 by ocap phase 5,
+specs/plans/2026-11-19-ocap-p5-restrict-plan.md, decision 10).** Design §9 lets a `restrict`
+carry a spawn budget (`restrict IO.Spawn(max(4)) do ... end`): the tasks and actors started
+inside the block's dynamic extent share one counter, separate from any outer budget, and a
+spawn past it is refused with `ByRestrict(where)`. Since `IO.Spawn(max(n))` is not in the scope
+language, a `restrict` can only admit or refuse spawning outright. When the form lands, the
+counter belongs to the restrict's layer (`Authority.restrict_layer`), and scope values need it
+too (`IO.Spawn(max(n))` as a literal scope expression; a computed `n` goes through
+`Scope.build`). Add a conformance fixture beside `restrict_task_inherits`.

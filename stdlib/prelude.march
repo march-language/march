@@ -540,4 +540,17 @@ mod Prelude do
   """
   fn inspect(x) do to_string(x) end
 
+
+  -- The refusal of a computed scope (`Scope.build`): the detail names the
+  -- capability and why its argument is not a scope.
+  type ScopeError = ScopeError(String)
+  derive Eq for ScopeError
+  impl Show(ScopeError) do
+    fn show(e) do
+      match e do
+      ScopeError(d) -> d
+      end
+    end
+  end
+
 end

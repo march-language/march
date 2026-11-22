@@ -1,0 +1,11 @@
+exit: 1
+-- CAPABILITY ---------- errors/invalid_cap_scope_2.march
+
+The scope `src/` on `IO.FileRead` is a relative path, so it would name a different directory depending on the working directory at run time. [invalid_cap_scope]
+hint: give an absolute path, one starting with `/`.
+
+3 |     restrict IO.FileRead("src/") do
+                 ^^^^^^^^^^^
+
+
+

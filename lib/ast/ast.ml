@@ -68,6 +68,10 @@ type expr =
       (** Record update: { state with count = state.count + 1 } *)
   | EField of expr * name * span           (** Field access: x.name *)
   | EIf of expr * expr * expr * span       (** if/do/else/end *)
+  | ERestrict of expr list * expr * span
+      (** [restrict e1, ..., en do body end]: entries, body, span of the whole
+          (the [restrict] keyword's start is the span start). Each entry is an
+          ordinary expression; [()] is the empty scope. *)
   | ECond of (expr * expr) list * span     (** match do cond_arm* end — boolean chain *)
   | EPipe of expr * expr * span            (** x |> f *)
   | EAnnot of expr * ty * span             (** Type annotation *)
@@ -666,6 +670,7 @@ let show_expr = function
   | ERecordUpdate _ -> "ERecordUpdate(...)"
   | EField (_, n, _) -> Printf.sprintf "EField(_, %s, _)" n.txt
   | EIf _ -> "EIf(...)"
+  | ERestrict _ -> "ERestrict(...)"
   | ECond _ -> "ECond(...)"
   | EPipe _ -> "EPipe(...)"
   | EAnnot _ -> "EAnnot(...)"

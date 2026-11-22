@@ -1,0 +1,5 @@
+IO.FileRead("/srv/x") refused by the restrict at restrict_unit_admits_nothing.march:30 (()) | IO.Process("HOME") refused by the restrict at restrict_unit_admits_nothing.march:30 (()) | handed in: allowed IO.FileRead
+IO.FileRead("/srv/x") refused by the restrict at restrict_unit_admits_nothing.march:30 (())
+IO.Console("stdout") refused by the restrict at restrict_unit_admits_nothing.march:30 (())
+allowed IO.FileRead
+exit 0

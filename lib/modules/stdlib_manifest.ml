@@ -24,6 +24,7 @@ let stdlib_file_list = [
   "option.march";
   "result.march";
   "list.march";
+  "scope.march";
   "hamt.march";
   "map.march";
   "linear_map.march";

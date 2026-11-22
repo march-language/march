@@ -1,0 +1,52 @@
+-- A function value made outside a restrict block and handed in keeps its
+-- outside authority when the block calls it (design §5, §9: the caller's
+-- authority plays no part), directly or through a helper the block calls,
+-- under a scoped restrict and under an unscoped one (whose frame a runtime
+-- may drop when the block calls the value only through a helper). The block's own check
+-- of the same target is refused, naming the restrict.
+mod RestrictClosureOutsideCalledInside do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Process
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn call_with(f : String -> String, p : String) : String do
+    f(p)
+  end
+
+  fn scoped(f : String -> String, p : String) : String do
+    restrict IO.FileRead("/srv/") do
+      "handed in: " ++ f(p) ++ " | via helper: " ++ call_with(f, p)
+        ++ " | own: " ++ probe("IO.FileRead", p)
+    end
+  end
+
+  fn unscoped(f : String -> String, p : String) : String do
+    restrict IO.FileRead do
+      "handed in: " ++ f(p) ++ " | own: " ++ probe("IO.Process", p)
+    end
+  end
+
+  -- The block calls the value only through a helper; its frame may be
+  -- dropped, and the value still runs under main's authority.
+  fn unscoped_via_helper(f : String -> String, p : String) : String do
+    restrict IO.FileRead do
+      "via helper: " ++ call_with(f, p)
+    end
+  end
+
+  fn main() do
+    let wide = fn p -> probe("IO.FileRead", p)
+    let env = fn n -> probe("IO.Process", n)
+    println(scoped(wide, "/etc/hosts"))
+    println(scoped(wide, "/srv/x"))
+    println(unscoped(env, "HOME"))
+    println(unscoped_via_helper(env, "HOME"))
+  end
+end

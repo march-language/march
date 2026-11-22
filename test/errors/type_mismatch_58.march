@@ -1,0 +1,9 @@
+mod Main do
+  needs IO.FileRead
+
+  fn count(dir : String) : Int do
+    restrict IO.FileRead(dir) do
+      0
+    end
+  end
+end

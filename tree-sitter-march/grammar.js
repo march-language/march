@@ -67,7 +67,7 @@ module.exports = grammar({
       'true', 'false',
       'when', 'linear', 'affine',
       'match',
-      'if', 'else',
+      'if', 'else', 'restrict',
       'spawn',
       'actor', 'interface', 'impl', 'sig', 'extern', 'protocol', 'use',
       // `loop` is not reserved: outside a protocol it is an ordinary name
@@ -681,6 +681,7 @@ module.exports = grammar({
       $.field_expression,
       $.lambda_expression,
       $.if_expression,
+      $.restrict_expression,
       $.match_expression,
       $.cond_expression,
       $.block_expression,
@@ -778,6 +779,12 @@ module.exports = grammar({
       'if', field('condition', $._expr),
       'do', field('then', $.block_body),
       'else', field('else', $.block_body),
+      'end',
+    ),
+    // restrict e1, ..., en do body end: narrows the authority for the body.
+    restrict_expression: $ => seq(
+      'restrict', commaSep1(field('scope', $._expr)),
+      'do', field('body', $.block_body),
       'end',
     ),
     block_expression: $ => seq('do', $.block_body, 'end'),

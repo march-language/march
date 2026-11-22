@@ -1,0 +1,34 @@
+-- `restrict` blocks (ocap phase 5, Task 4, lib/tir/lower_expr.ml
+-- [lower_restrict] and lib/tir/auth_rt.ml [restricts]).  Each block lowers
+-- to a ByRestrict frame around its body.  The unscoped literal one in
+-- `quiet` is proved by the type checker, so its frame and its layer fn are
+-- dropped and only the body is left.  The scoped one in `main` keeps its
+-- frame (its layer built once by `main$restrict0$auth_layer`), and the
+-- lambda made inside it captures the narrowed authority: `cap_save` right
+-- after the frame's entry.  (A computed restrict, whose layer is built from
+-- a Scope value's text at each entry, is pinned by test/test_auth_rt.ml:
+-- it lowers the whole Scope module, and with it List, into the snapshot.)
+mod AuthRestrict do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn quiet() : Unit do
+    restrict IO.Console do
+      println("quiet")
+      ()
+    end
+  end
+
+  fn check_read(p : String) : Result((), CapError) do
+    Authority.check("IO.FileRead", p)
+  end
+
+  fn main() do
+    quiet()
+    let probe = restrict IO.FileRead("/srv/") do
+      fn p -> check_read(p)
+    end
+    let _a = probe("/srv/a")
+    ()
+  end
+end

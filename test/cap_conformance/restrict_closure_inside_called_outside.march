@@ -1,0 +1,34 @@
+-- A function value made inside a restrict block keeps the narrowed
+-- authority after the block ends (design §5, §9: no revocation): returned
+-- to main, which holds the launch authority, and called there directly or
+-- through a helper, it is still refused outside the block's scope, naming
+-- the restrict. A lambda main makes and calls the same way is not.
+mod RestrictClosureInsideCalledOutside do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(target : String) : String do
+    match Authority.check("IO.FileRead", target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn make_reader() : String -> String do
+    restrict IO.FileRead("/srv/") do
+      fn p -> probe(p)
+    end
+  end
+
+  fn call_with(f : String -> String, p : String) : String do
+    f(p)
+  end
+
+  fn main() do
+    let narrow = make_reader()
+    println(narrow("/srv/x"))
+    println(narrow("/etc/hosts"))
+    println(call_with(narrow, "/etc/hosts"))
+    println(call_with(fn p -> probe(p), "/etc/hosts"))
+  end
+end

@@ -94,12 +94,16 @@ let js_unsupported : (string * string) list = [
   ("actor_under_frame_restricted", "the JS target has no tasks");
   ("actor_restart_keeps_authority", "the JS target has no tasks");
   ("task_inherits_capture", "the JS target has no tasks");
+  ("restrict_named_fn_value_inside", "the JS target has no `file_read`");
+  ("restrict_actor_restricted_for_life", "the JS target has no tasks");
+  ("restrict_task_inherits", "the JS target has no tasks");
 ]
 
 (* Fixtures the REPL mode does not run, each with the reason. *)
 let repl_unsupported : (string * string) list = [
   ("actor_under_frame_restricted", "actors: the REPL mode runs the fixtures that use no actors");
   ("actor_restart_keeps_authority", "actors: the REPL mode runs the fixtures that use no actors");
+  ("restrict_actor_restricted_for_life", "actors: the REPL mode runs the fixtures that use no actors");
   ("grant_wider_launch_error",
    "the REPL requests the full authority (design §21), so no grant is wider than its request");
 ]

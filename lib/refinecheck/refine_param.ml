@@ -341,6 +341,7 @@ let rec expr_binders (acc : string list) (e : A.expr) : string list =
   | A.EProof (p, _) -> List.fold_left go acc (A.proof_children p)
   | A.ERefineMsg (x, _, _) -> go acc x
   | A.EIf (c, t, f, _) -> go (go (go acc c) t) f
+  | A.ERestrict (es, b, _) -> go (List.fold_left go acc es) b
   | A.ECond (arms, _) -> List.fold_left (fun acc (c, b) -> go (go acc c) b) acc arms
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> go (go acc a) b
   | A.EDbg (x, _) -> (match x with Some x -> go acc x | None -> acc)
@@ -381,6 +382,7 @@ let rec value_refs (acc : string list) (e : A.expr) : string list =
   | A.EProof (p, _) -> List.fold_left go acc (A.proof_children p)
   | A.ERefineMsg (x, _, _) -> go acc x
   | A.EIf (c, t, f, _) -> go (go (go acc c) t) f
+  | A.ERestrict (es, b, _) -> go (List.fold_left go acc es) b
   | A.ECond (arms, _) -> List.fold_left (fun acc (c, b) -> go (go acc c) b) acc arms
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> go (go acc a) b
   | A.EDbg (x, _) -> (match x with Some x -> go acc x | None -> acc)

@@ -1,0 +1,6 @@
+inner: allowed /srv/a/x | outer: allowed /srv/a/x
+inner: IO.FileRead("/srv/b/x") refused by the restrict at restrict_nested_intersect.march:20 (IO.FileRead("/srv/a/"), IO.Process) | outer: allowed /srv/b/x
+inner: IO.Process("HOME") refused by the restrict at restrict_nested_intersect.march:26 (IO.FileRead("/srv/")) | outer: IO.Process("HOME") refused by the restrict at restrict_nested_intersect.march:26 (IO.FileRead("/srv/"))
+inner: IO.FileRead("/etc/hosts") refused by the restrict at restrict_nested_intersect.march:20 (IO.FileRead("/srv/a/"), IO.Process) | outer: IO.FileRead("/etc/hosts") refused by the restrict at restrict_nested_intersect.march:26 (IO.FileRead("/srv/"))
+allowed HOME
+exit 0

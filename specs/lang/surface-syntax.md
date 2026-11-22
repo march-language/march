@@ -944,6 +944,22 @@ be covered by the clause, and the clause by the module's `needs`. `needs ()` is 
 bound. On an interface method signature, after the type, it bounds every impl of that
 method instead. See [Capabilities]({{ site.baseurl }}/docs/capabilities/#per-function-bounds).
 
+```march
+let r = restrict IO.Console, IO.FileRead("/srv/") do   -- narrow one block
+  load(path)
+end
+let s = IO.Console + IO.FileRead("/srv/")             -- a Scope value; + is the union
+let? t = IO.FileRead(dir)                             -- computed: Result(Scope, ScopeError)
+restrict s, t do work() end
+```
+
+`restrict e1, ..., en do block end` runs the block, and everything it reaches, under the
+intersection of the current authority and the listed scopes; it is an expression whose value
+is the block's, and `restrict` is a reserved word. Each entry is a scope value or `()`. A scope
+expression (`IO.Console`, `IO.FileRead("/srv/")`) with only literal arguments has type `Scope`;
+one with a computed string argument has type `Result(Scope, ScopeError)`. See
+[Capabilities]({{ site.baseurl }}/docs/capabilities/#restrict).
+
 ---
 
 ## Actors

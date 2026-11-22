@@ -149,6 +149,7 @@ let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
     | Ast.ERecordUpdate (b, fs, _) -> ex b; List.iter (fun (_, e) -> ex e) fs
     | Ast.EField (e, _, _) -> ex e
     | Ast.EIf (c, t, f, _) -> ex c; ex t; ex f
+    | Ast.ERestrict (es, b, _) -> List.iter ex es; ex b
     | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> ex c; ex b) arms
     | Ast.EAnnot (e, t, _) -> ex e; ty t
     | Ast.EAtom (_, args, _) -> List.iter ex args
@@ -262,6 +263,7 @@ let unqualified_module_deps
     | Ast.ERecordUpdate (b, fs, _) -> ex b; List.iter (fun (_, e) -> ex e) fs
     | Ast.EField (e, _, _) -> ex e
     | Ast.EIf (c, t, f, _) -> ex c; ex t; ex f
+    | Ast.ERestrict (es, b, _) -> List.iter ex es; ex b
     | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> ex c; ex b) arms
     | Ast.EAnnot (e, t, _) -> ex e; ty t
     | Ast.EAtom (_, args, _) -> List.iter ex args

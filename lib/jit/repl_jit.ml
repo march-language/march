@@ -588,9 +588,12 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
   let tir =
     Fun.protect ~finally:(fun () -> March_tir.Lower_state.set_fragment_scope "")
       (fun () -> March_tir.Lower.lower_module ~type_map ~stdlib_context ~shadow_builtins:false ~launch m) in
-  (* Run-time frames for function `needs` clauses, as the native pipeline
-     (bin/main.ml) adds them right after lowering. *)
-  let tir, has_frames = March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
+  (* Run-time frames for `restrict` blocks and function `needs` clauses, as
+     the native pipeline (bin/main.ml) adds them right after lowering. *)
+  let tir, restricts_kept =
+    March_tir.Auth_rt.restricts tir ~sites:March_tir.Lower.restrict_sites in
+  let tir, frames_kept = March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
+  let has_frames = frames_kept || restricts_kept in
   (* Function values capture the authority they are made under (Task 5).
      A REPL fragment always runs the pass: its lambda can be called by a
      later fragment's framed fn, which this fragment's [has_frames] cannot

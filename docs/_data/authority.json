@@ -25,14 +25,14 @@
     "probe": "mod Probe do\n  needs IO.FileWrite\n  needs IO.Clock\n  needs IO.Spawn\n"
   },
   "generated": {
-    "commit": "039cc8f7b",
-    "date": "2026-11-17",
+    "commit": "200bab750",
+    "date": "2026-11-21",
     "inputs_sha256": "8d15b58a751c9f176fc3758f199120afc719dcc147b561ce583077c508563ae5"
   },
   "modules": {
     "classes": {
       "inside": 15,
-      "none": 119,
+      "none": 120,
       "outside": 25
     },
     "list": [
@@ -614,6 +614,12 @@
       },
       {
         "cls": "none",
+        "name": "Scope",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
         "name": "Seq",
         "needs": [],
         "own": false
@@ -1170,7 +1176,7 @@
         "own": true
       }
     ],
-    "total": 159
+    "total": 160
   },
   "pinned": {
     "node_refusal": "FAILED Server.handle: ERR cap_policy IO.FileWrite \u2014 deploy rejected by node capability policy",

@@ -1,0 +1,12 @@
+exit: 1
+-- CAPABILITY --------------- errors/cap_restrict_2.march
+
+`println` needs `IO.Console`, which the restrict at cap_restrict_2.march:5 does not allow. [cap_restrict]
+help: add `IO.Console` to the restrict, or move the call out of the block.
+
+6 |       fn () -> println("hello")
+                   ^^^^^^^
+
+    run `march --explain cap_restrict`
+
+

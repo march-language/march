@@ -1,0 +1,33 @@
+-- GRANT: IO.Console, IO.FileRead("/srv/")
+-- A restrict under a launch grant narrows further and widens nothing
+-- (design §9, §11): inside the block a target the restrict refuses names
+-- the restrict (innermost first, even where the grant refuses it too), and
+-- a kind the restrict lists but the grant leaves out names the launch
+-- grant; outside the block the grant alone applies.
+mod RestrictUnderGrant do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Process
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn inside(kind : String, target : String) : String do
+    restrict IO.FileRead("/srv/a/"), IO.Process do
+      probe(kind, target)
+    end
+  end
+
+  fn main() needs IO.Console, IO.FileRead, IO.Process do
+    println(inside("IO.FileRead", "/srv/a/x"))
+    println(inside("IO.FileRead", "/srv/b/x"))
+    println(inside("IO.FileRead", "/etc/hosts"))
+    println(inside("IO.Process", "HOME"))
+    println(probe("IO.FileRead", "/srv/b/x"))
+    println(probe("IO.FileRead", "/etc/hosts"))
+  end
+end

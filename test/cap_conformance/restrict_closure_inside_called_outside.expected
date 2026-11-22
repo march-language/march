@@ -1,0 +1,5 @@
+allowed /srv/x
+IO.FileRead("/etc/hosts") refused by the restrict at restrict_closure_inside_called_outside.march:18 (IO.FileRead("/srv/"))
+IO.FileRead("/etc/hosts") refused by the restrict at restrict_closure_inside_called_outside.march:18 (IO.FileRead("/srv/"))
+allowed /etc/hosts
+exit 0

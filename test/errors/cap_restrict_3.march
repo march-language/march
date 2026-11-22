@@ -1,0 +1,27 @@
+mod Main do
+  needs IO.Console
+  needs IO.FileRead
+
+  -- A function named `go`, as many stdlib loops name a local fn: only the
+  -- read inside the block is refused, with its own kind; the prints in the
+  -- block and the read outside it are not blamed.
+  fn say(s : String) do
+    println(s)
+  end
+
+  fn go() do
+    let before = File.read("/srv/before")
+    restrict IO.Console do
+      say("start")
+      let inside = File.read("/srv/inside")
+      println("done")
+      inside
+    end
+    before
+  end
+
+  fn main() do
+    let _ = go()
+    ()
+  end
+end

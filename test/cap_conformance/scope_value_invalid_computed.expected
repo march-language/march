@@ -1,0 +1,9 @@
+err IO.FileRead: the path "/srv/../etc/" has a `..` segment
+err IO.FileRead: the string "/srv/a"b/" contains "
+err IO.FileRead: the string "/srv/a;b/" contains ;
+err IO.FileRead: the string "/srv/a,b/" contains ,
+err IO.FileRead: the string "/srv/a=b/" contains =
+err IO.FileRead: the first string is empty
+err IO.NetConnect: `bad host` is not a host name: labels are letters, digits and `-`, separated by single dots
+ok IO.FileRead("/srv/ok/")
+exit 0

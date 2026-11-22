@@ -1,0 +1,43 @@
+-- A local named `fn` defined BEFORE a restrict block and called inside it is
+-- a function value brought in (design §5: a fn expression captures where it
+-- is evaluated), so it keeps the outside authority and the compile-time
+-- check does not charge it to the block. A local `fn` defined INSIDE the
+-- block is made there: it runs narrowed inside, and still narrowed when the
+-- block returns it and main calls it.
+mod RestrictLocalFnBroughtIn do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(target : String) : String do
+    match Authority.check("IO.FileRead", target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn before_block(target : String) : String do
+    fn helper(p : String) : String do
+      probe(p)
+    end
+    restrict IO.FileRead("/srv/") do
+      "brought in: " ++ helper(target)
+    end
+  end
+
+  fn inside_block(target : String) : (String, String -> String) do
+    restrict IO.FileRead("/srv/") do
+      fn made_inside(p : String) : String do
+        probe(p)
+      end
+      ("made inside: " ++ made_inside(target), made_inside)
+    end
+  end
+
+  fn main() do
+    println(before_block("/etc/hosts"))
+    let (r, f) = inside_block("/etc/hosts")
+    println(r)
+    println("after: " ++ f("/etc/hosts"))
+    println("srv: " ++ f("/srv/x"))
+  end
+end

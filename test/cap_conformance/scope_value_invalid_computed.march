@@ -1,0 +1,26 @@
+-- A computed scope argument is validated when the value is built (design
+-- §8): a `..` path segment, an embedded `"`, `;`, `,` or `=`, an empty first
+-- string and a malformed host each make the constructor return
+-- `Err(ScopeError(_))`, never a panic or a wider scope; a valid one is `Ok`.
+mod ScopeValueInvalidComputed do
+  needs IO.Console
+
+  fn verdict(r : Result(Scope, ScopeError)) : String do
+    match r do
+    Ok(s) -> "ok " ++ show(s)
+    Err(ScopeError(m)) -> "err " ++ m
+    end
+  end
+
+  fn main() do
+    let p = "/srv/"
+    println(verdict(IO.FileRead(p ++ "../etc/")))
+    println(verdict(IO.FileRead(p ++ "a\"b/")))
+    println(verdict(IO.FileRead(p ++ "a;b/")))
+    println(verdict(IO.FileRead(p ++ "a,b/")))
+    println(verdict(IO.FileRead(p ++ "a=b/")))
+    println(verdict(IO.FileRead(string_slice(p, 0, 0))))
+    println(verdict(IO.NetConnect("bad host" ++ ":443")))
+    println(verdict(IO.FileRead(p ++ "ok/")))
+  end
+end

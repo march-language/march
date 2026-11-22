@@ -170,6 +170,41 @@ let note_fn_needs ~(final : string) ~(display : string) (def : Ast.fn_def) : uni
     Hashtbl.replace fn_needs_tbl final
       { fnn_name = display; fnn_text = text; fnn_scoped = scoped }
 
+(** A [restrict] block (ocap phase 5), for [Auth_rt.restricts]: where it is
+    ([<source basename>:<line>] of the [restrict] keyword, the text its
+    refusals report as [ByRestrict(where)]), its canonical scope text when
+    every entry is literal ([None] for a computed restrict, whose text is
+    built at run time) and whether that text carries a scope. *)
+type restrict_site = {
+  rs_where : string;
+  rs_text : string option;
+  rs_scoped : bool;
+}
+
+(** Layer fn name ([<encl>$restrict<N>$auth_layer]) -> its [restrict] block,
+    for every [restrict] lowered.  A computed restrict has no layer fn; its
+    key is the name one would have.  Reset per [lower_module], with
+    [fn_needs_tbl]. *)
+let restrict_sites : (string, restrict_site) Hashtbl.t = Hashtbl.create 8
+
+(** The layer fns of the literal [restrict] blocks lowered so far (newest
+    first): [Lower.lower_module] appends them to the module's fns.  Reset
+    with [restrict_sites]. *)
+let restrict_layer_fns : Tir.fn_def list ref = ref []
+
+(** The layer fn name for the next [restrict] in [host]:
+    [<host>$restrict<N>$auth_layer], [N] counting the restricts already
+    lowered in [host].  Shares [_nested_ordinals] (reset per
+    [lower_module]) but not the temp counter, so it renames nothing else. *)
+let fresh_restrict_layer_name ~(host : string) : string =
+  let k = Option.value ~default:0 (Hashtbl.find_opt _nested_ordinals (host, "$restrict")) in
+  Hashtbl.replace _nested_ordinals (host, "$restrict") (k + 1);
+  Printf.sprintf "%s$restrict%d%s" host k Tir_names.auth_layer_suffix
+
+let reset_restricts () =
+  Hashtbl.reset restrict_sites;
+  restrict_layer_fns := []
+
 (** Emit a runtime panic for a non-exhaustive match that the typechecker
     missed.  Returning [LitInt 0] here would silently reinterpret a value of
     the match's real (possibly non-Int) type as a tagged int — e.g. treated

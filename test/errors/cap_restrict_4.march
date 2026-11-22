@@ -1,0 +1,20 @@
+mod Main do
+  needs IO.Console
+  needs IO.FileRead
+
+  -- A function used as a value in the block, not called: the help says to
+  -- use the value outside the block, since there is no call to move.
+  fn reader() do
+    restrict IO.Console do
+      File.read
+    end
+  end
+
+  fn main() do
+    let r = reader()
+    match r("/etc/hosts") do
+    Ok(_) -> println("read")
+    Err(_) -> println("refused")
+    end
+  end
+end

@@ -1,0 +1,10 @@
+mod Main do
+  needs IO.Console
+
+  fn main() do
+    let greet = restrict () do
+      fn () -> println("hello")
+    end
+    greet()
+  end
+end

@@ -673,11 +673,12 @@ expr ::= expr_pipe
        | "with" with_binding ("," with_binding)* "do" block_body "end"
        | "with" with_binding ("," with_binding)* "do" block_body
              "else" arm_sep? branch (arm_sep branch)* "end"
+       | "restrict" expr ("," expr)* "do" block_body "end"
 ```
 
 (`parser.mly:1052–1109`.) These alternatives are **not** part of the
 operator precedence ladder, they're keyword-led forms distinguishable by
-their leading token (`ASSERT`/`FN`/`IF`/`MATCH`/`WITH`), so there is no
+their leading token (`ASSERT`/`FN`/`IF`/`MATCH`/`WITH`/`RESTRICT`), so there is no
 shift/reduce ambiguity between them and `expr_pipe`; menhir picks the
 alternative with the first token that matches. Two of note:
 
@@ -701,6 +702,19 @@ alternative with the first token that matches. Two of note:
   constraints (it cannot be the last expression in a block) is §5.4,
   not this section; it is noted here only to distinguish it from
   `with`, which *is* an `expr`-level production.
+- **`restrict e1, ..., en do … end`** (`parser.mly`, the `RESTRICT`
+  alternatives of `expr` and of the lambda-body expression rule) builds
+  `ERestrict (entries, body, span)`. `restrict` is a reserved lexer keyword
+  (`lexer.mll`, keyword table), not a soft one, so it is no longer usable
+  as an identifier (`SessionTheory.restrict` became `restrict_role` for
+  this reason). Each entry is an ordinary `expr`; whether an entry is a
+  *literal* scope (a capability-path constructor such as
+  `IO.FileRead("/srv/")` with only literal arguments, a `+` chain of those,
+  or `()`) or a *computed* one is decided by the type checker
+  (`March_caps.Scope_expr.classify`), not the parser. A capability-path
+  constructor in expression position is a scope expression, whose
+  arguments follow the `needs_decl` scope grammar (§9.6). Semantics:
+  [Capabilities, `restrict`](capabilities.md#restrict).
 
 ### 4.2 `expr_pipe`: pipe, loosest-binding, left-associative
 

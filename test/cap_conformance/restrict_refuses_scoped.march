@@ -1,0 +1,42 @@
+-- A scoped restrict narrows the authority for its block (design §9): inside
+-- it a path outside its scope and a kind it does not list are refused, each
+-- naming the restrict at its line with its scope text; a path inside is
+-- allowed; and after the block main's own authority is back. A function
+-- (named `go`, as many stdlib loops name a local fn) that uses a capability
+-- outside its block is not charged for it inside the block, even when the
+-- block calls stdlib code (`List.intersperse`) that loops through a local
+-- `fn go`.
+mod RestrictRefusesScoped do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Process
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn inside(kind : String, target : String) : String do
+    restrict IO.FileRead("/srv/") do
+      probe(kind, target)
+    end
+  end
+
+  fn go(targets : List(String)) : String do
+    println("go prints before its block")
+    restrict IO.FileRead("/srv/") do
+      String.join(List.intersperse(List.map(targets, fn t -> probe("IO.FileRead", t)), " | "), "")
+    end
+  end
+
+  fn main() do
+    println(inside("IO.FileRead", "/srv/x"))
+    println(inside("IO.FileRead", "/etc/hosts"))
+    println(inside("IO.Process", "HOME"))
+    println(probe("IO.FileRead", "/etc/hosts"))
+    println(probe("IO.Process", "HOME"))
+    println(go(["/srv/y", "/etc/hosts"]))
+  end
+end

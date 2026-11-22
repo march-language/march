@@ -180,6 +180,8 @@ let rec resolved_ty_to_json (t : T.ty) : string =
 let constraint_to_json : T.constraint_ -> string = function
   | T.CNum t ->
     Dump.json_obj [ ("kind", Dump.json_string "CNum"); ("ty", resolved_ty_to_json t) ]
+  | T.CAdd t ->
+    Dump.json_obj [ ("kind", Dump.json_string "CAdd"); ("ty", resolved_ty_to_json t) ]
   | T.COrd t ->
     Dump.json_obj [ ("kind", Dump.json_string "COrd"); ("ty", resolved_ty_to_json t) ]
   | T.CInterface (n, t) ->
@@ -402,6 +404,14 @@ let rec expr_to_json (e : expr) : string =
       ("cond", expr_to_json cond);
       ("then_", expr_to_json then_);
       ("else_", expr_to_json else_);
+      ("span", span_to_json span);
+      rty;
+    ]
+  | ERestrict (entries, body, span) ->
+    Dump.json_obj [
+      ("kind", Dump.json_string "ERestrict");
+      ("entries", Dump.json_list (List.map expr_to_json entries));
+      ("body", expr_to_json body);
       ("span", span_to_json span);
       rty;
     ]

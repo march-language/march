@@ -68,6 +68,7 @@ let rec expr_binders (acc : SS.t) (e : expr) : SS.t =
   | ERecordUpdate (b, fs, _) -> List.fold_left (fun acc (_, x) -> go acc x) (go acc b) fs
   | EField (x, _, _) | EAnnot (x, _, _) | ESpawn (x, _) | EAssert (x, _) | ESigil (_, x, _) | EDbg (Some x, _) -> go acc x
   | EIf (c, t, f, _) -> go (go (go acc c) t) f
+  | ERestrict (es, b, _) -> go (List.fold_left go acc es) b
   | ECond (arms, _) -> List.fold_left (fun acc (c, b) -> go (go acc c) b) acc arms
   | EPipe (a, b, _) | ESend (a, b, _) -> go (go acc a) b
   | ERefineMsg (x, _, _) -> go acc x
@@ -165,6 +166,7 @@ let rec erase_expr (env : env) (e : expr) : expr =
   | ERecordUpdate (b, fs, sp) -> ERecordUpdate (ex b, List.map (fun (n, x) -> (n, ex x)) fs, sp)
   | EField (x, n, sp) -> EField (ex x, n, sp)
   | EIf (c, t, f, sp) -> EIf (ex c, ex t, ex f, sp)
+  | ERestrict (es, b, sp) -> ERestrict (List.map ex es, ex b, sp)
   | ECond (arms, sp) -> ECond (List.map (fun (c, b) -> (ex c, ex b)) arms, sp)
   | EPipe (l, r, sp) -> EPipe (ex l, ex r, sp)
   | EAnnot (x, t, sp) -> EAnnot (ex x, t, sp)
@@ -254,6 +256,7 @@ let rec mentions (n : string) (decls : decl list) : bool =
     | ERecordUpdate (b, fs, _) -> b :: List.map snd fs
     | EField (x, _, _) | EAnnot (x, _, _) | ESpawn (x, _) | EAssert (x, _) | ESigil (_, x, _) | EDbg (Some x, _) -> [ x ]
     | EIf (c, t, f, _) -> [ c; t; f ]
+    | ERestrict (es, b, _) -> es @ [ b ]
     | ECond (arms, _) -> List.concat_map (fun (c, b) -> [ c; b ]) arms
     | ERefineMsg (x, _, _) -> [ x ]
     | EProof (p, _) -> proof_children p

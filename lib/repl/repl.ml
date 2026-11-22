@@ -614,6 +614,9 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
     | None -> None
     | Some file_src ->
       let lexbuf = Lexing.from_string file_src in
+      (* Spans carry the file's name, as in the batch driver: a restrict's
+         refusal names `<basename>:<line>` (ocap p5), not `.:<line>`. *)
+      Lexing.set_filename lexbuf path;
       (match (try
         let m = March_parser.Parse.module_of_lexbuf lexbuf in
         Some (let d = March_desugar.Desugar.desugar_module m in
@@ -1509,6 +1512,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
     | None -> None
     | Some file_src ->
       let lexbuf = Lexing.from_string file_src in
+      Lexing.set_filename lexbuf path;
       (match (try
         let m = March_parser.Parse.module_of_lexbuf lexbuf in
         Some (let d = March_desugar.Desugar.desugar_module m in
@@ -2257,6 +2261,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              | None -> ()
              | Some file_src ->
                let lexbuf = Lexing.from_string file_src in
+               Lexing.set_filename lexbuf path;
                (match (try
                  let m = March_parser.Parse.module_of_lexbuf lexbuf in
                  Some (let d = March_desugar.Desugar.desugar_module m in

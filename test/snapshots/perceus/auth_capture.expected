@@ -1,7 +1,7 @@
 -- types (15) --
 type Authority.Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String)) | HostAt(String, String, Bool, Int) | PathsAt(List(String))
-type Authority.Scope = Scope(String, Arg)
-type Authority.Layer = Layer(CapLimit, String, List(Scope))
+type Authority.CapEntry = CapEntry(String, Arg)
+type Authority.Layer = Layer(CapLimit, String, List(CapEntry))
 closure $Clo_$jp1_parse$0_Authority_parse(Ptr(Unit), '_)
 closure $Clo_$jp2_parse$1_Authority_parse(Ptr(Unit), () -> '_)
 closure $Clo_$jp3_parse$2_Authority_parse(Ptr(Unit), () -> '_)
@@ -18,22 +18,22 @@ closure $Clo_$authlam0_main$5_main(Ptr(Unit), CapAuthRef)
 ## $authbody0_main$apply$3_main
 fn $authbody0_main$apply$3_main($clo : Ptr(Unit), k : Int) : Unit =
   let $authbody0_main : (Int) -> Unit = $clo in
-let $t1239 : Bool = ==(k, 0) in
-case $t1239 of
+let $t1250 : Bool = ==(k, 0) in
+case $t1250 of
   True() -> dec_rc $authbody0_main;
 ()
   _ -> println("k");
-let $t1240 : Int = -(k, 1) in
-call_ptr $authbody0_main($t1240)
+let $t1251 : Int = -(k, 1) in
+call_ptr $authbody0_main($t1251)
 
 ## $authlam0_main$apply$5_main
 fn $authlam0_main$apply$5_main($clo : Ptr(Unit), $auth_p11 : String) : () =
   let $auth_cap1 : CapAuthRef = $clo.$fv1 in
 dec_rc $clo;
 let $auth_saved12 : CapAuthRef = cap_enter($auth_cap1) in
-let $auth_result13 : () = let $rc_141 : () = say($auth_p11) in
+let $auth_result13 : () = let $rc_142 : () = say($auth_p11) in
 dec_rc $auth_p11;
-$rc_141 in
+$rc_142 in
 let $auth_unit14 : Unit = cap_restore($auth_saved12) in
 $auth_result13
 
@@ -41,16 +41,16 @@ $auth_result13
 fn $jp1_parse$apply$0_Authority_parse($clo : Ptr(Unit)) : '_ =
   let toks : '_ = $clo.$fv1 in
 dec_rc $clo;
-let $t657 : '_ = alloc Nil() in
+let $t663 : '_ = alloc Nil() in
 inc_rc toks;
-Authority.parse_entries(toks, $t657)
+Authority.parse_entries(toks, $t663)
 
 ## $jp2_parse$apply$1_Authority_parse
 fn $jp2_parse$apply$1_Authority_parse($clo : Ptr(Unit)) : '_ =
-  let $jp_clo663 : () -> '_ = $clo.$fv1 in
+  let $jp_clo669 : () -> '_ = $clo.$fv1 in
 dec_rc $clo;
-inc_rc $jp_clo663;
-call_ptr $jp_clo663()
+inc_rc $jp_clo669;
+call_ptr $jp_clo669()
 
 ## $jp3_method_words$apply$1_Authority_method_words
 fn $jp3_method_words$apply$1_Authority_method_words($clo : Ptr(Unit)) : '_ =
@@ -58,92 +58,92 @@ fn $jp3_method_words$apply$1_Authority_method_words($clo : Ptr(Unit)) : '_ =
 
 ## $jp3_parse$apply$2_Authority_parse
 fn $jp3_parse$apply$2_Authority_parse($clo : Ptr(Unit)) : '_ =
-  let $jp_clo665 : () -> '_ = $clo.$fv1 in
+  let $jp_clo671 : () -> '_ = $clo.$fv1 in
 dec_rc $clo;
-inc_rc $jp_clo665;
-call_ptr $jp_clo665()
+inc_rc $jp_clo671;
+call_ptr $jp_clo671()
 
 ## $jp7_method_words$apply$0_Authority_method_words
 fn $jp7_method_words$apply$0_Authority_method_words($clo : Ptr(Unit)) : '_ =
-  let $f938 : '_ = $clo.$fv1 in
-let $f939 : '_ = $clo.$fv2 in
+  let $f944 : '_ = $clo.$fv1 in
+let $f945 : '_ = $clo.$fv2 in
 let acc : List(String) = $clo.$fv3 in
 dec_rc $clo;
-let $jp_clo947 : () -> '_ = alloc $Clo_$jp3_method_words$1_Authority_method_words($jp3_method_words$apply$1_Authority_method_words) in
-case $f939 of
-  Cons($f948, $f949) -> case $f948 of
-  ")"() -> dec_rc $jp_clo947;
-let rest : '_ = $f949 in
-let m : '_ = inc_rc $f938;
-$f938 in
-let $t933 : '_ = Authority.is_option_name(m) in
-case $t933 of
-  True() -> dec_rc $t933;
-let $t936 : '_ = let $t934 : '_ = inc_rc acc;
+let $jp_clo953 : () -> '_ = alloc $Clo_$jp3_method_words$1_Authority_method_words($jp3_method_words$apply$1_Authority_method_words) in
+case $f945 of
+  Cons($f954, $f955) -> case $f954 of
+  ")"() -> dec_rc $jp_clo953;
+let rest : '_ = $f955 in
+let m : '_ = inc_rc $f944;
+$f944 in
+let $t939 : '_ = Authority.is_option_name(m) in
+case $t939 of
+  True() -> dec_rc $t939;
+let $t942 : '_ = let $t940 : '_ = inc_rc acc;
 alloc Cons(m, acc) in
-let $t935 : '_ = alloc Nil() in
-Authority.rev($t934, $t935) in
-let $t937 : ('_, '_) = inc_rc rest;
-($t936, rest) in
-alloc Ok($t937)
-  _ -> dec_rc $t933;
+let $t941 : '_ = alloc Nil() in
+Authority.rev($t940, $t941) in
+let $t943 : ('_, '_) = inc_rc rest;
+($t942, rest) in
+alloc Ok($t943)
+  _ -> dec_rc $t939;
 dec_rc m;
 alloc Err("`methods(...)` takes HTTP method names")
-  _ -> call_ptr $jp_clo947()
-  _ -> call_ptr $jp_clo947()
+  _ -> call_ptr $jp_clo953()
+  _ -> call_ptr $jp_clo953()
 
 ## $jp7_parse_option$apply$0_Authority_parse_option
 fn $jp7_parse_option$apply$0_Authority_parse_option($clo : Ptr(Unit)) : '_ =
-  let $f908 : '_ = $clo.$fv1 in
+  let $f914 : '_ = $clo.$fv1 in
 let name : String = $clo.$fv2 in
 dec_rc $clo;
-let more : '_ = inc_rc $f908;
-$f908 in
-let $t891 : '_ = ==(name, "methods") in
-case $t891 of
-  True() -> dec_rc $t891;
-let $t893 : '_ = let $t892 : '_ = alloc Nil() in
-Authority.method_words(more, $t892) in
-case $t893 of
-  Err($f897) -> dec_rc $t893;
-let e : '_ = $f897 in
+let more : '_ = inc_rc $f914;
+$f914 in
+let $t897 : '_ = ==(name, "methods") in
+case $t897 of
+  True() -> dec_rc $t897;
+let $t899 : '_ = let $t898 : '_ = alloc Nil() in
+Authority.method_words(more, $t898) in
+case $t899 of
+  Err($f903) -> dec_rc $t899;
+let e : '_ = $f903 in
 alloc Err(e)
-  Ok($f898) -> dec_rc $t893;
-case $f898 of
-  $Tuple2($f899, $f900) -> dec_rc $f898;
-let rest : '_ = $f900 in
-let ms : '_ = $f899 in
-let $t895 : '_ = let $t894 : '_ = let $rc_138 : '_ = string_join(ms, ",") in
+  Ok($f904) -> dec_rc $t899;
+case $f904 of
+  $Tuple2($f905, $f906) -> dec_rc $f904;
+let rest : '_ = $f906 in
+let ms : '_ = $f905 in
+let $t901 : '_ = let $t900 : '_ = let $rc_139 : '_ = string_join(ms, ",") in
 dec_rc ms;
+$rc_139 in
+let $rc_138 : '_ = ++("methods=", $t900) in
+dec_rc $t900;
 $rc_138 in
-let $rc_137 : '_ = ++("methods=", $t894) in
-dec_rc $t894;
-$rc_137 in
-let $t896 : ('_, '_) = ($t895, rest) in
-alloc Ok($t896)
-  _ -> dec_rc $f898;
+let $t902 : ('_, '_) = ($t901, rest) in
+alloc Ok($t902)
+  _ -> dec_rc $f904;
 panic("non-exhaustive pattern match")
-  _ -> dec_rc $t893;
+  _ -> dec_rc $t899;
 panic("non-exhaustive pattern match")
-  _ -> dec_rc $t891;
+  _ -> dec_rc $t897;
 dec_rc more;
-let $t905 : '_ = string_concat3("`", name, "(...)` takes one quoted string") in
-alloc Err($t905)
+let $t911 : '_ = string_concat3("`", name, "(...)` takes one quoted string") in
+alloc Err($t911)
 
 ## $lam0__top$apply$0_main
 fn $lam0__top$apply$0_main($clo : Ptr(Unit), s : String) : () =
-  let $rc_139 : () = println(s) in
+  let $rc_140 : () = println(s) in
 dec_rc s;
-$rc_139
+$rc_140
 
 ## $lam0_main$apply$1_main
 fn $lam0_main$apply$1_main($clo : Ptr(Unit), s : String) : () =
   let $auth_cap1 : CapAuthRef = $clo.$fv1 in
 dec_rc $clo;
 let $auth_saved2 : CapAuthRef = cap_enter($auth_cap1) in
-let $auth_result3 : () = let $rc_140 : () = println(s) in
+let $auth_result3 : () = let $rc_141 : () = println(s) in
 dec_rc s;
-$rc_140 in
+$rc_141 in
 let $auth_unit4 : Unit = cap_restore($auth_saved2) in
 $auth_result3
 
@@ -179,19 +179,19 @@ alloc $Clo_loop_say$4_main(loop_say$apply$4_main, $auth_body8, $auth_cap1) in
 call_ptr p("a");
 let $auth_fnval10 : (String) -> () = alloc $Clo_$authlam0_main$5_main($authlam0_main$apply$5_main, $auth_cap1) in
 apply_to($auth_fnval10, "b");
-let $t1242 : Int = let $t1241 : Int = call_ptr inc(1) in
-scoped($t1241) in
-call_ptr loop_say($t1242);
+let $t1253 : Int = let $t1252 : Int = call_ptr inc(1) in
+scoped($t1252) in
+call_ptr loop_say($t1253);
 call_ptr shout("c");
-let $t1243 : Result((), CapError) = probe() in
-case $t1243 of
-  Ok($f1244) -> dec_rc $t1243;
-dec_rc $f1244;
+let $t1254 : Result((), CapError) = probe() in
+case $t1254 of
+  Ok($f1255) -> dec_rc $t1254;
+dec_rc $f1255;
 ()
-  Err($f1245) -> dec_rc $t1243;
-dec_rc $f1245;
+  Err($f1256) -> dec_rc $t1254;
+dec_rc $f1256;
 ()
-  _ -> dec_rc $t1243;
+  _ -> dec_rc $t1254;
 panic("non-exhaustive pattern match")
 
 ## probe

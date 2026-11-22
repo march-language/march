@@ -94,6 +94,7 @@ let uses_of_decls ~filename (decls : Ast.decl list) : ws_use list =
     | Ast.EField (base, field, _) -> add field; we base
     | Ast.EAnnot (e, _, _) | Ast.EDbg (Some e, _) | Ast.ESpawn (e, _) -> we e
     | Ast.EIf (c, a, b, _) -> we c; we a; we b
+    | Ast.ERestrict (es, b, _) -> List.iter we es; we b
     | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> we c; we b) arms
     | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> we a; we b
     | Ast.EAssert (e, _) -> we e

@@ -1,0 +1,30 @@
+-- A named function used as a value inside a restrict block captures the
+-- narrowed authority where the name is used as a value (design §5: it
+-- behaves as `fn p -> File.read(p)` would): `List.map(paths, File.read)` in
+-- the block is refused what the block refuses, and the same value returned
+-- from the block and called by main after it still is.
+mod RestrictNamedFnValueInside do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn verdict(r : Result(a, CapError)) : String do
+    match r do
+    Ok(_) -> "allowed"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn read_all(paths : List(String)) do
+    restrict IO.FileRead("/srv/") do
+      let rs = List.map(paths, File.read)
+      (List.map(rs, verdict), File.read)
+    end
+  end
+
+  fn main() do
+    let (verdicts, reader) = read_all(["/srv/x", "/etc/hosts"])
+    List.each(verdicts, fn v -> println(v))
+    println("after: " ++ verdict(reader("/etc/hosts")))
+    println("main: " ++ verdict(File.read("/nonexistent/main")))
+  end
+end

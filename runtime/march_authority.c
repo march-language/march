@@ -24,13 +24,13 @@
  * and lib/caps, and requires all three to agree.
  *
  * Values.  The layers in the authority slot keep the March shapes
- * (Authority.Layer / Scope / Arg, CapLimit): March code pattern-matches
+ * (Authority.Layer / CapEntry / Arg, CapLimit): March code pattern-matches
  * `cap_layers()` (Authority.enter_fn), and march_cap_release /
  * march_cap_immortalize walk them by tag.  So the values this file builds are
  * ordinary March values, tags as declared:
  *   List(a)   Nil = 0 | Cons(a, List(a)) = 1          Result  Ok = 0 | Err = 1
- *   Authority.Layer  Layer(CapLimit, String, List(Scope))  = 0
- *   Authority.Scope  Scope(String, Arg)                    = 0
+ *   Authority.Layer  Layer(CapLimit, String, List(CapEntry))  = 0
+ *   Authority.CapEntry  CapEntry(String, Arg)                = 0
  *   Authority.Arg    Any = 0 | Paths(List(String)) = 1 | Hosts(String) = 2
  *                    | Names(List(String), List(String)) = 3
  *                    | HostAt(String, String, Bool, Int) = 4 | PathsAt(List(String)) = 5
@@ -1140,7 +1140,7 @@ static void add_scope_text(arena *ar, sbuf *b, void *s) {
 
 /* ── The builtins ─────────────────────────────────────────────────────── */
 
-/* Authority.parse(text) : Result(List(Scope), String) */
+/* Authority.parse(text) : Result(List(CapEntry), String) */
 void *march_cap_rt_parse(void *text) {
     pctx c; pctx_init(&c);
     pscopes ps = { 0 };

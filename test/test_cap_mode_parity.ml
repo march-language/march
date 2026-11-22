@@ -126,6 +126,34 @@ end
 |}
     bound
 
+(* A literal restrict's reach (ocap phase 5): the reject (`restrict ()`
+   around a println) and its accept twin (`restrict IO.Console`). *)
+let restrict_reach scope =
+  Printf.sprintf
+    {|mod Main do
+  needs IO.Console
+  fn main(c : Cap(IO.Console)) do
+    restrict %s do
+      Authority.ignore(println("hi"))
+    end
+  end
+end
+|}
+    scope
+
+let restrict_reach_repl scope =
+  Printf.sprintf
+    {|mod Q do
+  needs IO.Console
+  fn f() do
+    restrict %s do
+      Authority.ignore(println("hi"))
+    end
+  end
+end
+|}
+    scope
+
 let main_grant grant =
   Printf.sprintf
     {|mod Main do
@@ -299,6 +327,10 @@ let fixtures =
       ~skip:mc_inner_unresolved;
     fx "fn_bound" [ "cap_bound" ] (fn_bound "()") ~repl:(fn_bound_repl "()");
     fx "fn_bound_ok" [] (fn_bound "IO.Console") ~repl:(fn_bound_repl "IO.Console");
+    fx "restrict_reach" [ "cap_restrict" ] (restrict_reach "()")
+      ~repl:(restrict_reach_repl "()");
+    fx "restrict_reach_ok" [] (restrict_reach "IO.Console")
+      ~repl:(restrict_reach_repl "IO.Console");
     (* §21: the REPL runs with full authority, so no grant fixture there. *)
     fx "main_grant" [ "cap_grant_exceeded" ] (main_grant "cap : Cap(IO.Console)")
       ~skip:no_entry;

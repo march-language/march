@@ -1,0 +1,12 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_58.march
+
+expected `Scope` but got `Result(Scope, ScopeError)`. [type_mismatch]
+
+5 |     restrict IO.FileRead(dir) do
+                 ^^^^^^^^^^^^^^^^
+
+    A computed scope expression can fail, so `restrict` cannot take it directly. Bind it with `let?` first: `let? s = IO.FileRead(dir)`, then `restrict s do ... end`.
+    run `march --explain type_mismatch`
+
+

@@ -43,8 +43,8 @@ mod Authority do
   -- built by hand (a `Paths` entry need not be normalized).
   type Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String))
            | HostAt(String, String, Bool, Int) | PathsAt(List(String))
-  type Scope = Scope(String, Arg)
-  type Layer = Layer(CapLimit, String, List(Scope))
+  type CapEntry = CapEntry(String, Arg)
+  type Layer = Layer(CapLimit, String, List(CapEntry))
 
   doc """
   A one-line description of a refusal: the refused operation written as a
@@ -150,7 +150,7 @@ mod Authority do
 
   ## Examples
 
-      march> Authority.check_layers("IO.Clock", "", [Authority.Layer(ByFnNeeds("f"), "IO.Console", [Authority.Scope("IO.Console", Authority.Any)])])
+      march> Authority.check_layers("IO.Clock", "", [Authority.Layer(ByFnNeeds("f"), "IO.Console", [Authority.CapEntry("IO.Console", Authority.Any)])])
       Err(CapError("IO.Clock", "", ByFnNeeds("f"), "IO.Console"))
   """
   fn check_layers(kind : String, target : String, layers : List(Layer)) : Result((), CapError) do
@@ -211,7 +211,7 @@ mod Authority do
   end
 
   -- The first entry of `a` that no entry of `b` covers.
-  pfn first_outside(a : List(Scope), b : List(Scope)) : Option(Scope) do
+  pfn first_outside(a : List(CapEntry), b : List(CapEntry)) : Option(CapEntry) do
     match a do
     Nil -> None
     Cons(s, rest) -> if covered(s, b) do first_outside(rest, b) else Some(s) end
@@ -227,7 +227,7 @@ mod Authority do
   ## Examples
 
       march> Authority.frame_layer("f", "IO.Console")
-      Layer(ByFnNeeds("f"), "IO.Console", [Scope("IO.Console", Any)])
+      Layer(ByFnNeeds("f"), "IO.Console", [CapEntry("IO.Console", Any)])
   """
   fn frame_layer(name : String, needs_text : String) : Layer do
     match parse(needs_text) do
@@ -252,14 +252,14 @@ mod Authority do
 
   pfn top_is_frame(layers : List(Layer), layer : Layer) : Bool do
     match layers do
-    Cons(Layer(ByFnNeeds(n), t, _), _) ->
+    Cons(Layer(l, t, _), _) ->
       match layer do
-      Layer(ByFnNeeds(name), text, _) -> n == name && t == text
-      _ -> false
+      Layer(limit, text, _) -> l == limit && t == text
       end
     _ -> false
     end
   end
+  -- (a restrict's limit and text identify its frame as a function's do)
 
   -- ── Matching ─────────────────────────────────────────────────────────
 
@@ -276,22 +276,22 @@ mod Authority do
 
   ## Examples
 
-      march> Authority.admits([Authority.Scope("IO.FileSystem", Authority.Paths(["/srv"]))], "IO.FileRead", "/srv/x", "/")
+      march> Authority.admits([Authority.CapEntry("IO.FileSystem", Authority.Paths(["/srv"]))], "IO.FileRead", "/srv/x", "/")
       true
-      march> Authority.admits([Authority.Scope("IO.FileSystem", Authority.Paths(["/srv"]))], "IO.FileRead", "/srvx", "/")
+      march> Authority.admits([Authority.CapEntry("IO.FileSystem", Authority.Paths(["/srv"]))], "IO.FileRead", "/srvx", "/")
       false
   """
-  fn admits(scopes : List(Scope), kind : String, target : String, cwd : String) : Bool do
+  fn admits(scopes : List(CapEntry), kind : String, target : String, cwd : String) : Bool do
     admits_in(scopes, kind_chain(kind), kind, target, cwd)
   end
 
   -- An entry's capability subsumes `kind` when it is in `chain`
   -- (`kind_chain(kind)`): a membership test per entry instead of a lattice
   -- walk per entry.
-  pfn admits_in(scopes : List(Scope), chain : List(String), kind : String, target : String, cwd : String) : Bool do
+  pfn admits_in(scopes : List(CapEntry), chain : List(String), kind : String, target : String, cwd : String) : Bool do
     match scopes do
     Nil -> false
-    Cons(Scope(k, arg), rest) ->
+    Cons(CapEntry(k, arg), rest) ->
       (member(chain, k) && arg_admits(arg, kind, target, cwd))
         || admits_in(rest, chain, kind, target, cwd)
     end
@@ -357,22 +357,22 @@ mod Authority do
 
   ## Examples
 
-      march> Authority.subset([Authority.Scope("IO.FileRead", Authority.Paths(["/srv/a"]))], [Authority.Scope("IO.FileSystem", Authority.Paths(["/srv"]))])
+      march> Authority.subset([Authority.CapEntry("IO.FileRead", Authority.Paths(["/srv/a"]))], [Authority.CapEntry("IO.FileSystem", Authority.Paths(["/srv"]))])
       true
   """
-  fn subset(a : List(Scope), b : List(Scope)) : Bool do
+  fn subset(a : List(CapEntry), b : List(CapEntry)) : Bool do
     match first_outside(a, b) do
     None -> true
     Some(_) -> false
     end
   end
 
-  pfn covered(s : Scope, b : List(Scope)) : Bool do
+  pfn covered(s : CapEntry, b : List(CapEntry)) : Bool do
     match b do
     Nil -> false
-    Cons(Scope(k, outer), rest) ->
+    Cons(CapEntry(k, outer), rest) ->
       match s do
-      Scope(ik, inner) -> (kind_subsumes(k, ik) && arg_subsumes(outer, inner)) || covered(s, rest)
+      CapEntry(ik, inner) -> (kind_subsumes(k, ik) && arg_subsumes(outer, inner)) || covered(s, rest)
       end
     end
   end
@@ -870,7 +870,7 @@ mod Authority do
       march> Authority.parse("()")
       Ok([])
   """
-  fn parse(text : String) : Result(List(Scope), String) do
+  fn parse(text : String) : Result(List(CapEntry), String) do
     match tokenize(text, 0, string_byte_length(text), Nil) do
     Err(e) -> Err(e)
     Ok(toks) ->
@@ -937,7 +937,7 @@ mod Authority do
     if is_string_tok(t) do "a string" else "`" ++ t ++ "`" end
   end
 
-  pfn parse_entries(toks : List(String), acc : List(Scope)) : Result(List(Scope), String) do
+  pfn parse_entries(toks : List(String), acc : List(CapEntry)) : Result(List(CapEntry), String) do
     match parse_entry(toks) do
     Err(e) -> Err(e)
     Ok((scope, rest)) ->
@@ -949,7 +949,7 @@ mod Authority do
     end
   end
 
-  pfn parse_entry(toks : List(String)) : Result((Scope, List(String)), String) do
+  pfn parse_entry(toks : List(String)) : Result((CapEntry, List(String)), String) do
     match toks do
     Nil -> Err("expected a capability at the end")
     Cons(k, rest) ->
@@ -965,11 +965,11 @@ mod Authority do
             Ok((strs, opts, more)) ->
               match scope_arg(k, strs, opts) do
               Err(e) -> Err(e)
-              Ok(arg) -> Ok((Scope(k, arg), more))
+              Ok(arg) -> Ok((CapEntry(k, arg), more))
               end
             end
           end
-        _ -> Ok((Scope(k, Any), rest))
+        _ -> Ok((CapEntry(k, Any), rest))
         end
       end
     end
@@ -1124,15 +1124,15 @@ mod Authority do
 
   -- ── Writing a scope back as text (for launch errors) ─────────────────
 
-  pfn scope_text(s : Scope) : String do
+  pfn scope_text(s : CapEntry) : String do
     match s do
-    Scope(k, Any) -> k
-    Scope(k, Paths(ps)) -> k ++ "(" ++ string_join(quote_all(ps), ", ") ++ ")"
-    Scope(k, PathsAt(ps)) -> k ++ "(" ++ string_join(quote_all(ps), ", ") ++ ")"
-    Scope(k, Names(ns, pre)) ->
+    CapEntry(k, Any) -> k
+    CapEntry(k, Paths(ps)) -> k ++ "(" ++ string_join(quote_all(ps), ", ") ++ ")"
+    CapEntry(k, PathsAt(ps)) -> k ++ "(" ++ string_join(quote_all(ps), ", ") ++ ")"
+    CapEntry(k, Names(ns, pre)) ->
       k ++ "(" ++ string_join(append(quote_all(ns), wrap_all(quote_all(pre), "prefix(")), ", ") ++ ")"
-    Scope(k, Hosts(spec)) -> host_scope_text(k, spec)
-    Scope(k, HostAt(spec, _, _, _)) -> host_scope_text(k, spec)
+    CapEntry(k, Hosts(spec)) -> host_scope_text(k, spec)
+    CapEntry(k, HostAt(spec, _, _, _)) -> host_scope_text(k, spec)
     end
   end
 
@@ -1191,7 +1191,7 @@ mod Authority do
     end
   end
 
-  pfn rev_scopes(l : List(Scope), acc : List(Scope)) : List(Scope) do
+  pfn rev_scopes(l : List(CapEntry), acc : List(CapEntry)) : List(CapEntry) do
     match l do
     Nil -> acc
     Cons(x, rest) -> rev_scopes(rest, Cons(x, acc))
@@ -1233,6 +1233,21 @@ mod Authority do
     match l do
     Nil -> Nil
     Cons(x, rest) -> Cons(normalize(x), map_normalize(rest))
+    end
+  end
+
+  doc """
+  The layer of a `restrict` block at `where` (`<file>:<line>`), whose scope
+  list is `text`: the text parsed into scopes. The compiler calls it once per
+  literal site (`restrict_layer` cell) and the interpreter per entry. A scope
+  that is not a scope list cannot reach here: it was validated at compile time
+  or by `Scope.build`.
+  """
+  @[stdlib_internal]
+  fn restrict_layer(where : String, text : String) : Layer do
+    match parse(text) do
+    Ok(scopes) -> Layer(ByRestrict(where), text, scopes)
+    Err(e) -> panic("internal: the restrict at " ++ where ++ " is not a scope list: " ++ e)
     end
   end
 

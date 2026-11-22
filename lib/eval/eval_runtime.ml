@@ -852,6 +852,10 @@ let int_of_float_checked op f =
 let arith_num iop fop name = VBuiltin (name, function
     | [VInt a;   VInt b]   -> VInt   (iop a b)
     | [VFloat a; VFloat b] -> VFloat (fop a b)
+    (* [+] on Scope values is Scope.union (ocap phase 5): a [()] side adds
+       nothing, otherwise the texts join with ", ". *)
+    | [VCon ("ScopeText", [VString x]); VCon ("ScopeText", [VString y])] when name = "+" ->
+      VCon ("ScopeText", [VString (if x = "()" then y else if y = "()" then x else x ^ ", " ^ y)])
     | _ -> eval_error "builtin %s: expected two numbers of the same type" name)
 
 (** Look up the type name for a runtime value.

@@ -1,0 +1,8 @@
+worker: IO.FileRead("/etc/hosts") refused by the restrict at restrict_actor_restricted_for_life.march:49 (IO.FileRead("/srv/"), IO.Spawn) / allowed
+child: IO.FileRead("/etc/hosts") refused by the restrict at restrict_actor_restricted_for_life.march:55 (IO.FileRead("/srv/"), IO.Spawn) / allowed
+restarted: true
+after crash: IO.FileRead("/etc/hosts") refused by the restrict at restrict_actor_restricted_for_life.march:55 (IO.FileRead("/srv/"), IO.Spawn) / allowed
+restarted again: true
+after kill: IO.FileRead("/etc/hosts") refused by the restrict at restrict_actor_restricted_for_life.march:55 (IO.FileRead("/srv/"), IO.Spawn) / allowed
+main: allowed
+exit 0

@@ -1283,6 +1283,7 @@ let rec path_diverges (e : Ast.expr) =
   | Ast.EBlock (es, _) ->
     (match List.rev es with last :: _ -> path_diverges last | [] -> false)
   | Ast.EIf (_, t, f, _) -> path_diverges t && path_diverges f
+  | Ast.ERestrict (_, b, _) -> path_diverges b
   | Ast.EMatch (_, brs, _) ->
     brs <> [] && List.for_all (fun (br : Ast.branch) -> path_diverges br.branch_body) brs
   | Ast.ECond (arms, _) ->
@@ -4370,6 +4371,45 @@ let rec infer_expr env (e : Ast.expr) : ty =
           | _ -> ());
          res)
 
+    (* ── Scope expressions (ocap phase 5, decision 3) ─────────────────
+       A constructor written with a capability path is a scope: `Scope`
+       when every argument is literal (validated now, with the `needs`
+       validator), `Result(Scope, ScopeError)` when a string is computed
+       (validated when the value is built). *)
+    | Ast.ECon (name, _, sp) when March_caps.Scope_expr.is_cap_path name.Ast.txt ->
+      let t_scope = TCon ("Scope", []) in
+      let unknown () =
+        match March_caps.Cap_lattice.suggest_cap name.Ast.txt with
+        | Some known ->
+          Err.error ~code:Err.Code.unknown_capability env.errors ~span:name.Ast.span
+            (Printf.sprintf
+               "`%s` is not a known capability.\n\
+                help: did you mean `%s`?" name.Ast.txt known);
+          true
+        | None -> false
+      in
+      (match March_caps.Scope_expr.classify e with
+       | March_caps.Scope_expr.Literal entries ->
+         if not (unknown ()) then Typecheck_caps.validate_cap_scopes env.errors ~sp entries;
+         t_scope
+       | March_caps.Scope_expr.Computed { strings; _ } ->
+         ignore (unknown ());
+         List.iter
+           (fun s ->
+              check_expr env s t_string
+                ~reason:(Some (RBuiltin "A scope's string arguments must be Strings.")))
+           strings;
+         t_result t_scope (TCon ("ScopeError", []))
+       | March_caps.Scope_expr.Not_scope ->
+         Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span:sp
+           (Printf.sprintf
+              "`%s(...)` is not a scope expression: its strings come first, then \
+               its options, and an option is written literally.\n\
+               hint: write the options as in a `needs` line, e.g. \
+               `IO.NetConnect(host, methods(get), prefix(\"/v1/\"), no_redirects)`."
+              name.Ast.txt);
+         TError)
+
     (* ── Constructor application ──────────────────────────────────── *)
     | Ast.ECon (name, args, sp) ->
       (let ci_opt = match lookup_ctor_same_module name.txt env with
@@ -4781,6 +4821,72 @@ let rec infer_expr env (e : Ast.expr) : ty =
             TError))
       (* close the None branch of mod_access match *)
       )
+
+    (* ── restrict e1, ..., en do ... end (ocap phase 5) ──────────────
+       The block has its body's type.  Each entry is a [Scope] (`()` is the
+       empty scope).  A computed scope expression is a
+       [Result(Scope, ScopeError)], which `restrict` does not take: it is
+       bound with `let?` first, and the mismatch says so.  A literal
+       restrict's reach is proved by [Typecheck_caps] (the bound point keyed
+       [<fn>$restrict@<line>:<col>]), not here. *)
+    | Ast.ERestrict (es, body, _) ->
+      let t_scope = TCon ("Scope", []) in
+      List.iter
+        (fun (entry : Ast.expr) ->
+           match entry with
+           | Ast.ETuple ([], _) -> ()
+           | _ ->
+             let esp = span_of_expr entry in
+             let t = infer_expr env entry in
+             (match repr t with
+              | TCon ("Result", [ s; _ ])
+                when (match repr s with TCon ("Scope", []) -> true | _ -> false) ->
+                (* The hint shows the entry as written when it is a scope
+                   expression or a name (final review F7), and a neutral
+                   placeholder otherwise. *)
+                let rec render (e : Ast.expr) : string option =
+                  let args xs =
+                    let rs = List.map render xs in
+                    if List.for_all Option.is_some rs then
+                      Some (String.concat ", " (List.map Option.get rs))
+                    else None
+                  in
+                  match e with
+                  | Ast.EVar n -> Some n.Ast.txt
+                  | Ast.ELit (Ast.LitString str, _) -> Some (Printf.sprintf "%S" str)
+                  | Ast.ECon (c, [], _) -> Some c.Ast.txt
+                  | Ast.ECon (c, xs, _) -> Option.map (Printf.sprintf "%s(%s)" c.Ast.txt) (args xs)
+                  | Ast.EApp (Ast.EVar f, xs, _)
+                    when f.Ast.txt <> ""
+                      && (match f.Ast.txt.[0] with
+                          | 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false) ->
+                    Option.map (Printf.sprintf "%s(%s)" f.Ast.txt) (args xs)
+                  | Ast.EField (x, f, _) ->
+                    Option.map (fun r -> r ^ "." ^ f.Ast.txt) (render x)
+                  | _ -> None
+                in
+                let bind =
+                  match render entry with
+                  | Some r -> Printf.sprintf "`let? s = %s`" r
+                  | None -> "`let? s = <the scope expression>`"
+                in
+                Err.report env.errors
+                  { Err.severity = Err.Error; span = esp;
+                    message =
+                      Printf.sprintf "expected `Scope` but got `%s`." (pp_ty t);
+                    labels = [];
+                    notes =
+                      [ Printf.sprintf
+                          "A computed scope expression can fail, so `restrict` cannot \
+                           take it directly. Bind it with `let?` first: \
+                           %s, then `restrict s do ... end`." bind ];
+                    code = Err.Code.type_mismatch; fix = None }
+              | _ ->
+                unify env ~span:esp
+                  ~reason:(Some (RBuiltin "Each scope of a `restrict` must be a `Scope`."))
+                  t t_scope))
+        es;
+      infer_expr env body
 
     (* ── if/do/else/end ───────────────────────────────────────────── *)
     | Ast.EIf (cond, then_, else_, _sp) ->
@@ -6909,7 +7015,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
               are properly generalized even when not referenced in the type *)
            let constraint_tv = function
              | CInterface (_, tv) | CADTBound (_, tv) | CTNatBound tv -> Some tv
-             | CNum tv | COrd tv -> Some tv
+             | CNum tv | CAdd tv | COrd tv -> Some tv
            in
            let extra_ids = List.filter_map (fun c ->
                match constraint_tv c with
@@ -7434,11 +7540,13 @@ let discharge_constraints env span =
       in
       if not dominated then
       match c with
-      | CNum t | COrd t ->
+      | CNum t | CAdd t | COrd t ->
         let ty   = strip_lin t in
-        let kind = match c with CNum _ -> "Num" | COrd _ -> "Ord" | _ -> assert false in
+        (* [CAdd] is reported as [Num]: `"a" + "b"` keeps its wording. *)
+        let kind = match c with CNum _ | CAdd _ -> "Num" | COrd _ -> "Ord" | _ -> assert false in
         (match ty with
          | TCon ("Int",   []) | TCon ("Float", []) -> ()   (* Num + Ord *)
+         | TCon ("Scope", []) when (match c with CAdd _ -> true | _ -> false) -> ()  (* union *)
          | TCon ("String",[]) ->
            (match c with
             | COrd _ -> ()   (* String is Ord *)
@@ -7458,7 +7566,7 @@ let discharge_constraints env span =
                   code = Err.Code.missing_impl; fix = None })
          | TVar r ->
            (match c with
-            | CNum _ -> r := Link (TCon ("Int", []))  (* numeric defaulting: unresolved Num → Int *)
+            | CNum _ | CAdd _ -> r := Link (TCon ("Int", []))  (* numeric defaulting: unresolved Num → Int *)
             | _ -> ())  (* COrd unresolved — leave polymorphic *)
          | _ -> report_missing_impl ~builtin_class:true env ~span ~site kind ty)
       | CInterface (iface_name, t) ->
@@ -10104,6 +10212,72 @@ let cap_reach_chain ?own_caps ?fn_refs (env : env) ~(from : string) ~(cap : stri
    - [unknown]: the body invokes a function value of untraceable origin, so no
      caller can be charged for what it does; a bound short of all of `IO` is
      refused rather than certified. *)
+(* A literal `restrict` block's static reach (ocap phase 5, decision 6):
+   every IO-lattice capability its own operations, its direct callees' rows
+   and the lambdas made in it reach must be covered by one of the block's
+   kinds.  [rows] is the caps-only solve [check_fn_bounds] gets.  A call of a
+   function value is left to the run-time frame (decision 7 keeps the frame of
+   a block that makes one), so [unknown] is not judged here.  The module
+   ceiling applies to the enclosing function unchanged, and a kind the module
+   lacks is no widening (authority inside is the intersection). *)
+let check_restrict_reach ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env : env) : unit =
+  let blocks =
+    List.sort compare
+      (Hashtbl.fold
+         (fun key (fb : fn_bound) acc ->
+            match fb.fb_origin, Hashtbl.find_opt env.restrict_owners key with
+            | Restrict_block where, Some ro -> (key, where, fb, ro) :: acc
+            | _ -> acc)
+         env.fn_bound_points [])
+  in
+  List.iter
+    (fun (_, where, (fb : fn_bound), ro) ->
+       let covered c = List.exists (fun b -> cap_subsumes b c) fb.fb_caps in
+       let outside c = cap_subsumes "IO" c && not (covered c) in
+       let prefix = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes ro.ro_owner in
+       let row_of r =
+         match Hashtbl.find_opt rows (prefix ^ r) with
+         | Some row -> Some row
+         | None -> Hashtbl.find_opt rows r
+       in
+       let culprits =
+         List.filter_map
+           (fun (c, op, sp) -> if outside c then Some (op, c, sp, Ref_call) else None)
+           ro.ro_ops
+         @ List.concat_map
+             (fun (r, sp, use) ->
+                match row_of r with
+                | Some row ->
+                  List.filter_map
+                    (fun c -> if outside c then Some (r, c, sp, use) else None)
+                    (List.sort_uniq String.compare row.March_caps.Cap_rows.caps)
+                | None -> [])
+             ro.ro_refs
+       in
+       let seen = Hashtbl.create 4 in
+       List.iter
+         (fun (who, c, sp, use) ->
+            if not (Hashtbl.mem seen (who, c)) then begin
+              Hashtbl.replace seen (who, c) ();
+              let span = if sp = Ast.dummy_span then fb.fb_span else sp in
+              (* A function used as a value has no call to move (final
+                 review F6): the value made in the block keeps its
+                 authority, so it is the use that must leave. *)
+              let move =
+                match use with
+                | Ref_call -> "move the call out of the block"
+                | Ref_spawn -> Printf.sprintf "spawn `%s` outside the block" who
+                | Ref_value -> Printf.sprintf "use `%s` as a value outside the block" who
+              in
+              Err.error ~code:Err.Code.cap_restrict env.errors ~span
+                (Printf.sprintf
+                   "`%s` needs `%s`, which the restrict at %s does not allow.\n\
+                    help: add `%s` to the restrict, or %s."
+                   who c where c move)
+            end)
+         culprits)
+    blocks
+
 let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env : env) : unit =
   (* [rows] is the caps-only solve.  A bound point's [unknown] flag is
      computed by walking only what that point reaches, classifying only the
@@ -10161,7 +10335,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
            Option.value ~default:March_caps.Cap_rows.empty_row (Hashtbl.find_opt bound_rows qname)
          in
          if violates fb_caps row then Hashtbl.replace violators qname ()
-       | Fn_decl -> ())
+       | Fn_decl | Restrict_block _ -> ())
     env.fn_bound_points;
   let rows, chain_refs =
     if Hashtbl.length violators = 0 then (bound_rows, env.fn_refs)
@@ -10176,6 +10350,9 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
   in
   Hashtbl.iter
     (fun qname { fb_caps = bound; fb_span; fb_site; fb_origin } ->
+       match fb_origin with
+       | Restrict_block _ -> ()  (* [check_restrict_reach], below *)
+       | Fn_decl | Iface_method _ | Impl_method _ ->
        let row =
          Option.value ~default:March_caps.Cap_rows.empty_row (Hashtbl.find_opt rows qname)
        in
@@ -10193,7 +10370,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
           phase 1's, unchanged. *)
        let who, by =
          match fb_origin with
-         | Fn_decl -> (Printf.sprintf "`%s`" leaf, Printf.sprintf "`needs %s`" shown)
+         | Fn_decl | Restrict_block _ -> (Printf.sprintf "`%s`" leaf, Printf.sprintf "`needs %s`" shown)
          | Iface_method { iface; impl_ty = Some ty } ->
            ( Printf.sprintf "`%s` in `impl %s(%s)`" leaf iface ty,
              Printf.sprintf "%sinterface `%s`'s `needs %s`"
@@ -10227,7 +10404,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
                for what that call does and the bound cannot be certified.\n%s"
               who by
               (match fb_origin with
-               | Fn_decl ->
+               | Fn_decl | Restrict_block _ ->
                  Printf.sprintf
                    "help: pass the function in as a parameter or call it by name, or \
                     bound `%s` by `needs IO`." leaf
@@ -10245,7 +10422,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
               in
               let help =
                 match fb_origin with
-                | Fn_decl -> Printf.sprintf "help: add `%s` to the bound, or remove the use." c
+                | Fn_decl | Restrict_block _ -> Printf.sprintf "help: add `%s` to the bound, or remove the use." c
                 | Iface_method _ ->
                   "help: remove the use; widening the interface's bound changes it \
                    for every impl and every caller."
@@ -10966,6 +11143,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) : unit =
   | Ast.ERecordUpdate (base, fields, _) -> go base; List.iter (fun (_, ex) -> go ex) fields
   | Ast.EField (ex, _, _) -> go ex
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
+  | Ast.ERestrict (es, b, _) -> List.iter go es; go b
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
   | Ast.EProof (pr, _) -> List.iter go (Ast.proof_children pr)
@@ -11043,6 +11221,7 @@ let rec iter_expr_scoped (f : local_scope -> Ast.expr -> unit) (scope : local_sc
   | Ast.ERecordUpdate (base, fields, _) -> go base; List.iter (fun (_, ex) -> go ex) fields
   | Ast.EField (ex, _, _) -> go ex
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
+  | Ast.ERestrict (es, b, _) -> List.iter go es; go b
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
   | Ast.EProof (pr, _) -> List.iter go (Ast.proof_children pr)
@@ -12795,6 +12974,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   refine_cap_mismatches final_env m.Ast.mod_decls;
   check_main_grant ~rows:cap_rows final_env m.Ast.mod_decls;
   check_fn_bounds ~rows:cap_rows final_env;
+  check_restrict_reach ~rows:cap_rows final_env;
   (* Per-role grants: the same walk from each runner-entry callback, bounded
      by `role R needs ...` (distributed-deploys step 4).  No-op for a
      program with no grant line. *)

@@ -149,6 +149,9 @@ let seed_of_body (params : string list) (body : A.expr) : seed =
       go scope c;
       go scope t;
       go scope f
+    | A.ERestrict (es, body, _) ->
+      List.iter (go scope) es;
+      go scope body
     | A.ECond (arms, _) ->
       List.iter
         (fun (ce, be) ->
@@ -190,6 +193,12 @@ let seed_of_body (params : string list) (body : A.expr) : seed =
         | p -> List.map (fun n -> (n, COpaque)) (pat_binders p)
       in
       block (bound @ scope) rest
+    | (A.ELetFn (name, _, _, _, _) as e) :: rest ->
+      (* A local fn is in scope for the rest of its block, classified as its
+         own body classifies it, not as a call of a same-named top-level
+         function. *)
+      go scope e;
+      block ((name.A.txt, CCharged) :: scope) rest
     | e :: rest ->
       go scope e;
       block scope rest

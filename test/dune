@@ -90,7 +90,7 @@
 ;; OS-sensitive, so the macOS job keeps none of them (keep_os_sensitive).
 (test
  (name run_authority)
- (modules run_authority test_cap_runtime_slot test_authority_differential test_auth_rt)
+ (modules run_authority test_cap_runtime_slot test_scope_value test_authority_differential test_auth_rt)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_tir march_caps yojson alcotest str unix threads.posix)
  (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
  (action (run %{test} -e)))

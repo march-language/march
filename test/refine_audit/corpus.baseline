@@ -1120,6 +1120,8 @@ stdlib_rrb_vec: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 
 stdlib_rrb_vec: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_scheduler: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
 stdlib_scheduler: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_scope: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
+stdlib_scope: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_seq: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
 stdlib_seq: coverage audit (user code): 2 enforced, 0 inert (warned), 0 unenforced
 stdlib_session: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced

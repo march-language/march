@@ -1,0 +1,5 @@
+brought in: allowed /etc/hosts
+made inside: IO.FileRead("/etc/hosts") refused by the restrict at restrict_local_fn_brought_in.march:28 (IO.FileRead("/srv/"))
+after: IO.FileRead("/etc/hosts") refused by the restrict at restrict_local_fn_brought_in.march:28 (IO.FileRead("/srv/"))
+srv: allowed /srv/x
+exit 0

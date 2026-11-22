@@ -120,6 +120,10 @@ let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : String
     List.fold_left (fun acc a ->
       StringSet.union acc (collect_direct_fn_calls fn_names a)
     ) StringSet.empty args
+  | Ast.ERestrict (es, b, _) ->
+    List.fold_left (fun acc a ->
+      StringSet.union acc (collect_direct_fn_calls fn_names a)
+    ) StringSet.empty (es @ [b])
   | Ast.EIf (c, t, f, _) ->
     StringSet.union (collect_direct_fn_calls fn_names c)
       (StringSet.union (collect_direct_fn_calls fn_names t)
@@ -490,6 +494,11 @@ let rec check_tail_position
       let arg_ctx = Printf.sprintf "wrapped in constructor `%s`" name.txt in
       List.iter (chk false names params smaller arg_ctx) args
     (* ── if/do/else/end: condition not tail; branches inherit ── *)
+    (* ── restrict: the body runs inside a frame, so a call out of it is not
+       a tail call (the frame must be popped afterwards) ── *)
+    | Ast.ERestrict (es, body, _) ->
+      List.iter (chk false names params smaller "entry of `restrict`") es;
+      chk false names params smaller "body of `restrict`" body
     | Ast.EIf (cond, then_, else_, _) ->
       chk false names params smaller "condition of `if`" cond;
       chk in_tail names params smaller ctx then_;
