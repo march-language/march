@@ -784,6 +784,18 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     if cap_qname_prefix = "" then leaf_name
     else cap_qname_prefix ^ "." ^ leaf_name
   in
+  (* Dependency grants (ocap phase 6, decision 10): a module whose file lies
+     in a granted package is noted, so [Typecheck.check_dep_grants] can tell
+     which capability keys are the package's.  The entry module never is
+     (the resolver refuses a granted root around the entry).  Without a
+     grants file this reads nothing. *)
+  let grant_pkg =
+    if cap_qname_prefix = "" || March_caps.Dep_grants.active () = [] then None
+    else
+      Option.map (fun (g : March_caps.Dep_grants.grant) -> g.March_caps.Dep_grants.g_pkg)
+        (March_caps.Dep_grants.package_of_file mod_name.Ast.span.Ast.file)
+  in
+  Option.iter (fun p -> Hashtbl.replace env.grant_module_pkgs cap_qname_prefix p) grant_pkg;
   let declared_needs = List.concat_map (function
     | Ast.DNeeds (caps, _) -> List.map (fun (p, _) -> cap_path_of_names p) caps
     | _ -> []
@@ -1437,6 +1449,20 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                 on the empty prefix, which is exactly the entry module. *)
              if cap_qname_prefix = "" then
                Hashtbl.replace env.ceiling_extra_roots q ();
+             (* A granted package's module-level binding is in its grant's
+                reach whether or not anything references it. *)
+             Option.iter (fun p ->
+                 let key = p ^ "$grant" in
+                 let go =
+                   match Hashtbl.find_opt env.grant_owners key with
+                   | Some go -> go
+                   | None ->
+                     let go = { go_pkg = p; go_refs = []; go_ops = [] } in
+                     Hashtbl.replace env.grant_owners key go;
+                     go
+                 in
+                 go.go_ops <- go.go_ops @ [ (q, dsp) ])
+               grant_pkg;
              record_expr_owner ~sp:dsp q [] [ b.Ast.bind_expr ])
           (free_vars_pattern b.Ast.bind_pat)
       (* An interface DEFAULT body is keyed by a mangled name for exactly the

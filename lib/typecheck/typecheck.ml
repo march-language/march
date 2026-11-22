@@ -10335,7 +10335,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
            Option.value ~default:March_caps.Cap_rows.empty_row (Hashtbl.find_opt bound_rows qname)
          in
          if violates fb_caps row then Hashtbl.replace violators qname ()
-       | Fn_decl | Restrict_block _ -> ())
+       | Fn_decl | Restrict_block _ | Dep_grant _ -> ())
     env.fn_bound_points;
   let rows, chain_refs =
     if Hashtbl.length violators = 0 then (bound_rows, env.fn_refs)
@@ -10351,7 +10351,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
   Hashtbl.iter
     (fun qname { fb_caps = bound; fb_span; fb_site; fb_origin } ->
        match fb_origin with
-       | Restrict_block _ -> ()  (* [check_restrict_reach], below *)
+       | Restrict_block _ | Dep_grant _ -> ()  (* [check_restrict_reach], [check_dep_grants] *)
        | Fn_decl | Iface_method _ | Impl_method _ ->
        let row =
          Option.value ~default:March_caps.Cap_rows.empty_row (Hashtbl.find_opt rows qname)
@@ -10370,7 +10370,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
           phase 1's, unchanged. *)
        let who, by =
          match fb_origin with
-         | Fn_decl | Restrict_block _ -> (Printf.sprintf "`%s`" leaf, Printf.sprintf "`needs %s`" shown)
+         | Fn_decl | Restrict_block _ | Dep_grant _ -> (Printf.sprintf "`%s`" leaf, Printf.sprintf "`needs %s`" shown)
          | Iface_method { iface; impl_ty = Some ty } ->
            ( Printf.sprintf "`%s` in `impl %s(%s)`" leaf iface ty,
              Printf.sprintf "%sinterface `%s`'s `needs %s`"
@@ -10404,7 +10404,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
                for what that call does and the bound cannot be certified.\n%s"
               who by
               (match fb_origin with
-               | Fn_decl | Restrict_block _ ->
+               | Fn_decl | Restrict_block _ | Dep_grant _ ->
                  Printf.sprintf
                    "help: pass the function in as a parameter or call it by name, or \
                     bound `%s` by `needs IO`." leaf
@@ -10422,7 +10422,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
               in
               let help =
                 match fb_origin with
-                | Fn_decl | Restrict_block _ -> Printf.sprintf "help: add `%s` to the bound, or remove the use." c
+                | Fn_decl | Restrict_block _ | Dep_grant _ -> Printf.sprintf "help: add `%s` to the bound, or remove the use." c
                 | Iface_method _ ->
                   "help: remove the use; widening the interface's bound changes it \
                    for every impl and every caller."
@@ -11150,6 +11150,315 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) : unit =
   | Ast.ESend (a, b, _) -> go a; go b
   | Ast.ELetFn (_, _, _, body, _) -> go body
   | Ast.ELetQ (_, r, k, _) | Ast.ELetStar (_, r, k, _) -> go r; go k
+
+(* ── Dependency grants: the static check (ocap phase 6, decision 10) ───────
+
+   A grant limits every function of a dependency's package to the kinds it
+   names.  One bound point per granted package, keyed [<pkg>$grant] with
+   origin [Dep_grant], is judged as a literal `restrict` is: its reach is
+   every package function referenced from code outside the package (a call,
+   a value use, a dispatch-node edge into one of its impls), plus the
+   package's module-level bindings, and every IO capability that reach needs
+   must be covered by one of the grant's kinds.  A callback the outside code
+   passes in is charged to that code (it is its lambda), never to the
+   package.  An [extern] already counts as [IO.Foreign].
+
+   Reported as [dep_grant_exceeded], once per (package, capability), at the
+   first outside use in source order (the entry file first), naming the
+   package, the grant, the function that needs the capability and the chain
+   from the outside caller; the note gives the forge.toml line.  Under a
+   scoped grant the reached code's literal targets are judged as well
+   ([Scoped_literal_check], [dep_grant_scope]).  The grant entries themselves
+   are validated here too ([dep_grant_invalid], at the manifest line).  And
+   [March_caps.Dep_grants.proven] gets every package function whose row is
+   within the grant and reaches no untraceable call (decision 7).
+
+   Without a grants file this returns at once. *)
+let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
+    ~(entry_mod : Ast.name) (env : env) : unit =
+  let module G = March_caps.Dep_grants in
+  match G.active () with
+  | [] -> ()
+  | grants ->
+    let entry_file = entry_mod.Ast.span.Ast.file in
+    let at (g : G.grant) = Printf.sprintf "%s:%d" g.G.g_manifest g.G.g_line in
+    (* The manifest line when the manifest can be shown, else the entry
+       module (as the resolver's own grant errors do); the note names the
+       manifest position either way. *)
+    let manifest_span (g : G.grant) =
+      if Sys.file_exists g.G.g_manifest then
+        { Ast.file = g.G.g_manifest; start_line = g.G.g_line; start_col = 0;
+          end_line = g.G.g_line; end_col = 0 }
+      else entry_mod.Ast.span
+    in
+    let report ~code ~span ~notes msg =
+      Err.report env.errors
+        { Err.severity = Err.Error; span; message = msg; labels = []; notes; code; fix = None }
+    in
+    (* ── The entries ── *)
+    let kinds = Hashtbl.create 4 in
+    List.iter (fun (g : G.grant) ->
+        let span = manifest_span g in
+        let invalid why =
+          report ~code:Err.Code.dep_grant_invalid ~span
+            ~notes:[ "granted at " ^ at g;
+                     "hint: write the grant as you would write the package's `needs` \
+                      clause; `grant = []` grants nothing" ]
+            (Printf.sprintf "The grant to `%s` (`%s`) is not valid: %s." g.G.g_pkg g.G.g_text why)
+        in
+        (match G.root_problem g with Some why -> invalid why | None -> ());
+        let ks =
+          List.filter_map (fun (p, _) ->
+              let c = cap_path_of_names p in
+              match March_caps.Cap_lattice.suggest_cap c with
+              | Some known ->
+                invalid (Printf.sprintf "`%s` is not a known capability (did you mean `%s`?)" c known);
+                None
+              | None -> Some c)
+            g.G.g_entries
+        in
+        let ctx = Err.create () in
+        validate_cap_scopes ctx ~sp:span g.G.g_entries;
+        List.iter (fun (d : Err.diagnostic) ->
+            let first = List.hd (String.split_on_char '\n' d.Err.message) in
+            let first =
+              let n = String.length first in
+              if n > 0 && first.[n - 1] = '.' then String.sub first 0 (n - 1) else first
+            in
+            (* "The scope ..." reads on after "is not valid: ". *)
+            invalid (String.uncapitalize_ascii first))
+          (Err.sorted ctx);
+        Hashtbl.replace kinds g.G.g_pkg (List.sort_uniq String.compare ks))
+      grants;
+    (* ── Which keys are whose ── *)
+    let pkg_of_key (k : string) : string option =
+      let pre = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes k in
+      let rec up p =
+        if p = "" then None
+        else
+          match Hashtbl.find_opt env.grant_module_pkgs p with
+          | Some pkg -> Some pkg
+          | None -> (
+            match String.rindex_opt p '.' with
+            | Some i -> up (String.sub p 0 i)
+            | None -> None)
+      in
+      up (if pre = "" then "" else String.sub pre 0 (String.length pre - 1))
+    in
+    let resolve owner r = March_caps.Cap_rows.resolve_ref ~scopes:env.fn_scopes rows owner r in
+    let refs_of k = Option.value ~default:[] (Hashtbl.find_opt env.fn_refs k) in
+    let bodies_of k = Option.value ~default:[] (Hashtbl.find_opt env.fn_row_bodies k) in
+    (* A key as a reader knows it: the entry module's functions are keyed
+       bare (it is unwrapped), so they get its name back. *)
+    let shown k =
+      if String.contains k '.' || Hashtbl.mem env.stdlib_fns k then k
+      else entry_mod.Ast.txt ^ "." ^ k
+    in
+    (* Where [owner]'s body uses the name [w]: its first call, else its first
+       value use (a spawn is a value use of the actor's name). *)
+    let use_span owner w : (Ast.span * ref_use) option =
+      let bodies = bodies_of owner in
+      match
+        List.find_map (fun (_, e) ->
+            List.find_map (fun (n, nsp, _) -> if n = w then Some nsp else None)
+              (List.rev (March_ast.Calls.calls_in_expr [] e)))
+          bodies
+      with
+      | Some sp -> Some (sp, Ref_call)
+      | None ->
+        let found = ref None in
+        List.iter (fun (_, e) ->
+            iter_expr (fun (x : Ast.expr) ->
+                if !found = None then
+                  match x with
+                  | Ast.EVar n when n.Ast.txt = w -> found := Some (n.Ast.span, Ref_value)
+                  | Ast.EField (Ast.EVar m, f, _) | Ast.EField (Ast.ECon (m, [], _), f, _)
+                    when m.Ast.txt ^ "." ^ f.Ast.txt = w -> found := Some (f.Ast.span, Ref_value)
+                  | Ast.ECon (n, _, _) when n.Ast.txt = w -> found := Some (n.Ast.span, Ref_spawn)
+                  | _ -> ())
+              e)
+          bodies;
+        !found
+    in
+    (* A key's own site, for a use with no source of its own (a dispatch
+       node's edge). *)
+    let site_of k =
+      match Hashtbl.find_opt env.fn_bound_points k with
+      | Some fb when fb.fb_site <> Ast.dummy_span -> Some fb.fb_site
+      | _ -> (
+        match bodies_of k with
+        | (_, e) :: _ -> Some (span_of_expr e)
+        | [] -> None)
+    in
+    (* ── Each grant's reach: outside references into the package ── *)
+    let owner_of (g : G.grant) =
+      let key = g.G.g_pkg ^ "$grant" in
+      match Hashtbl.find_opt env.grant_owners key with
+      | Some go -> go
+      | None ->
+        let go = { go_pkg = g.G.g_pkg; go_refs = []; go_ops = [] } in
+        Hashtbl.replace env.grant_owners key go;
+        go
+    in
+    List.iter (fun (g : G.grant) ->
+        let go = owner_of g in
+        go.go_refs <- [];
+        Hashtbl.replace env.fn_bound_points (g.G.g_pkg ^ "$grant")
+          { fb_caps = Option.value ~default:[] (Hashtbl.find_opt kinds g.G.g_pkg);
+            fb_span = manifest_span g; fb_site = manifest_span g;
+            fb_origin = Dep_grant { pkg = g.G.g_pkg; manifest = at g; text = g.G.g_text } })
+      grants;
+    let owners = List.map (fun g -> (g.G.g_pkg, owner_of g)) grants in
+    let outside_keys =
+      List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) env.fn_refs [])
+    in
+    List.iter (fun k ->
+        let pk = pkg_of_key k in
+        (* A dispatch node owns no body: an edge from it into an impl is a
+           use by whatever dispatches, wherever the node is keyed. *)
+        let dispatch = not (Hashtbl.mem env.fn_row_bodies k) in
+        List.iter (fun w ->
+            match resolve k w with
+            | None -> ()
+            | Some r -> (
+              match pkg_of_key r with
+              | Some p when pk <> Some p || (dispatch && String.contains r '$') -> (
+                match List.assoc_opt p owners with
+                | None -> ()
+                | Some go ->
+                  let sp, use =
+                    match use_span k w with
+                    | Some x -> x
+                    | None -> (Option.value ~default:Ast.dummy_span (site_of r), Ref_value)
+                  in
+                  go.go_refs <- (r, sp, k, use) :: go.go_refs)
+              | _ -> ()))
+          (refs_of k))
+      outside_keys;
+    (* ── Judge each grant ── *)
+    let covered ks c = List.exists (fun b -> cap_subsumes b c) ks in
+    let outside ks c = cap_subsumes "IO" c && not (covered ks c) in
+    let source_order (a : Ast.span) (b : Ast.span) =
+      compare
+        (a.Ast.file <> entry_file, a.Ast.file, a.Ast.start_line, a.Ast.start_col)
+        (b.Ast.file <> entry_file, b.Ast.file, b.Ast.start_line, b.Ast.start_col)
+    in
+    List.iter (fun (g : G.grant) ->
+        let pkg = g.G.g_pkg in
+        let ks = Option.value ~default:[] (Hashtbl.find_opt kinds pkg) in
+        let go = owner_of g in
+        (* (package key, span, outside caller or None for a module-level
+           binding), in source order. *)
+        let roots =
+          List.stable_sort (fun (_, a, _) (_, b, _) -> source_order a b)
+            (List.map (fun (r, sp, caller, _) -> (r, sp, Some caller)) go.go_refs
+             @ List.map (fun (q, sp) -> (q, sp, None)) go.go_ops)
+        in
+        let notes entry =
+          [ "granted at " ^ at g;
+            (match entry with
+             | `Call r ->
+               Printf.sprintf "hint: widen the grant in forge.toml, or stop calling `%s`" (shown r)
+             | `Binding q ->
+               Printf.sprintf
+                 "hint: widen the grant in forge.toml; `%s` is a module-level binding of \
+                  the package, evaluated whenever the program runs" (shown q)) ]
+        in
+        let entry_of r caller = match caller with Some _ -> `Call r | None -> `Binding r in
+        let chain_head r caller =
+          match caller with Some c -> [ shown c; shown r ] | None -> [ shown r ]
+        in
+        let seen = Hashtbl.create 4 in
+        List.iter (fun (r, sp, caller) ->
+            match Hashtbl.find_opt rows r with
+            | None -> ()
+            | Some row ->
+              List.iter (fun c ->
+                  if outside ks c && not (Hashtbl.mem seen c) then begin
+                    Hashtbl.replace seen c ();
+                    let path =
+                      match Hashtbl.find_opt env.own_cap_closures r with
+                      | Some own when List.mem c own -> []
+                      | _ -> (
+                        match cap_reach_chain env ~from:r ~cap:c with
+                        | Some p -> p
+                        | None -> [])
+                    in
+                    let chain = chain_head r caller @ List.map shown path in
+                    let holder = List.nth chain (List.length chain - 1) in
+                    let span = if sp = Ast.dummy_span then manifest_span g else sp in
+                    report ~code:Err.Code.dep_grant_exceeded ~span ~notes:(notes (entry_of r caller))
+                      (Printf.sprintf "`%s` is granted `%s`, but `%s` needs `%s` (`%s`)."
+                         pkg g.G.g_text holder c (render_cap_chain chain))
+                  end)
+                (List.sort_uniq String.compare row.March_caps.Cap_rows.caps))
+          roots;
+        (* Literal targets under a scoped grant (Q3): every non-stdlib
+           function the reach gets to, scanned once, charged to the first
+           root (in source order) that reaches it. *)
+        if g.G.g_scoped then begin
+          let entries =
+            List.map (fun (p, sc) -> (cap_path_of_names p, sc)) g.G.g_entries
+          in
+          let scanned = Hashtbl.create 32 in
+          let reported = Hashtbl.create 4 in
+          List.iter (fun (r, sp, caller) ->
+              (* Breadth first from [r], keeping each key's path. *)
+              let queue = Queue.create () in
+              Queue.push (r, []) queue;
+              while not (Queue.is_empty queue) do
+                let k, path = Queue.pop queue in
+                if not (Hashtbl.mem scanned k) && not (Hashtbl.mem env.stdlib_fns k) then begin
+                  Hashtbl.replace scanned k ();
+                  let path = if k = r then [] else path @ [ k ] in
+                  Scoped_literal_check.check ~entries
+                    ~report:(fun (f : Scoped_literal_check.finding) ->
+                        if not (Hashtbl.mem reported (f.fn, f.target)) then begin
+                          Hashtbl.replace reported (f.fn, f.target) ();
+                          let chain = chain_head r caller @ List.map shown path in
+                          let span = if sp = Ast.dummy_span then manifest_span g else sp in
+                          report ~code:Err.Code.dep_grant_scope ~span
+                            ~notes:(notes (entry_of r caller))
+                            (Printf.sprintf "`%s` is granted `%s`, but `%s` %s (`%s`)."
+                               pkg g.G.g_text (shown f.fn) (Scoped_literal_check.describe f)
+                               (render_cap_chain chain))
+                        end)
+                    [ (k, List.map snd (bodies_of k)) ];
+                  List.iter (fun w ->
+                      match resolve k w with
+                      | Some q when not (Hashtbl.mem scanned q) -> Queue.push (q, path) queue
+                      | _ -> ())
+                    (refs_of k)
+                end
+              done)
+            roots
+        end)
+      grants;
+    (* ── What the frame-drop rule may rely on (decision 7) ── *)
+    let seed_unknown =
+      let memo = Hashtbl.create 64 in
+      fun k ->
+        match Hashtbl.find_opt memo k with
+        | Some b -> b
+        | None ->
+          let b =
+            match Hashtbl.find_opt env.fn_row_bodies k with
+            | Some bodies -> (March_caps.Cap_rows.seed_of_bodies bodies).March_caps.Cap_rows.sd_unknown
+            | None -> false
+          in
+          Hashtbl.replace memo k b;
+          b
+    in
+    Hashtbl.iter (fun k (row : March_caps.Cap_rows.row) ->
+        match pkg_of_key k with
+        | None -> ()
+        | Some p ->
+          let ks = Option.value ~default:[] (Hashtbl.find_opt kinds p) in
+          if not (List.exists (outside ks) row.March_caps.Cap_rows.caps)
+             && not (March_caps.Cap_rows.reaches_unknown ~scopes:env.fn_scopes ~known:rows
+                       ~refs:env.fn_refs ~seed_unknown k)
+          then Hashtbl.replace G.proven k ())
+      rows
 
 (* ── How a local name was bound, and the scope in effect where it was ────
    The runner's body argument is whatever VALUE flows into it, not the
@@ -12975,6 +13284,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   check_main_grant ~rows:cap_rows final_env m.Ast.mod_decls;
   check_fn_bounds ~rows:cap_rows final_env;
   check_restrict_reach ~rows:cap_rows final_env;
+  (* Dependency grants: the reached code of each granted package, held
+     under its grant.  No-op without a grants file. *)
+  check_dep_grants ~rows:cap_rows ~entry_mod:m.Ast.mod_name final_env;
   (* Per-role grants: the same walk from each runner-entry callback, bounded
      by `role R needs ...` (distributed-deploys step 4).  No-op for a
      program with no grant line. *)

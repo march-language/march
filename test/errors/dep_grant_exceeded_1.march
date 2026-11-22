@@ -1,0 +1,9 @@
+-- A granted dependency reached from the app needs a kind its grant leaves out.
+-- DEP: shout deps/dep_grant_exceeded_1/shout IO.Clock
+mod Main do
+  needs IO.Console
+
+  fn main() do
+    Shout.log("hello")
+  end
+end

@@ -1,0 +1,13 @@
+exit: 1
+-- CAPABILITY --------- errors/dep_grant_exceeded_1.march
+
+`shout` is granted `IO.Clock`, but `Shout.log` needs `IO.Console` (`Main.main → Shout.log`). [dep_grant_exceeded]
+
+7 |     Shout.log("hello")
+        ^^^^^^^^^
+
+    granted at forge.toml:2
+    hint: widen the grant in forge.toml, or stop calling `Shout.log`
+    run `march --explain dep_grant_exceeded`
+
+

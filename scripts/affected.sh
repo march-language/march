@@ -125,9 +125,11 @@ classify() {
       add SUITES compiler eval codegen stdlib stdlib_march errors test_reports $ALL_LSP; add ORACLES types ir
       reason "$f" "front-end suites, types+ir oracles" ;;
     lib/typecheck/*|lib/modules/*|lib/resolver/*)
-      add SUITES compiler eval codegen stdlib stdlib_march errors refinecheck $ALL_LSP
+      # dep_grants: the resolver's module-conflict check and the type
+      # checker's grant check (ocap phase 6) are driven end to end there.
+      add SUITES compiler eval codegen stdlib stdlib_march errors refinecheck dep_grants $ALL_LSP
       add ORACLES types refine
-      reason "$f" "front-end suites + refinecheck, types+refine oracles" ;;
+      reason "$f" "front-end suites + refinecheck + dep_grants, types+refine oracles" ;;
     lib/errors/*)
       add SUITES compiler errors test_reports $ALL_LSP; add ORACLES types
       reason "$f" "compiler, errors, test_reports, lsp; types oracle" ;;
@@ -190,6 +192,7 @@ classify() {
       reason "$f" "codegen, snapshots; ir oracle" ;;
     test/stdlib/*) add SUITES stdlib_march; reason "$f" "stdlib_march" ;;
     test/errors/*) add SUITES errors; reason "$f" "errors" ;;
+    test/dep_grants/*) add SUITES dep_grants; reason "$f" "dep_grants" ;;
     test/test_reports/*) add SUITES test_reports; reason "$f" "test_reports" ;;
     test/cap_conformance/*) add SUITES cap_conformance; reason "$f" "cap_conformance" ;;
     test/two_node/*)

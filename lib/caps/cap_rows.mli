@@ -125,6 +125,12 @@ val ref_prefix : ?scopes:(string, string) Hashtbl.t -> string -> string
     so a local helper resolved against it was missed in a nested module.
     Shared by [solve] and [cap_reach_chain] so the two cannot drift. *)
 
+val resolve_ref :
+  ?scopes:(string, string) Hashtbl.t -> (string, 'a) Hashtbl.t -> string -> string -> string option
+(** [resolve_ref known owner r]: the key reference [r], made from inside
+    [owner], resolves to: the owner's module prefix first, then the raw
+    name; [None] when neither is in [known]. *)
+
 val solve :
   ?with_rows:bool ->
   ?scopes:(string, string) Hashtbl.t ->

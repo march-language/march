@@ -1,0 +1,11 @@
+mod Cpid do
+  needs IO.Foreign
+
+  extern "c" : Cap(IO.Foreign) do
+    fn getpid() : Int
+  end
+
+  fn pid() do
+    getpid()
+  end
+end

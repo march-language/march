@@ -1,0 +1,13 @@
+exit: 1
+-- CAPABILITY ------------ errors/dep_grant_scope_1.march
+
+`weather` is granted `IO.NetConnect("api.weather.test/v1/", methods(get))`, but `Weather.Telemetry.ping` connects to `https://telemetry.example.net/ping` (`Main.main → Weather.forecast → Weather.Telemetry.ping`). [dep_grant_scope]
+
+8 |     match Weather.forecast("oslo") do
+              ^^^^^^^^^^^^^^^^
+
+    granted at forge.toml:3
+    hint: widen the grant in forge.toml, or stop calling `Weather.forecast`
+    run `march --explain dep_grant_scope`
+
+

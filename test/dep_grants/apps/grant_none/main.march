@@ -1,0 +1,7 @@
+mod Main do
+  needs IO.Console
+
+  fn main() do
+    Shout.log("hello")
+  end
+end

@@ -1,0 +1,6 @@
+-- Calls back into its caller: the callback's effects are the caller's.
+mod Each do
+  fn each(xs, f) do
+    List.map(xs, fn x -> f(x))
+  end
+end

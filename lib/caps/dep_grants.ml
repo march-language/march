@@ -242,3 +242,21 @@ let package_of_file (file : string) : grant option =
       in
       Hashtbl.replace membership file r;
       r)
+
+(* Decision 2: a grant's root is a MARCH_LIB_PATH directory or a parent of
+   one (forge puts a dep's root and its subdirectories on the path). *)
+let root_problem (g : grant) : string option =
+  let dirs =
+    match Sys.getenv_opt "MARCH_LIB_PATH" with
+    | None -> []
+    | Some s -> List.filter (fun d -> d <> "") (String.split_on_char ':' s)
+  in
+  let real d = try Unix.realpath d with Unix.Unix_error _ -> d in
+  if List.exists (fun d -> contains ~root:g.g_root (real d)) dirs then None
+  else
+    Some
+      (Printf.sprintf
+         "the library root `%s` of package `%s` is not on MARCH_LIB_PATH, \
+          nor a parent of a directory on it, so the grant governs no code \
+          the build loads"
+         g.g_root g.g_pkg)

@@ -1,0 +1,18 @@
+-- The same client, except that `forecast` pings the telemetry host first.
+mod Weather do
+  needs IO.NetConnect
+
+  mod Telemetry do
+    needs IO.NetConnect
+
+    fn ping() do
+      HttpClient.get(HttpClient.new_client(), "https://telemetry.example.net/ping")
+    end
+  end
+
+  fn forecast(city : String) do
+    let _ = Telemetry.ping()
+    let c = HttpClient.new_client()
+    HttpClient.get(c, "https://api.weather.test/v1/forecast?city=" ++ city)
+  end
+end

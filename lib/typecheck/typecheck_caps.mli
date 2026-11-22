@@ -26,6 +26,31 @@ val validate_cap_scopes :
 
 val is_migrate_fn_name : string -> bool
 
+(** The literal-target scans the module-scope checks run, shared with
+    {!Scoped_literal_check} (ocap phase 6, Q3). *)
+
+type name_use =
+  | NameLit of string * string * string * Ast.span
+      (** function, capability, literal name, span of the literal *)
+  | NameComputed of string * string * Ast.expr * Ast.span
+      (** function, capability, the name expression, its call's span *)
+  | NameListing of string * string * Ast.span
+  | NameFnValue of string * string * Ast.span
+      (** a name-taking function used as a value: its calls are out of sight *)
+
+(** Every name use in an expression, in reverse source order. *)
+val name_uses : ?resolve:(string -> string) -> name_use list -> Ast.expr -> name_use list
+
+(** Literal path arguments at capability-builtin and entry-point call sites,
+    (builtin, path, span of the literal), in reverse source order. *)
+val literal_path_uses :
+  (string * string * Ast.span) list -> Ast.expr -> (string * string * Ast.span) list
+
+(** The name scopes the [(capability, scope)] declarations narrow a
+    capability to; [None] when none covers it or an unscoped one does. *)
+val name_scopes_for :
+  (string * string option) list -> string -> March_caps.Name_scope.t list option
+
 val check_module_needs :
   env -> Ast.name -> cap_qname_prefix:string -> Ast.decl list -> unit
 

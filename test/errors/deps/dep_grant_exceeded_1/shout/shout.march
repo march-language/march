@@ -1,0 +1,8 @@
+-- A dependency that writes to the console.
+mod Shout do
+  needs IO.Console
+
+  fn log(msg : String) do
+    println("[log] " ++ msg)
+  end
+end

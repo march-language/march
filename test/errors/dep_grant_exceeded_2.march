@@ -1,0 +1,11 @@
+-- The granted dependency reaches the console through a dependency of its own
+-- that has no grant: the transitive callee runs under the grant too.
+-- DEP: weather deps/dep_grant_exceeded_2/weather IO.Clock
+-- DEP: speaker deps/dep_grant_exceeded_2/speaker none
+mod Main do
+  needs IO.Console
+
+  fn main() do
+    Weather.report("oslo")
+  end
+end

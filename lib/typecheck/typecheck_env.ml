@@ -219,6 +219,11 @@ type bound_origin =
       (** a literal `restrict` block (ocap phase 5): its kinds bound the
           block's own reach; the payload is where it is,
           [<source basename>:<line>] *)
+  | Dep_grant of { pkg : string; manifest : string; text : string }
+      (** a dependency grant (ocap phase 6, decision 10): its kinds bound
+          the code of package [pkg] that is reached from outside it; the
+          bound point is keyed [<pkg>$grant], [manifest] is
+          [<forge.toml>:<line>] and [text] the grant as written *)
 
 (** A literal `restrict` block's own reach, recorded beside its bound point
     rather than in [own_cap_closures]/[fn_refs]: nothing calls a block, and
@@ -234,6 +239,19 @@ type restrict_owner = {
   ro_owner : string;
   ro_ops : (string * string * Ast.span) list;
   ro_refs : (string * Ast.span * ref_use) list;
+}
+
+(** A dependency grant's reach (ocap phase 6, decision 10), recorded beside
+    its bound point [<pkg>$grant] as a restrict block's is: [go_refs] are the
+    references from code outside package [go_pkg] into it, (the package
+    function's key, the outside use's span, the outside caller's key, how it
+    is used), filled by [Typecheck.check_dep_grants] from [fn_refs]; [go_ops]
+    are the package's module-level bindings (key, span), recorded by
+    [check_module_needs]: they run whether or not anything calls them. *)
+type grant_owner = {
+  go_pkg : string;
+  mutable go_refs : (string * Ast.span * string * ref_use) list;
+  mutable go_ops : (string * Ast.span) list;
 }
 
 (** A bound to check: its capability paths, the span of the [needs] clause
@@ -877,6 +895,15 @@ type env = {
   (** Each literal `restrict` block's own reach, keyed like its entry in
       [fn_bound_points] ([<fn>$restrict@<line>:<col>]).  Recorded by
       [check_module_needs]; read by [check_fn_bounds]. *)
+  grant_owners : (string, grant_owner) Hashtbl.t;
+  (** Each dependency grant's reach, keyed like its bound point
+      ([<pkg>$grant]).  Empty without a grants file. *)
+  grant_module_pkgs : (string, string) Hashtbl.t;
+  (** Under a grants file: each module (its capability-key prefix, e.g.
+      ["Weather.Telemetry"]) whose file lies in a granted package, to that
+      package.  Recorded by [check_module_needs]; a key belongs to the
+      package of its longest dotted prefix found here.  Empty without a
+      grants file. *)
   local_mods : string list StrMap.t;
   (** In-file nested modules → their PRIVATE value/function member names.
       Populated by the [Ast.DMod] export step.  A same-file qualified reference
@@ -988,6 +1015,8 @@ let make_env errors type_map = {
   fn_grant_points = Hashtbl.create 16;
   fn_bound_points = Hashtbl.create 16;
   restrict_owners = Hashtbl.create 4;
+  grant_owners = Hashtbl.create 1;
+  grant_module_pkgs = Hashtbl.create 1;
   local_mods = StrMap.empty;
   offer_conts = ref [];
   offer_labels = [];

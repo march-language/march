@@ -131,11 +131,17 @@ type bound_origin =
   | Iface_method of { iface : string; impl_ty : string option }
   | Impl_method of { iface : string; impl_ty : string }
   | Restrict_block of string
+  | Dep_grant of { pkg : string; manifest : string; text : string }
 type ref_use = Ref_call | Ref_value | Ref_spawn
 type restrict_owner = {
   ro_owner : string;
   ro_ops : (string * string * Typecheck_types.Ast.span) list;
   ro_refs : (string * Typecheck_types.Ast.span * ref_use) list;
+}
+type grant_owner = {
+  go_pkg : string;
+  mutable go_refs : (string * Typecheck_types.Ast.span * string * ref_use) list;
+  mutable go_ops : (string * Typecheck_types.Ast.span) list;
 }
 type fn_bound = {
   fb_caps : string list;
@@ -304,6 +310,8 @@ type env = {
     Hashtbl.t;
   fn_bound_points : (string, fn_bound) Hashtbl.t;
   restrict_owners : (string, restrict_owner) Hashtbl.t;
+  grant_owners : (string, grant_owner) Hashtbl.t;
+  grant_module_pkgs : (string, string) Hashtbl.t;
   local_mods : string list StrMap.t;
   offer_conts :
     (Typecheck_types.session_ty ref *

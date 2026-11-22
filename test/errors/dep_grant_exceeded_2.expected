@@ -1,0 +1,13 @@
+exit: 1
+-- CAPABILITY --------- errors/dep_grant_exceeded_2.march
+
+`weather` is granted `IO.Clock`, but `Speaker.say` needs `IO.Console` (`Main.main → Weather.report → Speaker.say`). [dep_grant_exceeded]
+
+9 |     Weather.report("oslo")
+        ^^^^^^^^^^^^^^
+
+    granted at forge.toml:3
+    hint: widen the grant in forge.toml, or stop calling `Weather.report`
+    run `march --explain dep_grant_exceeded`
+
+

@@ -206,10 +206,19 @@ let is_control_wiring_file f = f = March_tir.Hot_reload.control_wiring_file
     answered by [Typecheck_builtins.file_is_stdlib], the same predicate the
     stdlib-only builtin gate uses, so the gate and this filter cannot drift
     apart. *)
+(* A dependency grant's manifest (forge.toml): grant diagnostics
+   (dep_grant_invalid, a nested granted root) point at the grant's line
+   there, and must not be filtered out as someone else's file. *)
+let is_grant_manifest f =
+  f <> ""
+  && List.exists (fun (g : March_caps.Dep_grants.grant) -> g.March_caps.Dep_grants.g_manifest = f)
+       (March_caps.Dep_grants.active ())
+
 let user_diag_file ~filename ~user_files f =
   f = filename
   || (not (March_typecheck.Typecheck_builtins.file_is_stdlib f)
       && (f = "" || f = "<unknown>" || f = synthetic_file || List.mem f user_files))
+  || is_grant_manifest f
 
 (** Whether to show diagnostic [d] to the user.  A HINT inside generated code
     is dropped: a hint asks for an edit (qualify this constructor, rename
@@ -259,7 +268,10 @@ let render_user_diag ~src ~filename ~read_file (d : March_errors.Errors.diagnost
   else
     let (d_src, d_file) =
       if f = filename || f = "" || f = "<unknown>" then (src, filename)
-      else (try read_file f with Sys_error _ -> src), f
+      else
+        (* A grant manifest that cannot be read is shown without an
+           excerpt, never with the entry file's lines. *)
+        (try read_file f with Sys_error _ -> if is_grant_manifest f then "" else src), f
     in
     March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d
 
@@ -2701,6 +2713,18 @@ let probe_cas_tag ~(cross : bool) : string list =
     let s = Lazy.force openssl_probe_flags ^ "|" ^ Lazy.force compress_probe_flags in
     ["libprobe:" ^ String.sub (Digest.to_hex (Digest.string s)) 0 16]
 
+(* Dependency grants (ocap phase 6, decision 12): the active grants decide
+   the verdict (a narrowed grant turns a clean check into a refusal) and the
+   emitted program (grant frames), so their digest is a flag tag of every
+   compiler cache key: --check's and --compile's source keys (and the
+   depend-mode keys built from the same flags) and the interpreter's cached
+   capability verdict.  With no grants there is no tag at all, so a
+   grant-free build's keys are unchanged. *)
+let grants_cas_tag () : string list =
+  match March_caps.Dep_grants.digest () with
+  | Some h -> [ "grants:" ^ h ]
+  | None -> []
+
 let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
       ~(target_label : string) ~(src_hash : string) : string list * string =
   (* Cross-toolchain identity: the target OpenSSL/zlib .so live OUTSIDE the
@@ -2736,6 +2760,7 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
         (* --static links different archives and checks the result. *)
         @ (if !static_build then ["static"] else [])
         @ (if !cap_strict then ["capstrict"] else [])
+        @ grants_cas_tag ()
         (* --target-cpu changes the instructions clang emits (SIMD width),
            so a baseline-ISA cached binary must never satisfy it. *)
         @ (if !target_cpu <> "" then ["cpu:" ^ !target_cpu] else [])
@@ -2867,6 +2892,7 @@ let interp_cap_cache_key ~src ~filename ~is_js ~test_mode : string option =
     let flags =
       (if !stdlib_source then ["stdlib-source"] else [])
       @ (if !cap_strict then ["capstrict"] else [])
+      @ grants_cas_tag ()
       @ (if test_mode then ["test"] else [])
       @ (if is_js then ["js"] else []) in
     Some (March_cas.Cas.compilation_hash
@@ -3968,6 +3994,7 @@ let compile filename =
           (if !stdlib_source then ["stdlib-source"] else [])
           @ z3_cas_tag ()
           @ (if !cap_strict then ["capstrict"] else [])
+          @ grants_cas_tag ()
           @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])
           @ Schema_migration.baseline_cas_tag ()
           @ List.map (fun (p, l) -> "pexpand:" ^ p ^ ":" ^ l)
@@ -7679,6 +7706,7 @@ let run_check_cmd ?(emit_caps = false) files =
     List.sort_uniq String.compare (files @ !import_user_files) in
   let is_user_file (d : March_errors.Errors.diagnostic) =
     List.mem d.span.March_ast.Ast.file lib_files ||
+    is_grant_manifest d.span.March_ast.Ast.file ||
     d.span.March_ast.Ast.file = "" ||
     d.span.March_ast.Ast.file = "<unknown>"
   in

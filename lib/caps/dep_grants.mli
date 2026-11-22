@@ -63,4 +63,18 @@ val digest : unit -> string option
 
 val proven : (string, unit) Hashtbl.t
 (** Granted-package functions whose transitive capability row the type
-    checker proved within their package's grant (filled by the checker). *)
+    checker proved within their package's grant and which reach no call of
+    an untraceable function value (filled by [Typecheck.check_dep_grants]).
+
+    Keyed by the type checker's capability key, exactly as in its
+    [fn_refs] / [fn_bound_points]: the module path (the entry module's
+    name excluded: it is unwrapped) and the function's name joined by
+    ["."], e.g. ["Weather.forecast"], ["Weather.Telemetry.ping"]; an impl
+    method is ["<Mod>.<Iface>$<Ty>.<method>"], a module-level binding is
+    keyed like a function of its name.  A lookup from a definition derives
+    the key from the def's module path and its name. *)
+
+val root_problem : grant -> string option
+(** [Some why] when the grant's library root is neither one of the
+    [MARCH_LIB_PATH] directories nor a parent of one (plan decision 2):
+    such a grant would govern no code the build loads as a dependency. *)

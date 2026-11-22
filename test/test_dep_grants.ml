@@ -359,6 +359,184 @@ let test_conflict_nested_root () =
            ~grant_lines:[ "w\t" ^ nested ^ "\tforge.toml:4\t()" ])
         ~mentions:[ "package `w`"; nested; app_lib ])
 
+(* ── Task 3: the static check, end to end ─────────────────────────────────
+
+   `march --check` on the programs under test/dep_grants/apps/<case>/, with
+   the dependencies under test/dep_grants/deps/ on MARCH_LIB_PATH and a
+   grants file (and a forge.toml, so the grant's position is a real line)
+   in a fresh temp directory, the working directory (so the project CAS is
+   its own).  One private HOME for the whole run: no cache from another
+   worktree leaks in, and the stdlib typecheck cache it fills is shared.
+   [MARCH_BIN] overrides the compiler (to show these fail on one without
+   the check). *)
+
+let private_home =
+  lazy begin
+    let d = tmpdir () in
+    Unix.mkdir (Filename.concat d ".cache") 0o755;
+    d
+  end
+
+let main_exe () =
+  match Sys.getenv_opt "MARCH_BIN" with
+  | Some p when p <> "" -> p
+  | _ ->
+    let exe = if Filename.is_relative Sys.executable_name
+      then Filename.concat (Sys.getcwd ()) Sys.executable_name else Sys.executable_name in
+    Filename.concat (Filename.dirname exe) "../bin/main.exe"
+
+(* The source tree's test/dep_grants: the parent of the `_build` this test
+   runs under. *)
+let fixtures () =
+  let exe = if Filename.is_relative Sys.executable_name
+    then Filename.concat (Sys.getcwd ()) Sys.executable_name else Sys.executable_name in
+  let rec up d =
+    let p = Filename.dirname d in
+    if Filename.basename d = "_build" then p
+    else if p = d then Alcotest.fail "no _build ancestor of the test executable"
+    else up p in
+  realpath (Filename.concat (up (Filename.dirname exe)) "test/dep_grants")
+
+let dep name = Filename.concat (fixtures ()) ("deps/" ^ name)
+let app name = Filename.concat (fixtures ()) ("apps/" ^ name ^ "/main.march")
+
+(* A project directory: a forge.toml whose line [n] grants each (package,
+   dir, scope) of [grants] (n = 2, 3, ...), and the grants file. *)
+let project ?(grants = []) () =
+  let d = tmpdir () in
+  write (Filename.concat d "forge.toml")
+    (String.concat "\n"
+       ("[deps]" :: List.map (fun (p, dir, sc) ->
+            Printf.sprintf "%s = { path = %S, grant = [%S] }" p dir sc) grants) ^ "\n");
+  let lines =
+    List.mapi (fun i (p, dir, sc) ->
+        Printf.sprintf "%s\t%s\tforge.toml:%d\t%s" p dir (i + 2) sc) grants in
+  if lines <> [] then ignore (grants_file d lines);
+  d
+
+let check_in ?(json = false) ~libs d file : int * string =
+  let out = Filename.concat d "check.out" in
+  let grants = Filename.concat d "dep-grants" in
+  let cmd =
+    Printf.sprintf "cd %s && HOME=%s MARCH_LIB_PATH=%s %s %s %s %s > %s 2>&1"
+      (Filename.quote d) (Filename.quote (Lazy.force private_home))
+      (Filename.quote (String.concat ":" libs))
+      (if Sys.file_exists grants then "MARCH_DEP_GRANTS=" ^ Filename.quote grants else "")
+      (Filename.quote (main_exe ())) (if json then "--check-json" else "--check")
+      (Filename.quote file) (Filename.quote out) in
+  let code = Sys.command cmd in
+  let ic = open_in_bin out in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  (code, s)
+
+let expect_pass what (code, out) =
+  if code <> 0 then Alcotest.failf "%s: expected `--check` to pass, got exit %d:\n%s" what code out
+
+let expect_fail what ~code:slug ~mentions (code, out) =
+  if code = 0 then Alcotest.failf "%s: expected `--check` to fail, it passed:\n%s" what out;
+  List.iter (fun m ->
+      if not (has_sub out m) then
+        Alcotest.failf "%s: the output does not mention %S:\n%s" what m out)
+    (("[" ^ slug ^ "]") :: mentions)
+
+let api_scope = "IO.NetConnect(\"api.weather.test/v1/\", methods(get))"
+
+let test_api_client_within_grant () =
+  with_reset (fun () ->
+      let w = dep "weather_quiet" in
+      let d = project ~grants:[ ("weather", w, api_scope) ] () in
+      expect_pass "an API client limited to one path with GET"
+        (check_in ~libs:[ w ] d (app "api_client")))
+
+let test_unreached_telemetry () =
+  with_reset (fun () ->
+      let w = dep "weather_quiet" in
+      let d = project ~grants:[ ("weather", w, "IO.NetConnect(\"api.weather.test\")") ] () in
+      expect_pass "a dep whose unreached Telemetry.ping connects elsewhere"
+        (check_in ~libs:[ w ] d (app "unreached_telemetry")))
+
+let test_reached_telemetry () =
+  with_reset (fun () ->
+      let w = dep "weather_noisy" in
+      let d = project ~grants:[ ("weather", w, api_scope) ] () in
+      expect_fail "reaching Telemetry.ping" ~code:"dep_grant_scope"
+        ~mentions:[ "`weather`"; "forge.toml:2"; "telemetry.example.net";
+                    "Main.main \xe2\x86\x92 Weather.forecast \xe2\x86\x92 Weather.Telemetry.ping" ]
+        (check_in ~libs:[ w ] d (app "reached_telemetry")))
+
+let test_kind_outside_grant () =
+  with_reset (fun () ->
+      let s = dep "shout" in
+      let d = project ~grants:[ ("shout", s, "IO.Clock") ] () in
+      expect_fail "a kind outside the grant" ~code:"dep_grant_exceeded"
+        ~mentions:[ "`shout` is granted `IO.Clock`, but `Shout.log` needs `IO.Console`";
+                    "Main.main \xe2\x86\x92 Shout.log"; "granted at forge.toml:2";
+                    "stop calling `Shout.log`" ]
+        (check_in ~libs:[ s ] d (app "kind")))
+
+let test_ungranted_dep () =
+  with_reset (fun () ->
+      (* Grants are in effect (another package is granted), but `shout` has
+         no entry: it is limited only by its own needs and its caller. *)
+      let s = dep "shout" and e = dep "each" in
+      let d = project ~grants:[ ("each", e, "()") ] () in
+      expect_pass "a dep with no grant entry" (check_in ~libs:[ s; e ] d (app "ungranted")))
+
+let test_callback_charged_to_app () =
+  with_reset (fun () ->
+      let e = dep "each" in
+      let d = project ~grants:[ ("each", e, "()") ] () in
+      expect_pass "an app callback doing IO outside the grant"
+        (check_in ~libs:[ e ] d (app "callback")))
+
+let test_grant_nothing () =
+  with_reset (fun () ->
+      let s = dep "shout" in
+      let d = project ~grants:[ ("shout", s, "()") ] () in
+      expect_fail "grant = [] with a reached println" ~code:"dep_grant_exceeded"
+        ~mentions:[ "`shout` is granted `()`"; "`IO.Console`" ]
+        (check_in ~libs:[ s ] d (app "grant_none")))
+
+(* A grant's root must be on MARCH_LIB_PATH or a parent of a directory on
+   it (decision 2); the error is at the manifest line, and survives
+   --check-json (whose filter keeps only the user's files). *)
+let test_root_off_lib_path_json () =
+  with_reset (fun () ->
+      let s = dep "shout" and e = dep "each" in
+      let d = project ~grants:[ ("shout", s, "IO.Console") ] () in
+      (* `shout` is granted, but only `each` is on the library path. *)
+      let human = check_in ~libs:[ e ] d (app "callback") in
+      expect_fail "a root off the library path" ~code:"dep_grant_invalid"
+        ~mentions:[ "not on MARCH_LIB_PATH"; "forge.toml" ] human;
+      let code, json = check_in ~json:true ~libs:[ e ] d (app "callback") in
+      ignore code;
+      if not (has_sub json "\"code\":\"dep_grant_invalid\"" && has_sub json "\"file\":\"forge.toml\""
+              && has_sub json "\"start_line\":2") then
+        Alcotest.failf "--check-json dropped the manifest-anchored diagnostic:\n%s" json)
+
+(* Decision 12 / R3: the grants file's digest is part of the --check cache
+   key, so narrowing a grant re-checks instead of replaying a clean verdict.
+   Same working directory (the CAS lives there), same HOME, no cache
+   cleared between the runs. *)
+let test_grant_change_misses_cache () =
+  with_reset (fun () ->
+      let s = dep "shout" in
+      let d = project ~grants:[ ("shout", s, "IO.Console") ] () in
+      expect_pass "granted the console" (check_in ~libs:[ s ] d (app "kind"));
+      expect_pass "the same again (a cache hit)" (check_in ~libs:[ s ] d (app "kind"));
+      (* One byte: IO.Console -> IO.Consolf would be invalid; narrow to
+         IO.Clock instead by rewriting the same file in place. *)
+      ignore (grants_file d [ Printf.sprintf "shout\t%s\tforge.toml:2\tIO.Clock" s ]);
+      expect_fail "after narrowing the grant" ~code:"dep_grant_exceeded"
+        ~mentions:[ "`shout` is granted `IO.Clock`" ]
+        (check_in ~libs:[ s ] d (app "kind"));
+      (* A one-byte edit of the position only (line 2 -> 3) is a new key too. *)
+      ignore (grants_file d [ Printf.sprintf "shout\t%s\tforge.toml:3\tIO.Clock" s ]);
+      expect_fail "after moving the grant's line" ~code:"dep_grant_exceeded"
+        ~mentions:[ "granted at forge.toml:3" ]
+        (check_in ~libs:[ s ] d (app "kind")))
+
 let tests =
   [ ( "dep_grants",
       [ Alcotest.test_case "load_none" `Quick test_load_none;
@@ -377,4 +555,14 @@ let tests =
         Alcotest.test_case "one package, two files" `Quick
           test_same_package_twice_is_not_a_conflict;
         Alcotest.test_case "a granted root nested in a project dir" `Quick
-          test_conflict_nested_root ] ) ]
+          test_conflict_nested_root ] );
+    ( "dep_grant_check",
+      [ Alcotest.test_case "API client within its grant" `Quick test_api_client_within_grant;
+        Alcotest.test_case "unreached telemetry" `Quick test_unreached_telemetry;
+        Alcotest.test_case "reached telemetry" `Quick test_reached_telemetry;
+        Alcotest.test_case "kind outside the grant" `Quick test_kind_outside_grant;
+        Alcotest.test_case "ungranted dep" `Quick test_ungranted_dep;
+        Alcotest.test_case "callback charged to the app" `Quick test_callback_charged_to_app;
+        Alcotest.test_case "grant = []" `Quick test_grant_nothing;
+        Alcotest.test_case "root off the library path, JSON" `Quick test_root_off_lib_path_json;
+        Alcotest.test_case "a grant change misses the cache" `Quick test_grant_change_misses_cache ] ) ]
