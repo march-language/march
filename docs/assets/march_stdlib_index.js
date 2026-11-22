@@ -69,7 +69,8 @@ window.marchModuleIndex = {
    "file": "authority.march",
    "unavailable": null,
    "uses": [
-    "IO"
+    "IO",
+    "Scope"
    ]
   },
   "Base64": {
@@ -1117,6 +1118,15 @@ window.marchModuleIndex = {
    "unavailable": null,
    "uses": [
     "Actor"
+   ]
+  },
+  "Scope": {
+   "file": "scope.march",
+   "unavailable": null,
+   "uses": [
+    "Authority",
+    "IO",
+    "List"
    ]
   },
   "Seq": {
