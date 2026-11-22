@@ -56,6 +56,10 @@ let codec_missing = "codec_missing"
 let compiled_unsupported = "compiled_unsupported"
 let constructor_arity = "constructor_arity"
 let curried_lambda_over_tuple = "curried_lambda_over_tuple"
+let dep_grant_exceeded = "dep_grant_exceeded"
+let dep_grant_invalid = "dep_grant_invalid"
+let dep_grant_scope = "dep_grant_scope"
+let dep_module_conflict = "dep_module_conflict"
 let deprecated = "deprecated"
 let deterministic_violation = "deterministic_violation"
 let diverges_conflict = "diverges_conflict"
@@ -284,6 +288,10 @@ let all = [
   compiled_unsupported;
   constructor_arity;
   curried_lambda_over_tuple;
+  dep_grant_exceeded;
+  dep_grant_invalid;
+  dep_grant_scope;
+  dep_module_conflict;
   deprecated;
   deterministic_violation;
   diverges_conflict;
@@ -500,7 +508,7 @@ let category_table : (string * string list) list = [
     template_fragment_position; template_unsafe_interpolation;
     template_unterminated; then_keyword ];
   "NAMING", [
-    alias_shadows_module; ambiguous_constructor; duplicate_binder; duplicate_constructor;
+    alias_shadows_module; ambiguous_constructor; dep_module_conflict; duplicate_binder; duplicate_constructor;
     duplicate_field; import_unresolved; prelude_collision; reserved_type_name; unbound_variable;
     unknown_constructor; unknown_export; unknown_qualified_name;
     unknown_record_field ];
@@ -524,7 +532,8 @@ let category_table : (string * string list) list = [
     cap_dict_misuse; cap_dict_type; cap_grant; cap_grant_exceeded;
     cap_host_annotation; cap_host_scope; cap_host_unproven;
     cap_impl_invalid; cap_mismatch; cap_narrow_invalid; cap_needs;
-    cap_restrict; cap_result_unhandled; cap_root_broad; cap_scope_violation; cap_unchecked; cap_widen; extern_cap_missing;
+    cap_restrict; cap_result_unhandled; cap_root_broad; cap_scope_violation; cap_unchecked; cap_widen;
+    dep_grant_exceeded; dep_grant_invalid; dep_grant_scope; extern_cap_missing;
     extern_needs_foreign; import_cap_missing; invalid_cap_scope;
     io_not_allowed; mint_cap_invalid; proof_cap_foreign;
     proof_cap_mint_private; proof_cap_return; role_grant_exceeded;

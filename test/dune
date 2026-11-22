@@ -103,7 +103,9 @@
  (name run_dep_grants)
  (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))   ; see "CI sharding" above
  (modules run_dep_grants test_dep_grants)
- (libraries march_caps march_ast alcotest unix)
+ (libraries march_caps march_ast march_parser march_desugar march_resolver march_errors alcotest unix)
+ ; the stdlib, for the conflict cases that name a stdlib module
+ (deps (source_tree ../stdlib))
  (action (run %{test} -e)))
 
 (test

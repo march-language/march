@@ -3094,9 +3094,9 @@ let run_test_cmd args =
     end;
     let (resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
     if resolve_errors <> [] then begin
-      List.iter (fun (_mod_name, span, msg) ->
+      List.iter (fun e ->
           Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file
-            (March_errors.Errors.make ~code:March_errors.Code.import_unresolved ~span msg))
+            (March_resolver.Resolver.diagnostic_of_error e))
         ) resolve_errors;
       exit 1
     end;
@@ -4171,9 +4171,9 @@ let compile filename =
    | _ -> ());
   (* Resolve cross-file imports: find imported .march files, parse and inject *)
   let (resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
-  List.iter (fun (_mod_name, span, msg) ->
+  List.iter (fun e ->
       emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file
-        (March_errors.Errors.make ~code:March_errors.Code.import_unresolved ~span msg)))
+        (March_resolver.Resolver.diagnostic_of_error e)))
     ) resolve_errors;
   let has_resolve_errors = resolve_errors <> [] in
   (* --topology: check the digest against what is loaded and, when the entry
@@ -4624,10 +4624,13 @@ let compile filename =
             | March_driver.Cap_static.Diag _ -> ()) (Lazy.force cap_findings);
         cap_diags ()
       end in
+    (* The resolver's errors (an unresolved import, a dependency-grants
+       module conflict) were printed to stderr above; tooling sees them too. *)
+    let resolve_diags = List.map March_resolver.Resolver.diagnostic_of_error resolve_errors in
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d then
         print_string (March_errors.Errors.render_diagnostic_json d ^ "\n")
-    ) (Fix_verify.verify ~src ~verifiable:is_user_file (diags @ cap));
+    ) (Fix_verify.verify ~src ~verifiable:is_user_file (resolve_diags @ diags @ cap));
     exit 0
   end;
   let frontend_rejected =

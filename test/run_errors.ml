@@ -33,7 +33,22 @@
     a private [HOME], so the rendered header carries the same path wherever the
     suite runs and no cache from another worktree can leak in. One compiler
     process per program, so the once-per-run explain pointer is
-    deterministic. [MARCH_JOBS] caps the parallel compiler runs (default 8). *)
+    deterministic. [MARCH_JOBS] caps the parallel compiler runs (default 8).
+
+    Dependencies (ocap phase 6, dependency grants): a line
+    [-- DEP: <package> <dir> <scope text>] copies [test/errors/<dir>] into the
+    temp directory as [deps/<package>] and puts it on [MARCH_LIB_PATH] (as the
+    relative path [deps/<package>], so messages that name its files read the
+    same everywhere); its grant is the scope text, written to a grants file
+    that [MARCH_DEP_GRANTS] names, with the manifest position
+    [forge.toml:<the DEP line's number>].  A scope text of [none] puts the
+    directory on the library path with no grant (an ungranted dependency, or
+    the project's own library directory); [()] grants nothing.  Several DEP
+    lines are allowed, in order; a [<dir>] inside an earlier DEP line's dir is
+    not copied again but used in place inside that copy, so a library root
+    nested in another stays nested.  Dependency sources live under
+    [test/errors/deps/], which the corpus scan (top-level [*.march] only)
+    never mistakes for cases. *)
 
 let update_mode = Sys.getenv_opt "UPDATE_ERRORS" = Some "1"
 
@@ -110,24 +125,115 @@ let has_sub s sub =
   let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
   go 0
 
+(* ── Dependencies: [-- DEP:] lines (see the header comment) ────────── *)
+
+let dep_marker = "-- DEP:"
+
+(* (line number, package, dir relative to test/errors, scope text or None). *)
+let deps_of src : (int * string * string * string option) list =
+  List.concat
+    (List.mapi (fun i l ->
+         let l = String.trim l in
+         let n = String.length dep_marker in
+         if String.length l >= n && String.sub l 0 n = dep_marker then
+           let rest = String.trim (String.sub l n (String.length l - n)) in
+           match String.index_opt rest ' ' with
+           | None -> failwith ("malformed -- DEP: line: " ^ l)
+           | Some a ->
+             let pkg = String.sub rest 0 a in
+             let rest = String.trim (String.sub rest a (String.length rest - a)) in
+             let dir, text =
+               match String.index_opt rest ' ' with
+               | None -> failwith ("malformed -- DEP: line (no scope text): " ^ l)
+               | Some b ->
+                 (String.sub rest 0 b,
+                  String.trim (String.sub rest b (String.length rest - b))) in
+             [ (i + 1, pkg, dir, if text = "none" then None else Some text) ]
+         else [])
+       (String.split_on_char '\n' src))
+
+let rec copy_tree src dst =
+  if Sys.is_directory src then begin
+    if not (Sys.file_exists dst) then Unix.mkdir dst 0o755;
+    Array.iter (fun f -> copy_tree (Filename.concat src f) (Filename.concat dst f))
+      (Sys.readdir src)
+  end else begin
+    let ic = open_in_bin src in
+    let s = really_input_string ic (in_channel_length ic) in
+    close_in ic;
+    let oc = open_out_bin dst in
+    output_string oc s;
+    close_out oc
+  end
+
+(* Lay out [src]'s dependencies under [dir] (the program's temp dir) and
+   return the environment assignments that point the compiler at them ("" when
+   the program has none). *)
+let setup_deps ~dir ~src =
+  match deps_of src with
+  | [] -> ""
+  | deps ->
+    let deps_dir = Filename.concat dir "deps" in
+    Unix.mkdir deps_dir 0o755;
+    let real_dir = Unix.realpath dir in
+    (* Each dep's directory, relative to [dir]: [deps/<package>], or, for a
+       dir inside an earlier DEP's dir, the same place inside that copy, so
+       a nested library root stays nested. *)
+    let placed = ref [] in
+    let place (_, pkg, rel, _) =
+      let inside =
+        List.find_map (fun (r, at) ->
+            let pre = r ^ "/" in
+            if String.starts_with ~prefix:pre rel then
+              Some (at ^ "/" ^ String.sub rel (String.length pre)
+                                 (String.length rel - String.length pre))
+            else None)
+          !placed in
+      let at =
+        match inside with
+        | Some at -> at
+        | None ->
+          copy_tree (Filename.concat (errors_dir ()) rel) (Filename.concat deps_dir pkg);
+          "deps/" ^ pkg in
+      placed := !placed @ [ (rel, at) ];
+      at in
+    let ats = List.map place deps in
+    let grants =
+      List.concat
+        (List.map2 (fun (line, pkg, _, text) at ->
+             match text with
+             | None -> []
+             | Some t -> [ Printf.sprintf "%s\t%s/%s\tforge.toml:%d\t%s" pkg real_dir at line t ])
+           deps ats) in
+    let lib_path = String.concat ":" ats in
+    let grants_env =
+      if grants = [] then ""
+      else begin
+        let f = Filename.concat real_dir "dep-grants" in
+        write_file f (String.concat "\n" grants ^ "\n");
+        " MARCH_DEP_GRANTS=" ^ Filename.quote f
+      end in
+    "MARCH_LIB_PATH=" ^ Filename.quote lib_path ^ grants_env ^ " "
+
 let script ~dir ~rel ~src =
   let exe = Filename.quote (Test_helpers.find_main_exe ()) in
-  let home = Filename.quote (Lazy.force private_home) in
+  (* The environment: the deps a [-- DEP:] line asks for, and the private HOME. *)
+  let env = setup_deps ~dir ~src ^ "HOME=" ^ Filename.quote (Lazy.force private_home) in
   let rel = Filename.quote rel in
   let human, json =
     if has_sub src compiled_marker then
       (* Compile, then run the binary from the same directory, so the report
          finds the source file it quotes.  [--opt 0]: which functions are
          still on the stack must not depend on the C compiler's inliner. *)
-      Printf.sprintf "{ HOME=%s %s --compile --opt 0 -o prog.bin %s > /dev/null 2>&1 && ./prog.bin; }"
-        home exe rel, "true"
+      Printf.sprintf "{ %s %s --compile --opt 0 -o prog.bin %s > /dev/null 2>&1 && ./prog.bin; }"
+        env exe rel, "true"
     else if has_sub src run_marker then
-      Printf.sprintf "HOME=%s %s %s" home exe rel, "true"
+      Printf.sprintf "%s %s %s" env exe rel, "true"
     else
       let h, j = if has_sub src why_copies_marker
         then "--why-copies", "--why-copies-json" else "--check", "--check-json" in
-      Printf.sprintf "HOME=%s %s %s %s" home exe h rel,
-      Printf.sprintf "HOME=%s %s %s %s" home exe j rel in
+      Printf.sprintf "%s %s %s %s" env exe h rel,
+      Printf.sprintf "%s %s %s %s" env exe j rel in
   Printf.sprintf
     "cd %s && %s > check.out 2> check.err; echo $? > check.code; \
      %s > json.out 2> /dev/null; true"

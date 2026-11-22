@@ -1,0 +1,13 @@
+exit: 1
+-- NAMING ------------ errors/dep_module_conflict_3.march
+
+The library root `deps/app_lib/vendor/w` of package `w` lies inside the library directory `deps/app_lib`, so its modules would also be built as code outside the package. [dep_module_conflict]
+
+5 | mod Main do
+        ^^^^
+
+    granted at forge.toml:4
+    hint: move the dependency outside the project's directories, or drop its grant
+    run `march --explain dep_module_conflict`
+
+

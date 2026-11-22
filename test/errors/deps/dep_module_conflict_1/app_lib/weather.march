@@ -1,0 +1,3 @@
+mod Weather do
+  fn forecast() : String do "sunny" end
+end
