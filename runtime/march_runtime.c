@@ -12477,9 +12477,6 @@ static void *mk_err(void *msg_str) {
 static void *mk_err_cstr(const char *msg) {
     return mk_err(march_string_lit(msg, (int64_t)strlen(msg)));
 }
-static void *mk_err_errno(void) {
-    return mk_err_cstr(strerror(errno));
-}
 
 /* FileError tags (must match stdlib/file.march ptype declaration order):
    NotFound=0, Permission=1, IsDirectory=2, NotEmpty=3, IoError=4, Closed=5,
@@ -13811,7 +13808,7 @@ static void **csv_parse_row_fields(FILE *f, char delim, int rfc4180,
 /* Csv.CsvError = FileError(String) | CsvParseError(String) (stdlib/csv.march
  * ptype declaration order: FileError = tag 0).  csv_open is typed
  * Result(Int, CsvError), so its Err payload must be a real CsvError cell, not
- * a bare string: an earlier mk_err_errno() here made compiled
+ * a bare string: an earlier Err(strerror(errno)) here made compiled
  * `Csv.read_all` return Err(<strerror>), which printed without the
  * constructor and never matched a `Csv.FileError(m)` arm.  The header is
  * stamped with Csv.CsvError's type id so compiled `to_string` renders the
