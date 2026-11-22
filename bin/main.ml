@@ -2962,6 +2962,45 @@ let rec march_files_in dir =
     | exception (Sys_error _ | Unix.Unix_error _) -> acc
   ) [] entries
 
+(* Dependency grants (ocap phase 6): load the grants file named by
+   `--dep-grants FILE`, else by MARCH_DEP_GRANTS, once per process and before
+   anything type-checks.  With neither set nothing is read and the active set
+   stays empty, so every pass that reads it is the identity.  An invalid file
+   is a one-line error and exit 1, not an exception. *)
+let install_dep_grants ?flag () =
+  let module G = March_caps.Dep_grants in
+  match G.load ?flag () with
+  | Ok gs -> G.set_active gs
+  | Error (msg, line) ->
+    let file =
+      match flag with
+      | Some f -> f
+      | None -> Option.value (Sys.getenv_opt G.env_var) ~default:""
+    in
+    Printf.eprintf "march: invalid dependency grants file %s%s: %s\n" file
+      (match line with Some n -> ":" ^ string_of_int n | None -> "")
+      msg;
+    exit 1
+
+(* Peel `--dep-grants FILE` (or `--dep-grants=FILE`) off a subcommand's
+   arguments: the subcommands that parse their own argv (check, caps, test,
+   repl) take it too.  The last one given wins. *)
+let peel_dep_grants (args : string list) : string option * string list =
+  let flag = ref None in
+  let pre = "--dep-grants=" in
+  let np = String.length pre in
+  let rec go acc = function
+    | [] -> List.rev acc
+    | "--dep-grants" :: v :: rest -> flag := Some v; go acc rest
+    | [ "--dep-grants" ] ->
+      prerr_endline "march: --dep-grants needs a file argument"; exit 2
+    | a :: rest when String.length a > np && String.sub a 0 np = pre ->
+      flag := Some (String.sub a np (String.length a - np)); go acc rest
+    | a :: rest -> go (a :: acc) rest
+  in
+  let rest = go [] args in
+  (!flag, rest)
+
 (** Run the test subcommand and exit.
     Discovers test files, parses/typechecks them, and runs all test blocks.
     Usage: march test [--verbose|-v] [--filter=pattern] [file...] *)
@@ -7890,16 +7929,22 @@ let () =
   end;
   if Array.length argv >= 2 && argv.(1) = "check" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
+    let flag, rest = peel_dep_grants rest in
+    install_dep_grants ?flag ();
     run_check_cmd rest
   end;
   (* `march caps <files...>` — the package's inferred capability set as JSON.
      Same loading path as `check` so sibling/dependency imports resolve. *)
   if Array.length argv >= 2 && argv.(1) = "caps" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
+    let flag, rest = peel_dep_grants rest in
+    install_dep_grants ?flag ();
     run_check_cmd ~emit_caps:true rest
   end;
   if Array.length argv >= 2 && argv.(1) = "test" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
+    let flag, rest = peel_dep_grants rest in
+    install_dep_grants ?flag ();
     run_test_cmd rest
   end;
   (* Phase 10: GC trace validator — see analyze_gc_trace below. *)
@@ -7975,8 +8020,10 @@ let () =
         if !preload_file = None then preload_file := Some a;
         parse_repl_args rest
     in
-    parse_repl_args
-      (Array.to_list (Array.sub argv 2 (Array.length argv - 2)));
+    let dep_grants_flag, repl_args =
+      peel_dep_grants (Array.to_list (Array.sub argv 2 (Array.length argv - 2))) in
+    install_dep_grants ?flag:dep_grants_flag ();
+    parse_repl_args repl_args;
     let preload_file = !preload_file in
     setup_interpreter_ffi ();
     let runtime_so = ensure_runtime_so () in
@@ -8060,7 +8107,10 @@ let () =
   end;
   let files = ref [] in
   let prog_args = ref None in
+  let dep_grants_flag = ref None in
   let specs = [
+    ("--dep-grants", Arg.String (fun f -> dep_grants_flag := Some f),
+     "<file>  Dependency grants file (ocap phase 6; forge writes it); overrides MARCH_DEP_GRANTS");
     ("--dump-tir",     Arg.Set dump_tir,     " Print TIR instead of evaluating");
     ("--dump-role-authority", Arg.Set dump_role_authority,
      " Typecheck and print the effective-authority report per granted protocol role (implies --check)");
@@ -8300,6 +8350,7 @@ let () =
       with Arg.Bad m -> prerr_string m; exit 2 | Arg.Help m -> print_string m; exit 0)
    | None ->
      Arg.parse specs add_input "Usage: march [options] [file.march]");
+  install_dep_grants ?flag:!dep_grants_flag ();
   (match March_tir.Pass_switch.disabled with
    | { contents = [] } ->
      (match March_tir.Pass_switch.of_env () with

@@ -91,7 +91,7 @@ owner_of_test_module() {
     march_test_stdlib_suite) echo stdlib ;;
     march_test_snapshots|run_snapshots) echo @test/runtest-run_snapshots ;;
     march_test_helpers) echo FULL ;;
-    run_compiler|run_eval|run_codegen|run_stdlib|run_errors|run_test_reports|run_cap_conformance|run_authority|test_stdlib_march|test_jit|test_refinecheck)
+    run_compiler|run_eval|run_codegen|run_stdlib|run_errors|run_test_reports|run_cap_conformance|run_authority|run_dep_grants|test_stdlib_march|test_jit|test_refinecheck)
       echo "${stanza#run_}" ;;
     "") ;;
     *) echo "@test/runtest-$stanza" ;;
@@ -117,9 +117,10 @@ classify() {
 
     # ── front end: reaches every suite ───────────────────────────────────
     lib/lexer/*|lib/parser/*)
-      add SUITES compiler eval codegen stdlib stdlib_march errors $ALL_LSP
+      # dep_grants parses a grant's scope text with the real parser.
+      add SUITES compiler eval codegen stdlib stdlib_march errors dep_grants $ALL_LSP
       add CHECKS scripts/check-tree-sitter.sh; add ORACLES types ir
-      reason "$f" "front-end suites, tree-sitter, types+ir oracles" ;;
+      reason "$f" "front-end suites, dep_grants, tree-sitter, types+ir oracles" ;;
     lib/ast/*|lib/desugar/*)
       add SUITES compiler eval codegen stdlib stdlib_march errors test_reports $ALL_LSP; add ORACLES types ir
       reason "$f" "front-end suites, types+ir oracles" ;;
@@ -160,7 +161,10 @@ classify() {
       add SUITES refinecheck compiler errors; add ORACLES refine
       add CHECKS specs/lang/refine/check_refine.sh
       reason "$f" "refinecheck, compiler, errors; must-reject corpus; refine oracle" ;;
-    lib/caps/*|lib/ctxesc/*|lib/effects/*|lib/cas/*|lib/driver/*)
+    lib/caps/*)
+      # dep_grants.ml (ocap phase 6) has its own runner.
+      add SUITES compiler codegen dep_grants; reason "$f" "compiler, codegen, dep_grants" ;;
+    lib/ctxesc/*|lib/effects/*|lib/cas/*|lib/driver/*)
       add SUITES compiler codegen; reason "$f" "compiler, codegen" ;;
     lib/search/*|lib/query/*)
       add SUITES compiler query_cli lsp; reason "$f" "compiler, query_cli, lsp" ;;
@@ -171,8 +175,8 @@ classify() {
     lsp/*)
       add SUITES $ALL_LSP; reason "$f" "lsp suites" ;;
     bin/*)
-      add SUITES compiler codegen errors test_jit test_reports
-      reason "$f" "compiler, codegen, errors, jit, test_reports" ;;
+      add SUITES compiler codegen errors test_jit test_reports dep_grants
+      reason "$f" "compiler, codegen, errors, jit, test_reports, dep_grants" ;;
 
     # ── stdlib: every program reads it ────────────────────────────────────
     stdlib/*)

@@ -82,6 +82,11 @@ expect suites "authority" -- test/test_auth_rt.ml
 expect suites "authority" -- test/run_authority.ml
 expect suites "authority" -- runtime/march_runtime.c
 expect suites "test_jit" -- test/test_jit.ml
+expect suites "dep_grants" -- test/test_dep_grants.ml
+expect suites "dep_grants" -- test/run_dep_grants.ml
+expect suites "dep_grants" -- lib/caps/dep_grants.ml
+expect suites "dep_grants" -- lib/parser/parse.ml
+expect suites "dep_grants" -- bin/main.ml
 
 # The FULL fallback: no rule, shared helpers, test wiring, the language corpus.
 expect suites "ALL" -- lib/some_new_library/x.ml
