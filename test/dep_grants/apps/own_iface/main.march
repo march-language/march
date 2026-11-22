@@ -1,0 +1,13 @@
+mod Main do
+  type Mine = Mine(Int)
+  interface Speak(a) do
+    fn announce : a -> String
+  end
+  impl Speak(Mine) do
+    fn announce(_m) do "mine" end
+  end
+  fn main() do
+    let _ = announce(Mine(1))
+    ()
+  end
+end

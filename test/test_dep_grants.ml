@@ -574,10 +574,36 @@ let test_impl_of_dep_type () =
       let code, out = check_in ~libs:[ l ] d (app "announce_call") in
       expect_fail "a call of the dep's printing method" ~code:"dep_grant_exceeded"
         ~mentions:[ "`announce` in `impl Announce(Box)` needs `IO.Console`";
-                    "Main.main \xe2\x86\x92 Loud.announce \xe2\x86\x92 announce in impl Announce(Box)";
-                    "println(announce(Loud.make()))" ]
+                    "Main.main \xe2\x86\x92 announce in impl Announce(Box)";
+                    "println(announce(Loud.make()))"; "stop calling `announce`" ]
         (code, out);
       if has_sub out "$" then Alcotest.failf "a mangled impl name leaked:\n%s" out)
+
+(* Fix round 2: a call reaches a package's impl only when it is on the
+   package's type.  The app's own interface whose method shares the name,
+   and a builtin-named call on an Int, cost the package nothing. *)
+let test_same_named_methods () =
+  with_reset (fun () ->
+      let l = dep "loud" and r = dep "render" in
+      let d = project ~grants:[ ("loud", l, "()") ] () in
+      expect_pass "the app's own `announce` on its own type"
+        (check_in ~libs:[ l ] d (app "own_iface"));
+      let d = project ~grants:[ ("render", r, "()") ] () in
+      expect_pass "`to_string(5)` beside a dep's printing `to_string` impl"
+        (check_in ~libs:[ r ] d (app "builtin_name"));
+      expect_fail "`to_string` on the dep's type" ~code:"dep_grant_exceeded"
+        ~mentions:[ "`to_string` in `impl Render(Pane)` needs `IO.Console`";
+                    "stop calling `to_string`" ]
+        (check_in ~libs:[ r ] d (app "render_call")))
+
+(* The hint names what the app wrote (`log`, through an import). *)
+let test_hint_as_written () =
+  with_reset (fun () ->
+      let s = dep "shout" in
+      let d = project ~grants:[ ("shout", s, "()") ] () in
+      expect_fail "the hint for an imported call" ~code:"dep_grant_exceeded"
+        ~mentions:[ "stop calling `log`" ]
+        (check_in ~libs:[ s ] d (app "import_call")))
 
 (* Decision 7's input for Task 4: within the grant -> proven; beyond it, or
    calling a function value of untraceable origin -> not. *)
@@ -624,4 +650,6 @@ let tests =
         Alcotest.test_case "import and alias spellings" `Quick test_import_and_alias;
         Alcotest.test_case "a dep actor spawned" `Quick test_spawn_actor;
         Alcotest.test_case "impls of a dep type" `Quick test_impl_of_dep_type;
-        Alcotest.test_case "proven" `Quick test_proven ] ) ]
+        Alcotest.test_case "proven" `Quick test_proven;
+        Alcotest.test_case "same-named methods elsewhere" `Quick test_same_named_methods;
+        Alcotest.test_case "hint as written" `Quick test_hint_as_written ] ) ]

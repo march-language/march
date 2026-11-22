@@ -1,0 +1,6 @@
+mod Main do
+  fn main() do
+    let _ = to_string(5)
+    ()
+  end
+end

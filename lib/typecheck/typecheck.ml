@@ -11416,55 +11416,126 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
     let outside_keys =
       List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) env.fn_refs [])
     in
-    (* A package's dispatch nodes (an interface method's bare name in the
-       module that holds the impls: no body, every edge into an impl), by the
-       method name.  A bare call of that name outside the package may
-       dispatch to one of its impls (the type is not known here), so it is a
-       use of the node; the node itself, and the impls behind it, are not a
-       use by anyone. *)
+    (* A package's dispatch nodes (an interface method's name in the module
+       that holds the impls: no body, every edge into an impl), by method
+       name.  The node is no use by itself.  A call of the method from
+       outside the package is a use of ONE impl: the one for the type of the
+       call's first argument, as the type checker solved it.  When that type
+       is not known here (a type variable, a value use of the method) no
+       impl is counted: the run-time grant frame still holds the impl, which
+       keeps its frame unless proven (decision 7).  So an outside call of a
+       same-named method of another interface, or on another type, costs
+       the package nothing. *)
     let dispatch_nodes : (string, string * string) Hashtbl.t = Hashtbl.create 8 in
+    let dispatch_keys : (string, unit) Hashtbl.t = Hashtbl.create 8 in
     List.iter (fun k ->
         match pkg_of_key k with
         | Some p when not (Hashtbl.mem env.fn_row_bodies k) ->
           let targets = List.filter_map (resolve k) (refs_of k) in
-          if targets <> [] && List.for_all (fun t -> impl_of t <> None) targets then
+          if targets <> [] && List.for_all (fun t -> impl_of t <> None) targets then begin
             let leaf = match String.rindex_opt k '.' with
               | Some i -> String.sub k (i + 1) (String.length k - i - 1) | None -> k in
-            Hashtbl.add dispatch_nodes leaf (k, p)
+            Hashtbl.add dispatch_nodes leaf (k, p);
+            Hashtbl.replace dispatch_keys k ()
+          end
         | _ -> ())
       outside_keys;
+    (* What the outside code wrote for a root, for the hint. *)
+    let written : (string * Ast.span, string) Hashtbl.t = Hashtbl.create 8 in
+    (* Each call of [w] in [owner]'s bodies: (the callee name's span, the
+       head type constructor of its first argument, when solved). *)
+    let typed_calls owner w : (Ast.span * string option) list =
+      let out = ref [] in
+      List.iter (fun (_, e) ->
+          iter_expr (fun (x : Ast.expr) ->
+              match x with
+              | Ast.EApp (f, args, _) -> (
+                let name =
+                  match f with
+                  | Ast.EVar n -> Some (n.Ast.txt, n.Ast.span)
+                  | Ast.EField (Ast.EVar m, fn, _) | Ast.EField (Ast.ECon (m, [], _), fn, _) ->
+                    Some (m.Ast.txt ^ "." ^ fn.Ast.txt, fn.Ast.span)
+                  | _ -> None
+                in
+                match name with
+                | Some (n, nsp) when n = w ->
+                  let head =
+                    match args with
+                    | a0 :: _ -> (
+                      match Hashtbl.find_opt env.type_map (span_of_expr a0) with
+                      | Some t -> (
+                        let rec strip t = match repr t with TLin (_, t) -> strip t | t -> t in
+                        match strip t with
+                        | TCon (c, _) -> Some c
+                        | _ -> None)
+                      | None -> None)
+                    | [] -> None
+                  in
+                  out := (nsp, head) :: !out
+                | _ -> ())
+              | _ -> ())
+            e)
+        (bodies_of owner);
+      List.rev !out
+    in
+    let short c = match String.rindex_opt c '.' with
+      | Some i -> String.sub c (i + 1) (String.length c - i - 1) | None -> c in
     List.iter (fun k ->
         let pk = pkg_of_key k in
-        let add p r w =
+        let push p r sp use w =
           match List.assoc_opt p owners with
           | None -> ()
           | Some go ->
-            let sp, use =
-              match use_span k w with
-              | Some x -> x
-              | None -> (Option.value ~default:Ast.dummy_span (site_of r), Ref_value)
-            in
+            Hashtbl.replace written (r, sp) w;
             go.go_refs <- (r, sp, k, use) :: go.go_refs
+        in
+        let add p r w =
+          let sp, use =
+            match use_span k w with
+            | Some x -> x
+            | None -> (Option.value ~default:Ast.dummy_span (site_of r), Ref_value)
+          in
+          push p r sp use w
         in
         List.iter (fun w ->
             let resolved = resolve k w in
-            (match resolved with
-             | Some r -> (
-               match pkg_of_key r with
-               | Some p when pk <> Some p -> add p r w
-               | _ -> ())
-             | None -> ());
-            (* A bare name that is no plain function here: maybe a method
-               dispatched to a package's impl. *)
             let plain_fn =
               match resolved with
               | Some r -> Hashtbl.mem env.fn_row_bodies r
               | None -> false
             in
-            if not (String.contains w '.') && not plain_fn then
-              List.iter (fun (d, p) ->
-                  if pk <> Some p && resolved <> Some d then add p d w)
-                (Hashtbl.find_all dispatch_nodes w))
+            (* The dispatch nodes this name may call: the one it resolves to,
+               or, for a bare name that is no plain function here, every
+               package's node of that method name. *)
+            let nodes =
+              match resolved with
+              | Some r when Hashtbl.mem dispatch_keys r ->
+                List.filter (fun (d, _) -> d = r) (Hashtbl.find_all dispatch_nodes (short r))
+              | _ when (not (String.contains w '.')) && not plain_fn ->
+                Hashtbl.find_all dispatch_nodes w
+              | _ -> []
+            in
+            (match resolved with
+             | Some r when not (Hashtbl.mem dispatch_keys r) -> (
+               match pkg_of_key r with
+               | Some p when pk <> Some p -> add p r w
+               | _ -> ())
+             | _ -> ());
+            let nodes = List.filter (fun (_, p) -> pk <> Some p) nodes in
+            if nodes <> [] then
+              List.iter (fun (sp, head) ->
+                  match head with
+                  | None -> ()
+                  | Some c ->
+                    List.iter (fun (d, p) ->
+                        List.iter (fun t ->
+                            match impl_of t with
+                            | Some (_, _, Some ty) when ty = c || ty = short c ->
+                              push p t sp Ref_call w
+                            | _ -> ())
+                          (List.filter_map (resolve d) (refs_of d)))
+                      nodes)
+                (typed_calls k w))
           (refs_of k))
       outside_keys;
     (* ── Judge each grant ── *)
@@ -11489,14 +11560,15 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
         let notes entry =
           [ "granted at " ^ at g;
             (match entry with
-             | `Call r ->
-               Printf.sprintf "hint: widen the grant in forge.toml, or stop calling `%s`" (shown r)
+             | `Call (r, sp) ->
+               Printf.sprintf "hint: widen the grant in forge.toml, or stop calling `%s`"
+                 (match Hashtbl.find_opt written (r, sp) with Some w -> w | None -> shown r)
              | `Binding q ->
                Printf.sprintf
                  "hint: widen the grant in forge.toml; `%s` is a module-level binding of \
                   the package, evaluated whenever the program runs" (shown q)) ]
         in
-        let entry_of r caller = match caller with Some _ -> `Call r | None -> `Binding r in
+        let entry_of r sp caller = match caller with Some _ -> `Call (r, sp) | None -> `Binding r in
         let chain_head r caller =
           match caller with Some c -> [ shown c; shown r ] | None -> [ shown r ]
         in
@@ -11520,7 +11592,7 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
                     let holder =
                       subject (match List.rev path with h :: _ -> h | [] -> r) in
                     let span = if sp = Ast.dummy_span then manifest_span g else sp in
-                    report ~code:Err.Code.dep_grant_exceeded ~span ~notes:(notes (entry_of r caller))
+                    report ~code:Err.Code.dep_grant_exceeded ~span ~notes:(notes (entry_of r sp caller))
                       (Printf.sprintf "`%s` is granted `%s`, but %s needs `%s` (`%s`)."
                          pkg g.G.g_text holder c (render_cap_chain chain))
                   end)
@@ -11551,7 +11623,7 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
                           let chain = chain_head r caller @ List.map shown path in
                           let span = if sp = Ast.dummy_span then manifest_span g else sp in
                           report ~code:Err.Code.dep_grant_scope ~span
-                            ~notes:(notes (entry_of r caller))
+                            ~notes:(notes (entry_of r sp caller))
                             (Printf.sprintf "`%s` is granted `%s`, but %s %s (`%s`)."
                                pkg g.G.g_text (subject f.fn) (Scoped_literal_check.describe f)
                                (render_cap_chain chain))
