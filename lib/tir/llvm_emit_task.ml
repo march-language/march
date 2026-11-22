@@ -128,7 +128,7 @@ let emit_task_await_unwrap ~emit_atom ctx (a : Tir.atom) : string * string =
     fresh block after the normalisation. *)
 let normalise_task_result ctx (r : string) : unit =
     (* A cancelled task (a hard drain deadline, or task_cancel) comes back as
-       Err("task cancelled"), whose field is a string, not a tagged result:
+       Err("cancelled"), whose field is a string, not a tagged result:
        normalise the payload only under the Ok tag (i32 at +8). *)
     let tagp = fresh ctx "tawtagp" in
     emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tagp r);
