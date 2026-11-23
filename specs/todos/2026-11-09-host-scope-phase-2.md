@@ -26,3 +26,11 @@ Phase 1 shipped (`specs/progress/2026-11-09-host-scoped-network-capabilities.md`
   scope (review 2026-11-09, I1): a confused-deputy route, documented as a limit.
 - **Host-less `@[net_dest]` on a host parameter** is rejected; a host+port judge would
   make TCP wrappers annotatable (review I4).
+
+Update 2026-11-22 (re-checked on `40f901bab`): ocap phase 4's run-time authority closes two
+bullets in the `needs` spelling. A scoped grant on `main`
+(`needs IO.NetConnect("api.example.com")`) bounds a dependency's unscoped code at run time
+(`IO.NetConnect("evil.example.org:80") refused by the launch grant`), and a scoped
+per-function bound is enforced (`refused by function scoped's needs`). The `Cap(...)`
+parameter spelling in the first bullet is retired in ocap phase 7. Per-role grants also wait
+on phase 7. The other bullets are open.

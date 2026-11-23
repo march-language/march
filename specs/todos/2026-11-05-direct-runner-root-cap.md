@@ -1,5 +1,7 @@
 # `run_<Role>` and `host_<Role>` still take `Cap(IO)`
 
+> **Note 2026-11-22.** Object-capability phase 7 replaces this: a role's `needs` becomes a limit around the role's body with no generated `Cap` parameters, and `Session.attach` / `ClusterNode.attach` / `ClusterNode.start` become checked operations (design §21). Phase 7 has not landed (`specs/todos/2026-11-22-ocap-phase-7-mock-and-retire-cap-params.md`). Do not fix this against the old mechanism; close it with that phase.
+
 The entry points over a cluster node take the node and the role's grant
 (`specs/progress/2026-11-05-cluster-entry-points-without-root-cap.md`). The three that
 open their own connections do not: `run_R(io, node_id, secret, addrs, body)`,

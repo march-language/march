@@ -1,5 +1,7 @@
 # `--cap-strict` capability ceiling — remaining follow-ups
 
+> **Note 2026-11-22.** Object-capability phase 6 replaces this: dependency grants (design §10): a per-dependency `grant` in `forge.toml` is a limit around every function the dependency defines, which is both open bullets here. Phase 6 has not landed (`specs/todos/2026-11-22-ocap-phase-6-dependency-grants.md`). Do not fix this against the old mechanism; close it with that phase.
+
 Shipped 2026-08-04: `--cap-strict`, per-module attribution, and the three
 items closed below. See `specs/progress/2026-08-04-cap-ceiling-strict.md`.
 
