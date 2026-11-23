@@ -1299,6 +1299,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Awaiting a task whose cancel token was already cancelled no longer hangs, compiled.**
+  `Task.async_cancellable(f, tok)` with `tok` cancelled before the task first ran (before the
+  spawn, or between the spawn and the task starting) skipped `f` without ever completing the
+  task, so a compiled `task_await` on it waited forever and the closure leaked. The task now
+  completes as cancelled and releases its closure and captures unapplied. The compiled answer
+  for any cancelled task (`task_await`, `task_poll`) is now `Err("cancelled")`, the text the
+  interpreter and `stdlib/task.march` already used, instead of `Err("task cancelled")`.
 - **A compiled `Csv` open failure is `Err(FileError("<path>: <reason>"))`, as documented.**
   When the file could not be opened, `Csv.read_all`, `read_csv`, `each_row` and
   `each_row_with_header` returned the bare reason in a compiled binary (`Ok(Err(No such file or

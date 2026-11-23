@@ -9493,6 +9493,11 @@ static void *mk_err_cstr(const char *msg);
 typedef struct {
     void     *clo;   /* thunk closure pointer (ownership transferred from caller) */
     int64_t  *task;  /* Task heap object (weak ref — Task outlives the thread) */
+    /* task_spawn_with_cancel's token (one reference, owned by this wrapper;
+     * NULL for a plain task_spawn).  Checked once by the trampoline before
+     * the closure runs: a token cancelled by then completes the Task as
+     * cancelled without applying the closure. */
+    march_cancel_token *tok;
 } march_thunk_arg;
 
 /* Green-thread trampoline for task_spawn thunk closures.
@@ -9638,7 +9643,17 @@ static void march_thunk_trampoline(void *arg) {
     march_thunk_arg *wa = (march_thunk_arg *)arg;
     void *clo = wa->clo;
     int64_t *task = wa->task;
+    march_cancel_token *tok = wa->tok;
     free(wa);  /* free the small wrapper; clo and task are separately managed */
+    /* task_spawn_with_cancel: a token already cancelled when the task first
+     * runs (before the spawn, or between the spawn and now) means the
+     * closure is never applied.  This is the token's only reader, so the
+     * wrapper's reference is released here.  The skip used to live in the
+     * scheduler's cancel_trampoline, which returned without calling this
+     * trampoline at all: the Task was never marked done (task_await hung
+     * forever) and the closure leaked. */
+    int precancelled = tok && march_cancel_token_is_cancelled(tok);
+    if (tok) march_cancel_token_unref(tok);
     /* Record our own proc handle in task[2] NOW, before executing the closure.
      * This closes the race where the spawning thread writes task[2] = p only
      * AFTER march_sched_spawn returns — a work-stealing scheduler can run
@@ -9650,28 +9665,41 @@ static void march_thunk_trampoline(void *arg) {
     apply_fn_t apply = *(apply_fn_t *)((char *)clo + 16);
     /* The cancellation landing (march_proc.task_jmp; DD step-6 follow-up 4):
      * a hard drain deadline unwinds a task here from its next cancellation
-     * point, and its Task completes with the same "task cancelled" error
+     * point, and its Task completes with the same "cancelled" error
      * march_task_cancel_by_id stores.  What the unwound frames held is not
      * released (as for a panic). */
     march_proc *self = march_sched_current();
     jmp_buf cancel_jmp;
     volatile int cancelled = 0;
     void *volatile result = NULL;
-    if (self) self->task_jmp = &cancel_jmp;
-    if (setjmp(cancel_jmp) == 0) {
-        result = apply(clo, (int64_t)0);
-    } else {
-        march_frame_unwind(frame_mark);
-        march_cap_unwind(auth_mark);
+    if (precancelled) {
+        /* The closure is ours and is never applied, so its apply function
+         * never releases it (see the note on $clo at the end): release it
+         * here, with its captures: march_clo_release runs the compiler's
+         * registered capture-release for the closure's type (plain
+         * march_decrc would free the cell and leak every capture).  A
+         * capture-free closure is an immortal static global natively, where
+         * this is a no-op. */
+        march_clo_release(clo);
         cancelled = 1;
+    } else {
+        if (self) self->task_jmp = &cancel_jmp;
+        if (setjmp(cancel_jmp) == 0) {
+            result = apply(clo, (int64_t)0);
+        } else {
+            march_frame_unwind(frame_mark);
+            march_cap_unwind(auth_mark);
+            cancelled = 1;
+            /* Counts drain-deadline unwinds only, not pre-cancelled skips. */
+            atomic_fetch_add_explicit(&g_tasks_cancelled, 1, memory_order_relaxed);
+        }
+        if (self) self->task_jmp = NULL;
     }
-    if (self) self->task_jmp = NULL;
     if (task && cancelled) {
         /* MARCH_TASK_CANCELLED: the one even value task[3] can hold (every
          * real result is tagged odd below), which march_task_await turns
-         * into Err("task cancelled") and task_await_unwrap into a panic. */
+         * into Err("cancelled") and task_await_unwrap into a panic. */
         task[3] = MARCH_TASK_CANCELLED;
-        atomic_fetch_add_explicit(&g_tasks_cancelled, 1, memory_order_relaxed);
     }
     if (task) {
         /* Tag the result for the uniform March value convention: scalars (Int,
@@ -9797,6 +9825,7 @@ void *march_task_spawn_thunk(void *clo_ptr) {
     if (!wa) { return (void *)task; }
     wa->clo  = clo_ptr;
     wa->task = task;
+    wa->tok  = NULL;
     /* Publish the proc LAST.  Once march_sched_spawn returns, a work-stealing
      * scheduler on another OS thread may already be running march_thunk_trampoline
      * for this proc — which writes task[2] (proc handle), task[3] (result) and
@@ -9818,14 +9847,15 @@ void *march_task_spawn_thunk(void *clo_ptr) {
  * reading a dead proc's status here once caused a use-after-free where
  * calloc reuse zeroed the freed memory, making p->status read as
  * PROC_RUNNABLE (0) forever. */
-/* The answer to a read of a FINISHED task: Err("task cancelled"), or a fresh
+/* The answer to a read of a FINISHED task: Err("cancelled"), or a fresh
  * Ok cell holding task[3] as stored (tagged; the compiled call site untags
  * the field, Llvm_emit_task.normalise_task_result).  The Task keeps its own
  * reference to a heap result (MARCH_TASK_OWNS_RESULT), so the Ok cell takes
  * one of its own: any number of reads may each release theirs. */
 static void *task_result_ok(int64_t *task) {
     int64_t slot = task[3];
-    if (slot == MARCH_TASK_CANCELLED) return mk_err_cstr("task cancelled");
+    /* "cancelled": the interpreter's text (lib/eval/eval.ml task_await). */
+    if (slot == MARCH_TASK_CANCELLED) return mk_err_cstr("cancelled");
     march_incrc((void *)(intptr_t)(slot >> 1));   /* no-op for a scalar */
     return mk_ok((void *)(uintptr_t)slot);
 }
@@ -9839,7 +9869,7 @@ void *march_task_await(void *task_obj) {
 
 /* Non-blocking task_await: NULL while the task is still running, else
  * exactly what march_task_await would answer (Ok(result) or
- * Err("task cancelled")).  NULL is Option's niche None for an
+ * Err("cancelled")).  NULL is Option's niche None for an
  * Option(Result(..)) (Result is a boxed type), so the running case costs one
  * acquire load and allocates nothing; the compiled call site re-encodes it
  * where Option is boxed (a program that declares its own Option).
@@ -9876,8 +9906,15 @@ void *march_task_await_value(void *task_obj) {
 }
 
 /* Spawn a thunk closure with an associated cancel token.
- * If tok is non-NULL, its cancellation is checked at yield points inside the
- * green thread.  Behaves like march_task_spawn_thunk otherwise. */
+ * If tok is non-NULL, march_thunk_trampoline checks it once, before applying
+ * the closure: a token cancelled by then completes the Task as cancelled
+ * (task_await answers Err("cancelled")) and releases the closure unapplied.
+ * Behaves like march_task_spawn_thunk otherwise.  The token is borrowed
+ * (lib/tir/borrow.ml): the trampoline's wrapper takes its own reference.
+ *
+ * Not spawned through march_sched_spawn_with_cancel: its cancel_trampoline
+ * skips the user function outright on a cancelled token, and this user
+ * function is the one that marks the Task done. */
 void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
     int expected = 0;
     if (atomic_compare_exchange_strong_explicit(
@@ -9899,10 +9936,12 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
     wa->clo  = clo_ptr;
     wa->task = task;
     march_cancel_token *tok = (march_cancel_token *)tok_ptr;
+    if (tok) march_cancel_token_ref(tok);   /* the wrapper's reference */
+    wa->tok  = tok;
     /* Publish the proc LAST — see march_task_spawn_thunk for why storing into
      * the task object after the spawn races the trampoline.  The payload was
      * zeroed above and the trampoline records task[2] itself. */
-    (void)march_sched_spawn_with_cancel(march_thunk_trampoline, wa, tok);
+    (void)march_sched_spawn(march_thunk_trampoline, wa);
     return (void *)task;
 }
 
