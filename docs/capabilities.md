@@ -65,6 +65,7 @@ callers never have to satisfy. See [The grant](#grant).
 - [Run-time authority: `--grant`, `MARCH_GRANT` and scoped function `needs`](#run-time-authority)
 - [Narrowing a block: `restrict`](#restrict)
 - [Scope values: `Scope` and `+`](#scope-values)
+- [Dependency grants: `grant` in `forge.toml`](#dep-grants)
 - [When not to use IO caps](#when-not-to-use-io-caps)
 - [Specific IO capabilities](#specific-io-capabilities): [IO.Mut](#iomut-shared-mutable-state), [IO.Registry](#ioregistry-naming-and-finding-actors), [name scopes](#name-scopes), [IO.NetConnect.TLS](#ionetconnecttls-encrypted-transport-only), [IO.Telemetry](#iotelemetry-observability-annotation), [IO.Foreign](#ioforeign--calling-unverified-c)
 
@@ -101,6 +102,7 @@ callers never have to satisfy. See [The grant](#grant).
 | Bound what the whole program may do | The grant: `main`'s capability parameter |
 | Narrow what one run of a program may do | `--grant` / `MARCH_GRANT` at launch ([run-time authority](#run-time-authority)) |
 | Limit a function to some paths, hosts or names | A scoped function `needs` clause, checked at run time |
+| Limit what a dependency may do | A `grant` on it in `forge.toml` ([dependency grants](#dep-grants)) |
 | Prove integer division and arithmetic can never panic, and rule out non-exhaustive matches | `cap no_panic` + Int refinements on divisors and operands |
 | Guarantee zero heap allocation (realtime/embedded) | `cap no_alloc` for a whole module, `@[no_alloc]` for one function (the same check) |
 | Keep a module free of C/FFI | `cap no_extern` |
@@ -1136,6 +1138,154 @@ end
 
 `under("/srv/")` is `Ok` of a refusal naming the restrict at that line; `under("/srv/../etc/")`
 is the `ScopeError` above, before the block runs.
+
+<a id="dep-grants"></a>
+### Dependency grants: `grant` in `forge.toml`
+
+A project can limit what each of its dependencies may do. A `grant` on a dependency in
+`forge.toml` is a scope list in `needs` syntax, written as a list of strings:
+
+```toml
+[deps]
+weather = { path = "../weather", grant = ['IO.NetConnect("api.weather.test/v1/", methods(get))'] }
+shout   = { path = "../shout", grant = ["IO.Console"] }
+pure    = { path = "../pure", grant = [] }     # grants nothing
+legacy  = { path = "../legacy" }               # no grant: as before
+
+[deps.reader]
+path  = "deps/reader"
+grant = ['IO.FileRead("/srv/data")']
+```
+
+Single-quoted strings are TOML literal strings (no escapes), which saves escaping the
+quotes inside a scope. `grant` is accepted on `[deps]`, `[dev-deps]`, `[dev-only-deps]` and
+`[test-deps]` entries, inline or as a `[deps.X]` section. Every entry is checked like a
+`needs` line; a malformed one is the error `dep_grant_invalid`, reported at its
+`forge.toml` line.
+
+**What it means.** A grant is a limit around every function defined in the dependency's
+package. While any of them runs, the authority is the caller's authority intersected with
+the grant (and with the function's own `needs`, as always). A grant never widens anything:
+it cannot give a dependency a capability its caller lacks, and it adds nothing the
+dependency's own `needs` lines do not already declare. `grant = []` grants nothing, so the
+dependency may still compute but no capability operation it reaches is allowed.
+
+**A dependency with no grant** keeps the behaviour it has always had: it is limited only by
+its own `needs` and by its caller's authority. It gets no frame and costs nothing.
+`forge audit` marks it `no grant`, so an unlimited dependency is visible in review.
+
+**Only reached code counts.** The compiler checks, by kind, everything the program reaches
+in a granted package: every package function called from outside it (directly, as a value,
+or through an interface method on one of the package's types), everything those reach, and
+the package's module-level code. A function the program never reaches may need anything.
+A reached violation is a build error that names the dependency, the `forge.toml` line, the
+capability and the call chain:
+
+```
+`cpid` is granted `IO.Console`, but `Cpid.getpid` needs `IO.Foreign` (`Main.main → Cpid.pid → Cpid.getpid`). [dep_grant_exceeded]
+
+7 |     println(int_to_string(Cpid.pid()))
+                              ^^^^^^^^
+
+    granted at forge.toml:2
+    hint: widen the grant in forge.toml, or stop calling `Cpid.pid`
+```
+
+Under a scoped grant, a literal target outside the scope is also caught at compile time, as
+`dep_grant_scope` (a literal URL or a literal-prefix `++` at a network entry point, a literal
+path, a literal `Vault` or registry name):
+
+```
+`weather` is granted `IO.NetConnect("api.weather.test/v1/", methods(get))`, but `Weather.Telemetry.ping` connects to `https://telemetry.example.net/ping` (`Main.main → Weather.forecast → Weather.Telemetry.ping`). [dep_grant_scope]
+```
+
+A target computed at run time is checked when it runs. A refusal is a value like any other,
+`Err(CapError(kind, target, ByGrant("<package>"), "<grant text>"))`, which
+`Authority.describe` renders as
+`IO.FileRead("/etc/hosts") refused by the grant to package reader (IO.FileRead("/srv/data"))`.
+
+**`extern`.** C called from a granted package counts as `IO.Foreign`, so the grant must name
+`IO.Foreign` for the package to reach an `extern` (the error above).
+
+**Transitive dependencies.** A package that a granted dependency calls directly runs under
+that dependency's grant while it is called from there, whether or not it has a grant of its
+own. If the project grants it too, both limits hold, and a refusal names the innermost one
+that refused. Called directly from the app, it is limited only by its own grant (if any).
+Only the root project's `forge.toml` grants: a `grant` written in a dependency's own
+manifest is not applied, and `forge audit` lists it as `not applied`
+(`specs/todos/2026-11-22-ocap-nested-manifest-grants.md`).
+
+**Callbacks and returned values.** A function value the app passes into a granted
+dependency was made by the app, so it runs with the app's authority, as any function value
+keeps the authority it was made under ([run-time authority](#run-time-authority)). A closure,
+task, actor or handle the dependency makes and hands back carries the dependency's narrowed
+authority, wherever it ends up. An actor declared in a granted package runs its handlers
+under its spawner's authority intersected with the grant.
+
+**Module-level code.** A granted package's module-level `let`s run under the launch
+authority narrowed by their module's `needs` and by the grant. A function value made there
+(a lambda, or a package function named as a value) captures nothing and behaves as one of
+the package's named functions: it runs under its caller's authority intersected with the
+grant. So a package cannot park `let leak = fn url -> HttpClient.get(url)` at top level and
+call out of its grant through it.
+
+**Packages.** A module belongs to the package whose library root contains its source file's
+real path (the longest such root, so nested roots work). A file that lies under a granted
+root but is a symlink to code outside it is `dep_grant_invalid`. While any grant is in
+effect, two modules with the same name in different places are an error,
+`dep_module_conflict`: the app and a dependency, two dependencies, or a dependency and the
+standard library ("Module `Csv` is defined twice under dependency grants"), and so is a
+granted library root inside the entry's source directory or inside another library
+directory, since its modules would also load as the app's. A build with no grants keeps the
+old first-one-wins behaviour.
+
+**forge and the grants file.** forge passes the grants to the compiler as a file, named by
+`MARCH_DEP_GRANTS`. It writes the file as `.forge/dep-grants-<md5 of its text>` only when a
+dependency in the command's scope has a grant; otherwise it writes nothing and leaves the
+variable unset. A granted dependency that is not installed, or whose library root is not on
+the library path, is an error. `forge clean` removes old grants files. The grants file's
+digest is part of every compile, check and interpreter cache key, so editing a grant
+rebuilds what it affects.
+
+Without forge, pass the file yourself with `--dep-grants FILE` (or `MARCH_DEP_GRANTS=FILE`;
+the flag wins). It works for `march FILE`, `--check`, `--compile`, `--jit`, `march repl`,
+`march test` and `march dap`. The format is UTF-8 text, one package per line, four
+tab-separated fields; a line starting with `#` is a comment:
+
+```
+<package>	<library root, absolute>	<manifest>:<line>	<scope text>
+reader	/home/me/app/deps/reader/lib	/home/me/app/forge.toml:11	IO.FileRead("/srv/data")
+pure	/home/me/pure/lib	/home/me/app/forge.toml:12	()
+```
+
+The scope text is the grant's strings joined with `", "`, and `()` means `grant = []`. The
+library root must be one of the `MARCH_LIB_PATH` directories or a parent of some of them.
+A relative root, a root that does not exist or is off the library path, a field with a tab
+in it, a duplicate package or a malformed scope is `dep_grant_invalid`, at the manifest
+line. `march repl FILE` runs the same grant checks on its entry file and refuses to load a
+file that breaks them; a file `:load`ed later in the session is not checked statically, but
+the run-time frames still refuse what its grants do not allow.
+
+**When the frame is kept.** Calls from inside a package to its own functions go straight to
+their bodies, so only a call that crosses into the package pays for the frame, about 16 ns
+per call (`bench/grant_enter.march`). Entering a grant that is already in force pushes
+nothing, so recursion in and out of a package does not grow the layer list. In compiled code
+(native, `--jit`, the REPL's JIT and `--target js`) a package function enters no frame at
+all when the grant carries no scope (only kinds, such as `grant = ["IO.Console"]`), the
+compiler proved everything the function reaches lies within the grant's kinds, and the
+function reaches no actor spawn, no call of a function value and no interface method left
+generic (such as the `show(x)` inside the polymorphic `println`). A package function that
+calls `Authority.check` itself is never proved this way. The interpreter always enters the
+frame. A call in tail position inside a kept frame is not a tail call, so a very deep
+recursion that crosses into a granted package on every step can overflow the stack
+(`specs/todos/2026-11-17-ocap-framed-mutual-tail-recursion.md`).
+
+**Auditing grants.** `forge audit` prints each dependency's grant beside its capabilities
+(`reader — IO.FileRead — grant: IO.FileRead("/srv/data")`, or `— no grant`), and
+`forge audit --record` writes it into `forge.caps.lock`. A grant that was widened or removed
+since the recorded baseline is an escalation and fails the audit, like a dependency that asks
+for more; a grant narrowed or newly added is reported but does not. See
+[Capability audit]({{ site.baseurl }}/docs/capability-audit/#auditing-grants).
 
 ### When *not* to use IO caps
 

@@ -1,0 +1,36 @@
+-- Grant boundary cost, framed: 1_000_000 calls from the app into a function of
+-- a granted dependency (bench/grant_enter_dep/), each doing 1,000 internal
+-- dependency calls of `n + 1`. The grant carries a scope
+-- (`IO.FileRead("/srv/")`), so every function of the package keeps its grant
+-- frame (ocap p6 decision 7): each boundary call reads the once-per-package
+-- layer cell, enters the grant and restores the authority on exit. The calls
+-- inside the package are retargeted to their bodies and pay nothing.
+--
+-- ns per boundary call = (wall time - the same build with no grants file) / 1e6
+-- (ocap phase 6 budget: <= 50 ns; see specs/benchmarks.md and
+-- scripts/bench-grants.sh, which writes the grants file and runs all three).
+--
+-- Usage (by hand). Build from a copy outside bench/: a granted library root
+-- inside the entry's own directory is a dep_module_conflict. The root in the
+-- grants file must be absolute.
+--   d=$(mktemp -d); cp -R bench/grant_enter.march bench/grant_enter_dep "$d"/
+--   mkdir "$d/app"; mv "$d/grant_enter.march" "$d/app/"
+--   printf 'grant_dep\t%s\tforge.toml:1\tIO.FileRead("/srv/")\n' "$d/grant_enter_dep" > "$d/grants"
+--   MARCH_LIB_PATH="$d/grant_enter_dep" march --compile --opt 2 \
+--     --dep-grants "$d/grants" "$d/app/grant_enter.march" -o /tmp/grant_enter
+--   /tmp/grant_enter
+
+mod GrantEnter do
+  needs IO.Console
+
+pfn go(i : Int, n : Int, acc : Int) : Int do
+  if i >= n do acc
+  else go(i + 1, n, acc + GrantDep.work(i))
+  end
+end
+
+fn main() do
+  println(int_to_string(go(0, 1000000, 0)))
+end
+
+end

@@ -31,3 +31,13 @@ grant frame around `Gate.bounce` is not a tail position, so 3,000 deep already
 overflows the stack compiled (`--opt 0`) and under node, while the same program
 with `gate` ungranted runs 10,000 deep as tail calls. Review Focus 3 asks for
 10,000: whoever lifts this limit raises the fixture's depth to 10,000.
+
+**What Task 8 (ocap p6) adds.** A call through a kept grant frame is never a tail position:
+the wrapper restores the authority after `f$grant` returns, so every crossing into a granted
+package costs one stack frame, whatever the call's position in the caller. Two of the hops
+listed above are also redundant work, not just stack: a dropped P function calling a kept one,
+and a P function's `$auth` body calling a P wrapper, both enter a grant that is already in
+force (`Authority.enter_grant` finds it and pushes nothing, so the layer list stays bounded,
+but the wrapper's save, check and restore still run). Retargeting those calls to the callee's
+`$grant` body would remove both costs; it is sound only where the caller's grant is certainly
+in force, which for a dropped caller it is not (decision 6).

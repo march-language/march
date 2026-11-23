@@ -166,6 +166,50 @@ Only **new** authority fails the audit:
 Narrowing does not fail. A gate that fires when a dependency becomes *safer* is
 a gate people learn to skip, and skipped gates are a step down from absent ones.
 
+<a id="auditing-grants"></a>
+### Grants
+
+A project can limit a dependency with a `grant` on it in `forge.toml`
+(`grant = ['IO.FileRead("/srv/data")']`; see
+[Dependency grants]({{ site.baseurl }}/docs/capabilities/#dep-grants)). The audit
+shows each dependency's grant beside its capabilities, and `no grant` for one
+that has none, so an unlimited dependency stands out:
+
+```
+$ forge audit
+no capability baseline recorded.
+
+  reader — IO.FileRead — grant: IO.FileRead("/srv/data")
+  legacy — IO.Console, IO.NetConnect — no grant
+```
+
+`forge audit --record` writes each grant into `forge.caps.lock`, on the
+dependency's entry (an ungranted dependency's entry has no `grant` line):
+
+```toml
+[[package]]
+name = "reader"
+caps = ["IO.FileRead"]
+grant = ["IO.FileRead(\"/srv/data\")"]
+```
+
+From then on the audit compares grants too. A grant the project widens or
+removes gives the dependency new authority, so it fails the audit like a
+dependency asking for more:
+
+| Change | Reported | Exit code |
+|---|---|---|
+| A grant gains an entry | `! name — its grant now ALSO allows: …` | 1 |
+| A grant is removed | `! name — its grant was REMOVED (no grant: limited only by its own needs)` | 1 |
+| A grant loses an entry | `- name — its grant no longer allows: …` | 0 |
+| A grant is added to a dependency | `- name — now granted: …` | 0 |
+
+Grants are compared entry by entry, as text: replacing `IO.Network` with the
+narrower `IO.NetConnect("a.test")` is reported as a new entry, which errs toward
+review (`specs/todos/2026-11-23-forge-audit-grants-compared-as-text.md`). Only
+the root project's grants are applied; a grant written in a dependency's own
+`forge.toml` is listed as `grant from <pkg>'s forge.toml not applied`.
+
 ### `--inferred`: what the code uses, not what it declares
 
 `forge audit --inferred` runs `march caps` over each dependency to infer the

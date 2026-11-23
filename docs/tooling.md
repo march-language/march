@@ -992,6 +992,28 @@ Then resolve:
 forge deps
 ```
 
+### Limiting a Dependency: `grant`
+
+A `grant` on a dependency limits what its code may do, in `needs` syntax, as a list
+of strings (single-quoted TOML literal strings save escaping the quotes in a scope):
+
+```toml
+[deps]
+reader = { path = "deps/reader", grant = ['IO.FileRead("/srv/data")'] }
+pure   = { path = "../pure", grant = [] }   # may compute, may not do any I/O
+```
+
+The compiler checks the dependency's reached code against the grant
+(`dep_grant_exceeded`, `dep_grant_scope`), and anything it cannot see at compile time
+(a computed path or host, a function value) is refused at run time,
+`refused by the grant to package reader (IO.FileRead("/srv/data"))`. A dependency with
+no `grant` is unchanged. forge hands the grants to the compiler in
+`.forge/dep-grants-<hash>` through `MARCH_DEP_GRANTS`, only when some dependency has
+one; `forge clean` removes old ones. Only your project's own `forge.toml` grants.
+`forge audit` shows each dependency's grant and records it in `forge.caps.lock`. The
+rules (transitive dependencies, callbacks, module-level code, packages) are in
+[Dependency grants]({{ site.baseurl }}/docs/capabilities/#dep-grants).
+
 ### Updating Dependencies
 
 ```sh
