@@ -1,0 +1,29 @@
+-- DEP: gate deps/gate IO.FileRead("/srv/")
+-- A dependency function used by the app as a value runs under the grant
+-- (ocap p6 Review Focus 1): passed to `List.map`, bound with `let` and
+-- called, or stored in a tuple and taken out, `Gate.check_path` is refused outside the
+-- grant wherever it is called from.
+mod GrantNamedFnValue do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn mapped() : String do
+    String.join(List.map(["/srv/x", "/etc/hosts"], Gate.check_path), " | ")
+  end
+
+  fn bound() : String do
+    let f = Gate.check_path
+    f("/etc/hosts")
+  end
+
+  fn stored() : String do
+    let (f, tag) = (Gate.check_path, "stored: ")
+    tag ++ f("/etc/hosts")
+  end
+
+  fn main() do
+    println(mapped())
+    println(bound())
+    println(stored())
+  end
+end

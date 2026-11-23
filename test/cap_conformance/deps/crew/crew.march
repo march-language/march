@@ -1,0 +1,70 @@
+-- A dependency package with actors and tasks for the grant fixtures (ocap
+-- phase 6): an actor it spawns, and the child of a supervisor it spawns,
+-- run under the grant to `crew` for life, across restarts; a task it spawns
+-- runs under the grant too.
+mod Crew do
+  needs IO.FileRead
+  needs IO.Spawn
+
+  type ProbeReq = ProbeReq
+
+  fn verdict(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "allowed " ++ p
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  actor Hand do
+    state { n : Int }
+    init  { n: 0 }
+    on Probe(reply_to) do
+      Actor.reply(reply_to, verdict("/etc/hosts") ++ " / " ++ verdict("/srv/x"))
+      state
+    end
+    on Poison() do
+      panic("poisoned")
+      state
+    end
+  end
+
+  actor Foreman do
+    state { child : Int }
+    init  { child: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 10 within 60
+      Hand child
+    end
+  end
+
+  fn hire() do spawn(Hand) end
+
+  fn hire_foreman() do spawn(Foreman) end
+
+  fn run(f : () -> String) : String do
+    match Task.async(f) do
+    Err(e) -> "spawn: " ++ Authority.describe(e)
+    Ok(t) ->
+      match Task.await(t) do
+      Ok(s) -> s
+      Err(e) -> "await failed: " ++ e
+      end
+    end
+  end
+
+  -- A task spawned inside the package.
+  fn task_probe(p : String) : String do
+    run(fn () -> verdict(p))
+  end
+
+  -- A task the package spawns and hands back, awaited by the caller.
+  fn task_handle(p : String) do
+    Authority.must(Task.async(fn () -> verdict(p)))
+  end
+
+  -- The caller's own function, run in a task the package spawns.
+  fn task_of(f : () -> String) : String do
+    run(f)
+  end
+end

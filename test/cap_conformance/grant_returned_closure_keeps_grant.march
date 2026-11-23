@@ -1,0 +1,33 @@
+-- DEP: gate deps/gate IO.FileRead("/srv/")
+-- A function value a granted dependency hands back carries the dependency's
+-- narrowed authority (design §5, §10): a closure `gate` makes, and one of
+-- its named functions it returns as a value, called by the app after the
+-- call that made them has returned, are still refused outside the grant.
+mod GrantReturnedClosureKeepsGrant do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn mine(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "allowed " ++ p
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn use_reader() : String do
+    let r = Gate.make_reader("/etc/")
+    let s = Gate.make_reader("/srv/")
+    r("hosts") ++ " | " ++ s("x")
+  end
+
+  fn use_returned_fn() : String do
+    let c = Gate.get_check()
+    c("/etc/hosts") ++ " | " ++ c("/srv/x")
+  end
+
+  fn main() do
+    println(use_reader())
+    println(use_returned_fn())
+    println("app: " ++ mine("/etc/hosts"))
+  end
+end

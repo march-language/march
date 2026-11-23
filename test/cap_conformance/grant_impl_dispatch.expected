@@ -1,0 +1,4 @@
+Crate(IO.FileRead("/etc/hosts") refused by the grant to package boxy (IO.FileRead("/srv/")))
+Crate(IO.FileRead("/etc/hosts") refused by the grant to package boxy (IO.FileRead("/srv/")))
+Crate(allowed /srv/x) | Crate(IO.FileRead("/etc/hosts") refused by the grant to package boxy (IO.FileRead("/srv/")))
+exit 0

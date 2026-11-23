@@ -1,0 +1,26 @@
+-- DEP: gate deps/gate ()
+-- A dependency granted `grant = []` (scope text `()`) is granted nothing
+-- (design §10): a probe it computes is refused by the grant to `gate`,
+-- whatever the kind, and the app's own authority is unchanged after the
+-- call. (`grant_unit_grants_nothing` is the launch grant `()`.)
+mod GrantDepUnitGrantsNothing do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Process
+
+  fn mine(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "allowed " ++ p
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn dep_probes() : String do
+    Gate.read_at("/srv", "x") ++ " | " ++ Gate.probe("IO.Process", "HOME")
+  end
+
+  fn main() do
+    println(dep_probes())
+    println("app: " ++ mine("/srv/x"))
+  end
+end

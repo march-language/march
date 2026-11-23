@@ -1,0 +1,9 @@
+-- A dependency package that reaches another one (`gate`) by direct calls:
+-- a transitive dependency for the grant fixtures (ocap phase 6).
+mod Relay do
+  needs IO.FileRead
+
+  fn via_gate(p : String) : String do
+    Gate.check_path(p)
+  end
+end

@@ -1,0 +1,58 @@
+-- A dependency package for the grant fixtures (ocap phase 6). Every probe
+-- computes its target at run time through `Authority.check`, so the static
+-- check has no literal to judge and the verdict is the run-time authority's:
+-- the caller's authority narrowed by the grant the fixture gives `gate`.
+mod Gate do
+  needs IO.FileRead
+  needs IO.Process
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn read_at(dir : String, name : String) : String do
+    probe("IO.FileRead", dir ++ "/" ++ name)
+  end
+
+  fn check_path(p : String) : String do
+    probe("IO.FileRead", p)
+  end
+
+  -- Callbacks: run the caller's function, then probe on its own.
+  fn run_cb(f : String -> String, p : String) : String do
+    f(p)
+  end
+
+  fn run_cb_then_probe(f : String -> String, p : String) : String do
+    f(p) ++ " / gate: " ++ check_path(p)
+  end
+
+  -- In and out of the package: hand control back to the caller's function.
+  fn bounce(n : Int, f : Int -> String) : String do
+    f(n)
+  end
+
+  -- Function values handed back to the caller.
+  fn make_reader(dir : String) : String -> String do
+    fn name -> probe("IO.FileRead", dir ++ name)
+  end
+
+  fn get_check() : String -> String do
+    check_path
+  end
+
+  -- A self tail recursion inside the package: internal calls enter nothing.
+  fn countdown(n : Int, p : String) : String do
+    if n == 0 do check_path(p)
+    else countdown(n - 1, p) end
+  end
+
+  -- Panics inside the package, after a probe.
+  fn boom(p : String) : Int do
+    let _ = check_path(p)
+    panic("boom")
+  end
+end

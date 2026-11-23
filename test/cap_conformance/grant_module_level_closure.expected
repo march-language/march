@@ -1,0 +1,6 @@
+lambda: IO.FileRead("/etc/hosts") refused by the grant to package boot (IO.FileRead("/srv/"))
+named: IO.FileRead("/etc/hosts") refused by the grant to package boot (IO.FileRead("/srv/"))
+own: IO.FileRead("/etc/hosts") refused by the grant to package boot (IO.FileRead("/srv/"))
+lambda: allowed
+app: allowed
+exit 0

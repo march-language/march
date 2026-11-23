@@ -1,0 +1,29 @@
+-- DEP: gate deps/gate IO.FileRead("/srv/")
+-- Calls inside a granted package enter nothing, and entering a grant that
+-- is already in force pushes nothing (ocap p6 decisions 6 and 8): a
+-- 10,000-deep self tail recursion inside `gate` completes in every runtime,
+-- its innermost check is still refused outside the grant by the grant to
+-- `gate` (one layer), and the app's authority is unchanged after it
+-- returns. (The layer list itself is not visible to a program: `cap_layers`
+-- is stdlib-only.)
+mod GrantReenterNoop do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn mine(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "allowed " ++ p
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn deep(p : String) : String do
+    Gate.countdown(10000, p)
+  end
+
+  fn main() do
+    println(deep("/srv/x"))
+    println(deep("/etc/hosts"))
+    println("app: " ++ mine("/etc/hosts"))
+  end
+end

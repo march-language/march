@@ -1,0 +1,3 @@
+IO.FileRead("/srv/x") refused by the grant to package gate (()) | IO.Process("HOME") refused by the grant to package gate (())
+app: allowed /srv/x
+exit 0

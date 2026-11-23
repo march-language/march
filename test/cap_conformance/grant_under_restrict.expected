@@ -1,0 +1,5 @@
+gate: allowed /srv/a/x | app: allowed /srv/a/x
+gate: IO.FileRead("/srv/b/x") refused by the restrict at grant_under_restrict.march:20 (IO.FileRead("/srv/a/"), IO.FileRead("/tmp/")) | app: IO.FileRead("/srv/b/x") refused by the restrict at grant_under_restrict.march:20 (IO.FileRead("/srv/a/"), IO.FileRead("/tmp/"))
+gate: IO.FileRead("/tmp/x") refused by the grant to package gate (IO.FileRead("/srv/")) | app: allowed /tmp/x
+gate: IO.FileRead("/etc/hosts") refused by the grant to package gate (IO.FileRead("/srv/")) | app: IO.FileRead("/etc/hosts") refused by the restrict at grant_under_restrict.march:20 (IO.FileRead("/srv/a/"), IO.FileRead("/tmp/"))
+exit 0

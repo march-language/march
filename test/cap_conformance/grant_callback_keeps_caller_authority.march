@@ -1,0 +1,35 @@
+-- DEP: gate deps/gate IO.FileRead("/srv/")
+-- A callback passed into a granted dependency runs with the caller's
+-- authority, not under the grant (design §5, §10): an app lambda and a named
+-- app function, each run by `gate`, are allowed a path the grant refuses,
+-- while `gate`'s own probe of the same path, in the same call, is refused
+-- by the grant.
+mod GrantCallbackKeepsCallerAuthority do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn mine(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "app: allowed " ++ p
+    Err(e) -> "app: " ++ Authority.describe(e)
+    end
+  end
+
+  fn by_lambda(p : String) : String do
+    Gate.run_cb(fn q -> mine(q), p)
+  end
+
+  fn by_name(p : String) : String do
+    Gate.run_cb(mine, p)
+  end
+
+  fn then_dep(p : String) : String do
+    Gate.run_cb_then_probe(fn q -> mine(q), p)
+  end
+
+  fn main() do
+    println(by_lambda("/etc/hosts"))
+    println(by_name("/etc/hosts"))
+    println(then_dep("/etc/hosts"))
+  end
+end

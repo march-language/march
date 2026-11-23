@@ -1,0 +1,26 @@
+-- A dependency package for an unscoped grant of `IO.Console` (ocap phase
+-- 6). The type checker proves `shout` and `twice` (pure) and `say` (it
+-- prints) within the grant; natively the frame of a proven function that
+-- reaches no spawn, function value or dispatch is dropped (decision 7), as
+-- `shout`'s and `twice`'s are. `peek` asks `Authority.check` about a kind
+-- only known at run time, which no proof by kind covers, so its frame stays.
+mod Shout do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn shout(s : String) : String do s ++ "!" end
+
+  fn twice(s : String) : String do shout(s) ++ " " ++ shout(s) end
+
+  fn say(s : String) : () do
+    println("shout: " ++ twice(s))
+    ()
+  end
+
+  fn peek(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+end

@@ -1,0 +1,8 @@
+hand: IO.FileRead("/etc/hosts") refused by the grant to package crew (IO.FileRead("/srv/"), IO.Spawn) / allowed /srv/x
+child: IO.FileRead("/etc/hosts") refused by the grant to package crew (IO.FileRead("/srv/"), IO.Spawn) / allowed /srv/x
+restarted: true
+after crash: IO.FileRead("/etc/hosts") refused by the grant to package crew (IO.FileRead("/srv/"), IO.Spawn) / allowed /srv/x
+restarted again: true
+after kill: IO.FileRead("/etc/hosts") refused by the grant to package crew (IO.FileRead("/srv/"), IO.Spawn) / allowed /srv/x
+app: allowed /etc/hosts
+exit 0

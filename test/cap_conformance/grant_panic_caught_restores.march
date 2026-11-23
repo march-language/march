@@ -1,0 +1,44 @@
+-- DEP: gate deps/gate IO.FileRead("/srv/")
+-- A panic inside a granted dependency that the app catches does not leave
+-- the grant's layer in force after the catch (design §15, as for a restrict
+-- in ocap p5): the app's authority is back after `__try_call_val` and after
+-- a `try_finally` cleanup, which runs under the authority it was entered
+-- under; and the dependency, called again, is still refused by its grant.
+mod GrantPanicCaughtRestores do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn mine(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "allowed " ++ p
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn caught(r : Result(Int, String)) : String do
+    match r do
+    Ok(_) -> "ok"
+    Err(_) -> "caught"
+    end
+  end
+
+  fn try_boom() : String do
+    caught(__try_call_val(fn _ -> Gate.boom("/etc/hosts")))
+  end
+
+  fn with_cleanup() : Int do
+    try_finally(fn _ -> Gate.boom("/etc/hosts"), fn _ -> println("cleanup: " ++ mine("/etc/hosts")))
+  end
+
+  fn try_cleanup() : String do
+    caught(__try_call_val(fn _ -> with_cleanup()))
+  end
+
+  fn main() do
+    println(try_boom())
+    println("after: " ++ mine("/etc/hosts"))
+    println(try_cleanup())
+    println("after cleanup: " ++ mine("/etc/hosts"))
+    println("gate again: " ++ Gate.check_path("/etc/hosts"))
+  end
+end

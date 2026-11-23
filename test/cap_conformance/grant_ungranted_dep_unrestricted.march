@@ -1,0 +1,31 @@
+-- DEP: gate deps/gate none
+-- A dependency with no grant keeps today's behaviour (design §10, the
+-- `legacy` line): it gets no frame and is limited only by its own `needs`
+-- and its caller's authority, so every path and kind the app may use (here
+-- the launch request, which also holds `gate`'s IO.Process) is allowed to
+-- `gate` too. `grant_refuses_scoped` is the same calls with a grant.
+mod GrantUngrantedDepUnrestricted do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn reads() : String do
+    Gate.read_at("/etc", "hosts") ++ " | " ++ Gate.check_path("/srv/x")
+  end
+
+  fn env() : String do
+    Gate.probe("IO.Process", "HOME")
+  end
+
+  fn mine(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "allowed " ++ p
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main() do
+    println(reads())
+    println(env())
+    println("app: " ++ mine("/etc/hosts"))
+  end
+end
