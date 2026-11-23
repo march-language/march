@@ -101,3 +101,8 @@ MARCH_DEBUG_RUNTIME=1` (`ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`), Docker
 `march-ci-ubuntu-step6b` (arm64, glibc 2.39), concurrently with a 6-way ASAN
 sweep for load: 0 failures, no sanitizer report. Both fixtures named above (`branch_alias_tail_drop`, `run_until_idle_ping_pong`) were looped. Both are also clean in
 the full `scripts/native-sanitize-sweep.sh` error pass at 1 and 14 schedulers.
+
+## Decision (2026-11-23, owner)
+
+Closing rule for a flake that cannot be reproduced: it closes after 10 clean CI runs of the
+test on the leg that saw it, with evidence capture on. Record the run ids in the progress file.

@@ -30,3 +30,12 @@ interpreter reports the task as cancelled.
 So the semantics decision covers three cases, not one: cancel before start, cancel while
 running, cancel after completion. A fix that makes `task[2]` an atomic state word should have the
 trampoline check it again before the result store.
+
+## Decision (2026-11-23, owner)
+
+Cancel before start and cancel while running both complete the task as cancelled, as the
+interpreter does. A task cancelled while running and not at a cancellation point runs to the end;
+its result is released and the await reports cancelled. A cancel after completion does nothing.
+Make the task's state word atomic, with a cancel-requested value that the trampoline checks before
+running the closure and again before the result store. Then run `test/stdlib/test_task.march`
+compiled in CI.

@@ -65,3 +65,8 @@ use. `runtime/` sends SIGKILL nowhere.
 **What would close it.** A second sighting with the sender identified, or the D5 soak
 rule from the pre-1.0 plan. Process groups and dune locks are not a fix: they change
 nothing a SIGKILL by pid can reach.
+
+## Decision (2026-11-23, owner)
+
+Closing rule for a flake that cannot be reproduced: it closes after 10 clean CI runs of the
+test on the leg that saw it, with evidence capture on. Record the run ids in the progress file.

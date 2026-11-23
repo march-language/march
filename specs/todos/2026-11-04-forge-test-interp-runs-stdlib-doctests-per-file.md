@@ -30,3 +30,9 @@ stdlib's. If stdlib doctests are meant to run there, they need a fresh environme
 and the stdlib's own scope.
 
 depot's CI moved to the compiled suite (depot#7) to stay green on v0.7.0.
+
+## Decision (2026-11-23, owner)
+
+No: interpreter-mode `forge test` runs only the project's own tests and doctests. Filter
+`collect_docs` in `lib/eval/eval.ml` (`run_doctests`) by whether the declaration's file belongs
+to the project.

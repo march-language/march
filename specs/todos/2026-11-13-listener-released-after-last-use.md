@@ -11,3 +11,11 @@ the listening socket is closed before the connect, which fails with `Connection 
 the interpreter (no drop glue) succeeds. The semantics are correct, but the trap is easy to
 fall into. Options: a doc note in the handles chapter, a lint for a Listener whose last use is
 `local_port`, or keeping a Listener alive to the end of its lexical scope.
+
+## Decision (2026-11-23, owner)
+
+Document it and add a lint; do not keep a `Listener` alive to the end of its lexical scope.
+Write the note in the handles section of `specs/lang/capabilities.md` (regenerate `docs/`) and on
+`Socket.local_port`'s doc string. The lint flags a `Listener` binding whose last use is
+`local_port`. Reason: keeping the value alive would be a type-specific exception in the last-use
+release in `lib/tir/perceus_core.ml`, which the in-place array update relies on.

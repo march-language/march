@@ -35,3 +35,11 @@ Also seen while filing: compiling a polymorphically recursive type
 (`type Nest(a) = Z(a) | S(Nest(List(a)))`) hung in deep-drop synthesis. That
 type is now rejected at its declaration; see
 `specs/progress/2026-10-12-nonregular-type-compiler-hang.md`.
+
+## Decision (2026-11-23, owner)
+
+Box a newtype or niche value when it flows into an erased (type-variable) slot of a lambda that
+is not specialised, so the runtime renderer sees a header and a type id. That is one allocation
+at those boundaries; equality and hashing of erased values must not change. Write a short design
+note first. This unblocks 2026-10-07-module-type-layouts.md, which must not widen layouts before
+it lands.

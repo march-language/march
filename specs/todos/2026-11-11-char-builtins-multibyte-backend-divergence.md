@@ -25,3 +25,14 @@ Also: `char_is_digit("12")` stops / `true`; `char_to_uppercase("ab")` stops / `A
 
 Source: the `char_*` entries in lib/eval/eval_builtins.ml (about lines 1687-1722) against the
 `march_char_*` functions in runtime/march_runtime.c. Found by the 2026-10-18 doc sweep; re-verified 2026-11-11 on a7110f95f.
+
+## Decision (2026-11-23, owner)
+
+First-byte semantics on every engine, as the C runtime documents: each `char_*` builtin reads
+the first byte of its argument. The interpreter stops refusing input that is not exactly one
+byte; the JS runtime stops using `codePointAt` and Unicode classes; the whitespace set is the same
+everywhere. To settle in the fix and document in the builtin reference: the answer for `""`, and
+whether `\f` and `\v` count as whitespace (C says yes, the interpreter no).
+
+Order: fix 2026-11-11-bytes-from-list-out-of-range.md first, because natively `byte_to_char` is
+`march_char_from_int`.

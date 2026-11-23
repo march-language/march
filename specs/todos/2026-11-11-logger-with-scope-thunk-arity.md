@@ -21,3 +21,9 @@ Expected: `1` then `0` on every backend
 Actual (interpreted / compiled): runtime error `arity mismatch: expected 0 args, got 1` / `1` then `0`
 
 Source: `with_scope` in stdlib/logger.march; `try_finally` in lib/typecheck/typecheck_builtins.ml.
+
+## Decision (2026-11-23, owner)
+
+The root (2026-10-12-function-arity-not-in-types.md) is decided: arity goes in the type. Do
+not wait for it here: wrap the thunk (`try_finally(fn _ -> thunk(), ...)`) so the interpreter
+stops dying, and map `logger_pop_to_depth` on the JS target.

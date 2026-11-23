@@ -145,3 +145,8 @@ stack), which is itself a narrowing.
 
 Next step if it recurs: the CI job's core capture (`scripts/ci-evidence.sh`, the
 `evidence-test-<os>-<shard>` artifact of a failed run) plus the new line; a real amd64 host (not Rosetta) loop.
+
+## Decision (2026-11-23, owner)
+
+Closing rule for a flake that cannot be reproduced: it closes after 10 clean CI runs of the
+test on the leg that saw it, with evidence capture on. Record the run ids in the progress file.
