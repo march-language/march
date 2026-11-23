@@ -1299,6 +1299,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march repl FILE` loads the library modules the file uses.** A preloaded file (as
+  `forge interactive` and the REPL's `:load` give it) now finds the modules it names on
+  `MARCH_LIB_PATH`, as a batch build does; they were "Unknown module". Its modules also load
+  in dependency order (a library module checked before one it calls no longer fails), and an
+  `impl` declared inside a module is visible to the rest of the file and to later inputs (a
+  `show` of that module's type was "does not implement interface `Show`").
 - **A function named like a stdlib loop no longer leaks its capabilities into the stdlib.**
   A local `fn go(...)` (or any local `fn`) was not in scope for the rest of its block in the
   compiler's capability bookkeeping, so the stdlib's local `fn go` loops were recorded as calls
