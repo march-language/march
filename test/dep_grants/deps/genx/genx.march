@@ -1,0 +1,8 @@
+-- Generic code in a granted package: `show(x)` is resolved by mono to the
+-- caller's impl, which the checker never proved within the grant, so the
+-- frame is kept even under an unscoped grant and the impl runs under it.
+mod Genx do
+  fn describe(x) do
+    "<" ++ show(x) ++ ">"
+  end
+end

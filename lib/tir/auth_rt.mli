@@ -38,10 +38,14 @@ val restricts :
     those in a lambda it makes) target their [$grant] bodies; every other
     call and every value use keeps the wrapper's name.  The wrapper is
     dropped (the fn left as it was) when the grant carries no scope, the
-    fn is [fg_proven] and it is in neither [reaches_actor_spawn] nor
-    [reaches_indirect_call].  A module-initialiser lambda made in a tagged
-    fn ([Lower_state.is_module_init_lambda]) gets the grant's frame around
-    its own body.  Runs after [frames]; returns the module and whether any
+    fn is [fg_proven] and it reaches (through direct calls) no actor spawn,
+    no call of a function value and no unresolved interface-method call
+    (which mono may resolve to an impl outside the package).  A
+    module-initialiser lambda made in a tagged fn
+    ([Lower_state.is_module_init_lambda]) gets the grant's frame around its
+    own body; so does a named fn value in a tagged module-initialiser fn
+    whose call can depend on the authority, first turned into such a
+    lambda (an eta expansion).  Runs after [frames]; returns the module and whether any
     grant frame was made: with an empty [tbl], [m] itself (physically) and
     [false]. *)
 val grants :

@@ -733,6 +733,47 @@ let test_actor_handler_under_grant () =
          (IO.FileRead(\"/srv/data\"), IO.Spawn)\nmain: allowed\nexit 0\n"
         (run_built ~target:`Native d))
 
+(* Fix round 1 (C1): a function value made by a granted package's
+   module-level code, a lambda or a named function read as a value, runs
+   under the grant whoever calls it, native and JS. *)
+let test_module_level_values_under_grant () =
+  with_reset (fun () ->
+      let l = dep "leaky" in
+      let d = project ~grants:[ ("leaky", l, "IO.FileRead(\"/srv/data\")") ] () in
+      let refusal =
+        "IO.FileRead(\"/etc/hosts\") refused by the grant to package leaky \
+         (IO.FileRead(\"/srv/data\"))" in
+      let want =
+        String.concat ""
+          [ "lambda: " ^ refusal ^ "\n"; "named via let: " ^ refusal ^ "\n";
+            "named via fn: " ^ refusal ^ "\n"; "exit 0\n" ] in
+      let targets = `Native :: (if Lazy.force have_node then [ `Js ] else []) in
+      List.iter (fun target ->
+          let what = match target with `Native -> "native" | `Js -> "js" in
+          let code, out = build_in ~target ~libs:[ l ] d (app "module_value") in
+          if code <> 0 then Alcotest.failf "%s build failed (exit %d):\n%s" what code out;
+          Alcotest.(check string) what want (run_built ~target d))
+        targets)
+
+(* Fix round 1 (I2): a granted fn whose generic `show(x)` mono resolves
+   to the app's impl keeps its frame under an unscoped grant, so the impl
+   runs under the grant whether or not the grant is scoped (and as the
+   always-framing interpreter will run it).  The design question is open:
+   specs/todos/2026-11-22-grant-app-impl-callback-authority.md. *)
+let test_app_impl_from_generic_code () =
+  with_reset (fun () ->
+      let g = dep "genx" in
+      List.iter (fun grant ->
+          let d = project ~grants:[ ("genx", g, grant) ] () in
+          let code, out =
+            build_in ~env:"MARCH_DUMP_GRANT_FRAMES=1" ~target:`Native ~libs:[ g ] d
+              (app "app_impl") in
+          if code <> 0 then Alcotest.failf "%s: build failed (exit %d):\n%s" grant code out;
+          if not (has_sub out "grant-frame Genx.describe pkg=genx proven=true wrapped=true\n") then
+            Alcotest.failf "%s: Genx.describe not kept:\n%s" grant out;
+          Alcotest.(check string) grant "<refused>\nexit 0\n" (run_built ~target:`Native d))
+        [ "IO.Clock"; "IO.FileRead(\"/srv\")" ])
+
 (* The proof bit crosses stages by the checker's key: the lowering reads
    [Dep_grants.proven] by the fn's module path and name.  Under an unscoped
    grant a proven fn's frame is dropped and an unproven one's kept. *)
@@ -793,4 +834,8 @@ let tests =
         Alcotest.test_case "the proof bit is read by the checker's key" `Quick
           test_proof_bit_read;
         Alcotest.test_case "a dep actor's handler runs under the grant" `Quick
-          test_actor_handler_under_grant ] ) ]
+          test_actor_handler_under_grant;
+        Alcotest.test_case "module-level function values run under the grant" `Quick
+          test_module_level_values_under_grant;
+        Alcotest.test_case "an app impl reached from generic package code keeps the frame"
+          `Quick test_app_impl_from_generic_code ] ) ]

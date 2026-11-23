@@ -421,6 +421,30 @@ let restricts (m : Tir.tir_module) ~(sites : (string, Lower_state.restrict_site)
     end
   end
 
+let authority_check = "Authority.check"
+
+let is_op_builtin (n : string) : bool =
+  match March_caps.Cap_ops.classify n with
+  | Some (March_caps.Cap_ops.Checked _) -> true
+  | _ -> false
+
+(** The fns of [m] whose call can depend on the authority in force: they
+    reach, through direct calls, a capability operation ([Authority.check],
+    a [Checked] builtin), an actor spawn, or a call of a function value
+    (which runs whatever it was handed, and a value made by module-level
+    code runs under its caller's authority). *)
+let reaches_authority (m : Tir.tir_module) : SSet.t =
+  reaching m ~seed:(fun ~defined f ->
+      let hit = ref (calls_fn_value f.Tir.fn_params f.Tir.fn_body) in
+      if not !hit then
+        iter_calls
+          (fun n ->
+             if n = authority_check
+             || (not (Hashtbl.mem defined n) && (is_op_builtin n || List.mem n spawn_builtins))
+             then hit := true)
+          f.Tir.fn_body;
+      !hit)
+
 (* ── Dependency grants (ocap phase 6, Task 4) ─────────────────────────
 
    Every function defined in a granted package [P] runs under [P]'s grant
@@ -466,6 +490,22 @@ let restricts (m : Tir.tir_module) ~(sites : (string, Lower_state.restrict_site)
    map) retargeted.  Only [e]'s own code: never inside an [ELetRec] (a
    lambda or local fn, which may run after its maker returns), and not
    under a local binder of the same name. *)
+(** The fns of [m] that reach, through direct calls, a call of a function
+    value ([reaches_indirect_call]'s seed) or a call of an interface method
+    that lowering left unresolved (generic code: mono may resolve it to an
+    impl outside the package, e.g. the app's).  The grant frame's drop rule
+    uses it: what such a call runs is not the package's proven code.  (The
+    [needs]-clause frames keep [reaches_indirect_call].) *)
+let reaches_indirect_or_dispatch (m : Tir.tir_module) : SSet.t =
+  let ifaces = Lower_state.get_iface_methods () in
+  reaching m ~seed:(fun ~defined f ->
+      calls_fn_value f.Tir.fn_params f.Tir.fn_body
+      || (let hit = ref false in
+          iter_calls
+            (fun n -> if (not (Hashtbl.mem defined n)) && Hashtbl.mem ifaces n then hit := true)
+            f.Tir.fn_body;
+          !hit))
+
 let rec retarget_set (targets : (string, string) Hashtbl.t) (e : Tir.expr) : Tir.expr =
   let go = retarget_set targets in
   let shadowed (v : Tir.var) = Hashtbl.mem targets v.Tir.v_name in
@@ -502,6 +542,127 @@ let grants (m : Tir.tir_module) ~(tbl : (string, Lower_state.fn_grant) Hashtbl.t
     let grant_of (f : Tir.fn_def) =
       if Some f.Tir.fn_name = entry then None else Hashtbl.find_opt tbl f.Tir.fn_name
     in
+    (* A named fn value in a granted package's module-level code (say
+       [let reader = File.read]) is a function value created there, so it
+       must behave as one of the package's functions: it becomes an eta
+       lambda made by that code ([fn (ps) -> f(ps)]), registered as a
+       module-initialiser lambda, and so gets the grant prologue below.
+       Without this it would hand the caller the bare fn, run under the
+       caller's full authority ([captures] leaves module-level values
+       alone).  Only values whose call can depend on the authority, by
+       [captures]'s own test.  [m] itself (physically) when there is none. *)
+    let m =
+      if not (List.exists
+                (fun f -> grant_of f <> None && Lower_state.is_module_init_fn f.Tir.fn_name)
+                m.Tir.tm_fns)
+      then m
+      else begin
+        let defined : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 256 in
+        List.iter (fun (f : Tir.fn_def) -> Hashtbl.replace defined f.Tir.fn_name f) m.Tir.tm_fns;
+        let reach = lazy (reaches_authority m) in
+        let add (v : Tir.var) b = SSet.add v.Tir.v_name b in
+        let named_value bound (v : Tir.var) : (Tir.ty list * Tir.ty) option =
+          if SSet.mem v.Tir.v_name bound then None
+          else
+            let of_ty = match v.Tir.v_ty with
+              | Tir.TFn ((_ :: _ as ps), r) -> Some (ps, r)
+              | _ -> None
+            in
+            match Hashtbl.find_opt defined v.Tir.v_name with
+            | Some fd ->
+              if fd.Tir.fn_params = []
+              || not (v.Tir.v_name = authority_check || SSet.mem v.Tir.v_name (Lazy.force reach))
+              then None
+              else (match of_ty with
+                  | Some (ps, r) when List.length ps = List.length fd.Tir.fn_params -> Some (ps, r)
+                  | _ -> Some (List.map (fun (p : Tir.var) -> p.Tir.v_ty) fd.Tir.fn_params,
+                               fd.Tir.fn_ret_ty))
+            | None -> if is_op_builtin v.Tir.v_name then of_ty else None
+        in
+        let rewrite (f : Tir.fn_def) : Tir.fn_def =
+          let host = f.Tir.fn_name in
+          let changed = ref false in
+          let eta (v : Tir.var) (ps, r) : Tir.var * Tir.expr =
+            let name = Lower_state.fresh_nested_name ~host "grantlam" in
+            Hashtbl.replace Lower_state._module_init_lambdas name ();
+            Provenance.record name ~from:host
+              ~derived:(Provenance.Clone_of (v.Tir.v_name, "grant eta")) ~pass:"auth_rt" ();
+            let params = List.mapi (fun i t -> var (Printf.sprintf "$grant_p%d" i) t) ps in
+            let fty = Tir.TFn (ps, r) in
+            let fd =
+              { Tir.fn_name = name;
+                fn_params = params;
+                fn_ret_ty = r;
+                fn_body = Tir.EApp ({ v with Tir.v_ty = fty }, List.map (fun p -> Tir.AVar p) params);
+                fn_kind = Tir.FnLambda }
+            in
+            (var (name ^ "$v") fty, Tir.ELetRec ([ fd ], Tir.EAtom (Tir.AVar (var name fty))))
+          in
+          let leaf bound (e : Tir.expr) : Tir.expr =
+            let lets = ref [] in
+            let atom (a : Tir.atom) =
+              match a with
+              | Tir.AVar v -> (
+                match named_value bound v with
+                | None -> a
+                | Some sg ->
+                  let x, rhs = eta v sg in
+                  lets := (x, rhs) :: !lets;
+                  Tir.AVar x)
+              | _ -> a
+            in
+            let atoms = List.map atom in
+            let e' =
+              match e with
+              | Tir.EAtom a -> Tir.EAtom (atom a)
+              | Tir.EApp (fv, args) -> Tir.EApp (fv, atoms args)
+              | Tir.ECallPtr (fv, args) -> Tir.ECallPtr (fv, atoms args)
+              | Tir.ETuple args -> Tir.ETuple (atoms args)
+              | Tir.ERecord fs -> Tir.ERecord (List.map (fun (k, a) -> (k, atom a)) fs)
+              | Tir.EUpdate (r, fs) -> Tir.EUpdate (r, List.map (fun (k, a) -> (k, atom a)) fs)
+              | Tir.EAlloc (t, args) -> Tir.EAlloc (t, atoms args)
+              | Tir.EStackAlloc (t, args) -> Tir.EStackAlloc (t, atoms args)
+              | other -> other
+            in
+            if !lets = [] then e
+            else begin
+              changed := true;
+              List.fold_left (fun acc (x, rhs) -> Tir.ELet (x, rhs, acc)) e' !lets
+            end
+          in
+          (* Module-level code only: a lambda's body runs later, inside its
+             prologue, where [captures] treats it as ordinary code. *)
+          let rec go bound (e : Tir.expr) : Tir.expr =
+            match e with
+            | Tir.ELet (v, a, b) -> Tir.ELet (v, go bound a, go (add v bound) b)
+            | Tir.ESeq (a, b) -> Tir.ESeq (go bound a, go bound b)
+            | Tir.ELetRec (fns, b) ->
+              Tir.ELetRec
+                (fns, go (List.fold_left (fun bd (fd : Tir.fn_def) -> add (var fd.Tir.fn_name Tir.TUnit) bd)
+                           bound fns) b)
+            | Tir.ECase (sc, brs, d) ->
+              Tir.ECase
+                ( sc,
+                  List.map
+                    (fun (br : Tir.branch) ->
+                       { br with Tir.br_body = go (List.fold_right add br.Tir.br_vars bound) br.Tir.br_body })
+                    brs,
+                  Option.map (go bound) d )
+            | other -> leaf bound other
+          in
+          let body = go (List.fold_right add f.Tir.fn_params SSet.empty) f.Tir.fn_body in
+          if !changed then { f with Tir.fn_body = body } else f
+        in
+        let fns =
+          List.map
+            (fun (f : Tir.fn_def) ->
+               if grant_of f <> None && Lower_state.is_module_init_fn f.Tir.fn_name then rewrite f
+               else f)
+            m.Tir.tm_fns
+        in
+        if List.for_all2 ( == ) fns m.Tir.tm_fns then m else { m with Tir.tm_fns = fns }
+      end
+    in
     let tagged = List.filter (fun f -> grant_of f <> None) m.Tir.tm_fns in
     (* Whether [e] makes a module-initialiser lambda (anywhere in it). *)
     let rec makes_init_lambda (e : Tir.expr) =
@@ -519,7 +680,7 @@ let grants (m : Tir.tir_module) ~(tbl : (string, Lower_state.fn_grant) Hashtbl.t
       | _ -> false
     in
     let spawners = lazy (reaches_actor_spawn m) in
-    let indirect = lazy (reaches_indirect_call m) in
+    let indirect = lazy (reaches_indirect_or_dispatch m) in
     let keeps (f : Tir.fn_def) (g : Lower_state.fn_grant) =
       g.Lower_state.fg_scoped
       || (not g.Lower_state.fg_proven)
@@ -659,30 +820,6 @@ let grants (m : Tir.tir_module) ~(tbl : (string, Lower_state.fn_grant) Hashtbl.t
    A function value runs under the authority it was made under, not the
    one in force where it is called (design §5).  [captures] makes that so
    for the values whose authority can matter: see the .mli. *)
-
-let authority_check = "Authority.check"
-
-let is_op_builtin (n : string) : bool =
-  match March_caps.Cap_ops.classify n with
-  | Some (March_caps.Cap_ops.Checked _) -> true
-  | _ -> false
-
-(** The fns of [m] whose call can depend on the authority in force: they
-    reach, through direct calls, a capability operation ([Authority.check],
-    a [Checked] builtin), an actor spawn, or a call of a function value
-    (which runs whatever it was handed, and a value made by module-level
-    code runs under its caller's authority). *)
-let reaches_authority (m : Tir.tir_module) : SSet.t =
-  reaching m ~seed:(fun ~defined f ->
-      let hit = ref (calls_fn_value f.Tir.fn_params f.Tir.fn_body) in
-      if not !hit then
-        iter_calls
-          (fun n ->
-             if n = authority_check
-             || (not (Hashtbl.mem defined n) && (is_op_builtin n || List.mem n spawn_builtins))
-             then hit := true)
-          f.Tir.fn_body;
-      !hit)
 
 let captures (m : Tir.tir_module) ~(has_frames : bool) ~(repl : bool) : Tir.tir_module =
   if not has_frames && not repl then m
@@ -930,7 +1067,8 @@ let captures (m : Tir.tir_module) ~(has_frames : bool) ~(repl : bool) : Tir.tir_
         let b' = flush (go ctx ~init ~host bound' b) in
         if b' == b && List.for_all2 ( == ) fns fns' then (e, []) else (Tir.ELetRec (fns', b'), [])
       | Tir.ELet (sv, (Tir.EApp (ef, [ Tir.AVar _ ]) as a), b)
-        when ef.Tir.v_name = Tir_names.enter_fn_name ->
+        when ef.Tir.v_name = Tir_names.enter_fn_name
+             || ef.Tir.v_name = Tir_names.enter_grant_name ->
         (* A frame entered mid-body (a [restrict] block, [restricts]): a value
            made after it captures the authority it enters, so it is saved
            again right after the entry. *)

@@ -823,15 +823,20 @@ let grant_body_suffix = "$grant"
 let enter_grant_name = "Authority.enter_grant"
 let grant_layer_builtin_name = "Authority.grant_layer"
 
-(** [<p>$grant$auth_layer], [p] with every byte outside [A-Za-z0-9_]
-    replaced by ['_'] (a forge dep name may hold ['-'], which neither an
-    LLVM nor a JS identifier takes). *)
+(** [<p>$grant$auth_layer], [p] with every byte outside [A-Za-z0-9]
+    (['_'] included) written [_xx], its hex code: a forge dep name may hold
+    ['-'], which neither an LLVM nor a JS identifier takes, and the encoding
+    must stay injective ([a-b] is [a_2db], [a_b] is [a_5fb]) or two
+    packages would share one layer, one entering the other's grant. *)
 let grant_layer_fn_of (pkg : string) : string =
-  String.map
+  let b = Buffer.create (String.length pkg + 8) in
+  String.iter
     (fun c ->
-       match c with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> c | _ -> '_')
-    pkg
-  ^ grant_body_suffix ^ auth_layer_suffix
+       match c with
+       | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' -> Buffer.add_char b c
+       | c -> Buffer.add_string b (Printf.sprintf "_%02x" (Char.code c)))
+    pkg;
+  Buffer.contents b ^ grant_body_suffix ^ auth_layer_suffix
 
 (** The program entry among a module's fn names (in [tm_fns] order): a bare
     [main] if there is one, otherwise the last module-qualified [Mod.main].

@@ -1,0 +1,18 @@
+mod Main do
+  needs IO.Console, IO.FileRead
+
+  type Probe = Probe
+
+  impl Show(Probe) do
+    fn show(_p) do
+      match Authority.check("IO.FileRead", "/etc/hosts") do
+      Ok(_) -> "allowed"
+      Err(_) -> "refused"
+      end
+    end
+  end
+
+  fn main() do
+    println(Genx.describe(Probe))
+  end
+end
