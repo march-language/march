@@ -276,6 +276,19 @@ let test_duplicate_declaration_grants () =
     Alcotest.(check bool) ("names both lines: " ^ m) true
       (contains m "forge.toml:8" && contains m "line 5")
 
+(* Follow-up M8: `forge clean` sweeps the content-addressed grants files
+   and any temporary one a crash left; the next build writes its own again. *)
+let test_clean_sweeps_grants_files () =
+  let dir = two_packages () in
+  ignore (Cmd_build.lib_path_env (load dir));
+  write_file (Filename.concat dir ".forge/dep-grants.123abc.tmp") "partial";
+  write_file (Filename.concat dir ".forge/keep-me") "x";
+  Alcotest.(check bool) "files to sweep" true (List.length (grants_files dir) = 2);
+  Cmd_clean.sweep_dep_grants (load dir);
+  Alcotest.(check (list string)) "grants files gone" [] (grants_files dir);
+  Alcotest.(check bool) "other .forge files kept" true
+    (Sys.file_exists (Filename.concat dir ".forge/keep-me"))
+
 let test_test_env_carries_grants () =
   let dir = two_packages () in
   let lib_path_env, _, _, env_pfx = Cmd_test.project_env (load dir) in
@@ -439,6 +452,7 @@ let () =
           Alcotest.test_case "grant = [] is ()" `Quick test_build_grant_nothing;
           Alcotest.test_case "no grant: no file, no env" `Quick test_no_grant_no_file;
           Alcotest.test_case "scopes never share a file" `Quick test_scopes_do_not_share_a_file;
+          Alcotest.test_case "forge clean sweeps them" `Quick test_clean_sweeps_grants_files;
           Alcotest.test_case "an unplaceable grant is an error" `Quick
             test_unplaceable_grant_is_an_error;
           Alcotest.test_case "a dep declared twice with two grants" `Quick

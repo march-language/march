@@ -1199,6 +1199,61 @@ let test_forge_symlink_escape () =
       Unix.symlink "../hidden/sub" (Filename.concat r "lib/sub");
       check_refused "a symlinked subdirectory" (forge_in d "build"))
 
+(* Follow-up M7: `march repl <entry>` runs the same grant checks as
+   `march --check` before loading the entry, in both REPL modes (JIT, and
+   the interpreter under MARCH_REPL_INTERP=1), and refuses the load: a
+   malformed grant, and a granted file that is a symlink out of its root. *)
+let repl_in ?(interp = false) ~libs d file : int * string =
+  let out = Filename.concat d "repl.out" in
+  let grants = Filename.concat d "dep-grants" in
+  let cmd =
+    Printf.sprintf "cd %s && %s HOME=%s MARCH_LIB_PATH=%s %s %s repl %s < /dev/null > %s 2>&1"
+      (Filename.quote d) (if interp then "MARCH_REPL_INTERP=1" else "")
+      (Filename.quote (Lazy.force private_home))
+      (Filename.quote (String.concat ":" libs))
+      (if Sys.file_exists grants then "MARCH_DEP_GRANTS=" ^ Filename.quote grants else "")
+      (Filename.quote (main_exe ())) (Filename.quote file) (Filename.quote out) in
+  let code = Sys.command cmd in
+  let ic = open_in_bin out in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  (code, s)
+
+let test_repl_refuses_bad_grants () =
+  with_reset (fun () ->
+      let expect what ~mentions (code, out) =
+        if code = 0 then Alcotest.failf "%s: the REPL loaded the entry:\n%s" what out;
+        if has_sub out "loaded " then Alcotest.failf "%s: the REPL says it loaded:\n%s" what out;
+        List.iter (fun m ->
+            if not (has_sub out m) then
+              Alcotest.failf "%s: the output does not mention %S:\n%s" what m out)
+          ("[dep_grant_invalid]" :: mentions)
+      in
+      (* a malformed grant (a relative path scope) *)
+      let r = dep "reader" in
+      let d = project ~grants:[ ("reader", r, "IO.FileRead(\"srv/data\")") ] () in
+      List.iter (fun interp ->
+          expect (if interp then "interp REPL, malformed grant" else "JIT REPL, malformed grant")
+            ~mentions:[ "is not valid" ]
+            (repl_in ~interp ~libs:[ r ] d (app "scoped_refusal")))
+        [ false; true ];
+      (* a granted file that is a symlink out of its root *)
+      let pkg = Filename.concat (tmpdir ()) "reader" in
+      List.iter mkdir_p [ pkg; Filename.concat pkg "lib"; Filename.concat pkg "hidden" ];
+      let src = Filename.concat r "reader.march" in
+      let ic = open_in_bin src in
+      let text = really_input_string ic (in_channel_length ic) in
+      close_in ic;
+      write (Filename.concat pkg "hidden/reader.march") text;
+      Unix.symlink "../hidden/reader.march" (Filename.concat pkg "lib/reader.march");
+      let lib = Filename.concat pkg "lib" in
+      let d = project ~grants:[ ("reader", lib, "IO.FileRead(\"/srv/data\")") ] () in
+      List.iter (fun interp ->
+          expect (if interp then "interp REPL, symlink" else "JIT REPL, symlink")
+            ~mentions:[ "lies under the granted root of package `reader`" ]
+            (repl_in ~interp ~libs:[ lib ] d (app "scoped_refusal")))
+        [ false; true ])
+
 (* A malformed grant in forge.toml (a relative path scope) is reported by
    `forge check` and `forge build` as `dep_grant_invalid` at its forge.toml
    line. *)
@@ -1290,4 +1345,6 @@ let tests =
         Alcotest.test_case "a malformed grant is reported at its forge.toml line" `Quick
           test_forge_bad_grant_at_manifest_line;
         Alcotest.test_case "a symlink out of a granted root is refused" `Quick
-          test_forge_symlink_escape ] ) ]
+          test_forge_symlink_escape;
+        Alcotest.test_case "the REPL refuses an entry that breaks its grants" `Quick
+          test_repl_refuses_bad_grants ] ) ]

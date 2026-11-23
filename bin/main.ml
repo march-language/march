@@ -8061,6 +8061,37 @@ let () =
     install_dep_grants ?flag:dep_grants_flag ();
     parse_repl_args repl_args;
     let preload_file = !preload_file in
+    (* Dependency grants (ocap phase 6): the REPL's own load path does not run
+       the whole-program type check, so the static grant checks (each grant's
+       validity, a file on both sides of a granted root, a reached violation)
+       would never run on its entry.  Under grants, check the entry exactly
+       as `march --check` does, in a child, and refuse to load it when a
+       grant diagnostic comes back.  No grants: nothing runs. *)
+    (match preload_file with
+     | Some f when March_caps.Dep_grants.active () <> [] ->
+       let cmd =
+         Printf.sprintf "%s%s --check %s 2>&1"
+           (Filename.quote Sys.executable_name)
+           (match dep_grants_flag with
+            | Some g -> " --dep-grants " ^ Filename.quote g
+            | None -> "")
+           (Filename.quote f)
+       in
+       let ic = Unix.open_process_in cmd in
+       let out = In_channel.input_all ic in
+       ignore (Unix.close_process_in ic);
+       let has sub =
+         let n = String.length out and k = String.length sub in
+         let rec go i = i + k <= n && (String.sub out i k = sub || go (i + 1)) in
+         go 0
+       in
+       if has "[dep_grant_" || has "[dep_module_conflict]" then begin
+         prerr_string out;
+         Printf.eprintf
+           "march repl: not loading %s: it breaks its dependency grants (see above)\n%!" f;
+         exit 1
+       end
+     | _ -> ());
     setup_interpreter_ffi ();
     let runtime_so = ensure_runtime_so () in
     let jit_ctx = March_jit.Repl_jit.create ~runtime_so () in
