@@ -1,0 +1,24 @@
+-- An interface default method whose body does its work when the package
+-- loads (the body is evaluated once, yielding the method's closure): that
+-- is the package's module-level code, so it runs under the grant.
+mod Eager do
+  needs IO.FileRead
+
+  interface Peek(a) do
+    fn peek : a -> String
+    fn peek_eager : a -> String do
+      match Authority.check("IO.FileRead", "/etc/hosts") do
+      Ok(_) -> fn _x -> "eager:allowed"
+      Err(_) -> fn _x -> "eager:refused"
+      end
+    end
+  end
+
+  type K = K
+
+  impl Peek(K) do
+    fn peek(_k) do "p" end
+  end
+
+  fn mk() do K end
+end

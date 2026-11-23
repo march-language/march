@@ -824,6 +824,62 @@ let test_app_impl_from_interpolation () =
             (run_interp ~libs:[ g ] d (app "app_impl_interp")))
         [ "IO.Clock"; "IO.FileRead(\"/srv\")" ])
 
+(* Task 5 fix round 1 (I2): a granted package's actor lifecycle (init,
+   handler, on_stop, a supervised child and its restart), a task the
+   package spawns, and a panic inside it.  Each runs under the grant, and
+   the app's authority is back after each; interp and native agree. *)
+let lifecycle_grant = "IO.FileRead(\"/srv/data\"), IO.Spawn, IO.Console, Actor.Introspect"
+
+let test_lifecycle_under_grant () =
+  with_reset (fun () ->
+      let l = dep "lifecycle" in
+      let d = project ~grants:[ ("lifecycle", l, lifecycle_grant) ] () in
+      let want =
+        String.concat "\n"
+          [ "app-spawned: init=refused handler=refused";
+            "pkg-spawned: init=refused handler=refused";
+            "sup child: init=refused handler=refused";
+            "restarted: true";
+            "restarted child: init=refused handler=refused";
+            "on_stop: refused";
+            "after actors: allowed";
+            "task inside the package: refused";
+            "its task awaited by the app: refused";
+            "after tasks: allowed";
+            "boom: err";
+            "after a panic in the package: allowed";
+            "exit 0\n" ] in
+      Alcotest.(check string) "interp" want (run_interp ~libs:[ l ] d (app "lifecycle"));
+      let code, out = build_in ~target:`Native ~libs:[ l ] d (app "lifecycle") in
+      if code <> 0 then Alcotest.failf "native build failed (exit %d):\n%s" code out;
+      Alcotest.(check string) "native" want (run_built ~target:`Native d))
+
+(* Fix round 1 (C1): an interface default method's body is evaluated when
+   the package loads; that is the package's module-level code, so it runs
+   under the grant.  Interp only: natively this program crashes (SIGSEGV or SIGBUS)
+   with or without grants (specs/todos/2026-11-23-interface-eager-default-sigbus.md). *)
+let test_eager_default_under_grant () =
+  with_reset (fun () ->
+      let e = dep "eager" in
+      let d0 = project () in
+      Alcotest.(check string) "no grant" "default body: eager:allowed\nexit 0\n"
+        (run_interp ~libs:[ e ] d0 (app "eager_default"));
+      let d = project ~grants:[ ("eager", e, "IO.FileRead(\"/srv/data\")") ] () in
+      Alcotest.(check string) "granted" "default body: eager:refused\nexit 0\n"
+        (run_interp ~libs:[ e ] d (app "eager_default")))
+
+(* Fix round 1 (I1): the app's own actor named like the package's
+   `Lifecycle.W` is the app's code: its handler keeps the app's authority.
+   Interp only: natively the two actor names collide when clang compiles the IR with or
+   without grants (same todo). *)
+let test_actor_name_clash () =
+  with_reset (fun () ->
+      let l = dep "lifecycle" in
+      let d = project ~grants:[ ("lifecycle", l, lifecycle_grant) ] () in
+      Alcotest.(check string) "interp"
+        "app W handler=allowed\npackage W: init=refused handler=refused\nexit 0\n"
+        (run_interp ~libs:[ l ] d (app "actor_name_clash")))
+
 (* The proof bit crosses stages by the checker's key: the lowering reads
    [Dep_grants.proven] by the fn's module path and name.  Under an unscoped
    grant a proven fn's frame is dropped and an unproven one's kept. *)
@@ -890,4 +946,10 @@ let tests =
         Alcotest.test_case "an app impl reached from generic package code keeps the frame"
           `Quick test_app_impl_from_generic_code;
         Alcotest.test_case "an app impl reached by interpolation keeps the frame" `Quick
-          test_app_impl_from_interpolation ] ) ]
+          test_app_impl_from_interpolation;
+        Alcotest.test_case "a dep's actors, tasks and panics run under the grant" `Quick
+          test_lifecycle_under_grant;
+        Alcotest.test_case "an interface default body runs under the grant at load" `Quick
+          test_eager_default_under_grant;
+        Alcotest.test_case "an app actor named like a dep actor keeps the app's authority"
+          `Quick test_actor_name_clash ] ) ]

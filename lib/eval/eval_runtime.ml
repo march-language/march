@@ -250,11 +250,11 @@ let with_actor_authority (auth : value) (k : unit -> 'a) : 'a =
     | exception e -> cap_slot := saved; raise e
   end
 
-(** The authority an actor named [name] is spawned under (ocap phase 6:
+(** The authority an actor of definition [def] is spawned under (ocap phase 6:
     for a granted package's actor, the spawner's intersected with the grant;
     [Eval.spawn_authority] sets it).  The spawner's, until the evaluator
     installs it. *)
-let spawn_authority_hook : (string -> value) ref = ref (fun _ -> !cap_slot)
+let spawn_authority_hook : (actor_def -> value) ref = ref (fun _ -> !cap_slot)
 
 type actor_inst = {
   ai_name    : string;           (** Actor type name, e.g. "Counter" *)
@@ -1060,8 +1060,8 @@ let spawn_child_actor ?(crashed_pid : int option = None) ?(init_args : value lis
       | Some old_pid ->
         (match Hashtbl.find_opt actor_registry old_pid with
          | Some old_inst -> old_inst.ai_authority
-         | None -> !spawn_authority_hook child_actor_name)
-      | None -> !spawn_authority_hook child_actor_name
+         | None -> !spawn_authority_hook child_def)
+      | None -> !spawn_authority_hook child_def
     in
     let child_init_state =
       with_actor_authority authority (fun () ->

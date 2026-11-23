@@ -5810,6 +5810,20 @@ let grant_dep_src = {|mod Up do
     fn show(_b) do probe("IO.FileRead", "/etc/box") end
   end
 
+  interface Peek(a) do
+    fn peek : a -> String
+    fn peek_eager : a -> String do
+      match Authority.check("IO.FileRead", "/etc/eager") do
+      Ok(_) -> fn _x -> "ok"
+      Err(e) -> fn _x -> Authority.describe(e)
+      end
+    end
+  end
+
+  impl Peek(Box) do
+    fn peek(_b) do "p" end
+  end
+
   let reader = fn p -> probe("IO.FileRead", p)
   let chk = Authority.check
   let at_load = probe("IO.FileRead", "/etc/load")
@@ -5842,6 +5856,8 @@ let grant_app_src = {|mod Test do
   fn impl_method() do show(Up.mk()) end
 
   fn at_load() do Up.at_load end
+
+  fn eager() do peek_eager(Up.mk()) end
 end|}
 
 (* The grant's refusal of [target]: what `Authority.describe` ends with. *)
@@ -5920,6 +5936,69 @@ let test_grant_module_init_eval () =
       let got = vstr (call_fn env "at_load" []) in
       Alcotest.(check bool) ("a top-level let runs under the grant: " ^ got) true
         (ends_with ~suffix:(up_refusal "/etc/load") got))
+
+(* Fix round 1 (C1): an interface default method's body, evaluated when
+   the package loads, runs under the grant. *)
+let test_grant_eager_default_eval () =
+  with_up_env ~granted:false (fun env ->
+      Alcotest.(check string) "no grant: admitted" "ok" (vstr (call_fn env "eager" [])));
+  with_up_env ~granted:true (fun env ->
+      let got = vstr (call_fn env "eager" []) in
+      Alcotest.(check bool) ("a default body runs under the grant at load: " ^ got) true
+        (ends_with ~suffix:(up_refusal "/etc/eager") got))
+
+(* Fix round 1 (M2): an impl method that goes through the DFn path (here
+   a `JsonFrom` one, name-bound rather than dispatched) with a dummy name
+   span, as [Desugar_derive] gives a derived method, takes its package from
+   the impl's own span.  The module is the program's top level, in a granted
+   root, so the bound method is called straight from outside the package. *)
+let test_grant_impl_dfn_path_eval () =
+  let module G = March_caps.Dep_grants in
+  let open March_ast.Ast in
+  let root = Unix.realpath (Filename.temp_dir "march_grant_eval_dfn" "") in
+  let path = Filename.concat root "jd.march" in
+  let src = {|mod Jd do
+  type Box = Box
+  impl JsonFrom(Box) do
+    fn from_json(_v) do
+      match Authority.check("IO.FileRead", "/etc/json") do
+      Ok(_) -> "ok"
+      Err(e) -> Authority.describe(e)
+      end
+    end
+  end
+end|} in
+  Out_channel.with_open_bin path (fun oc -> output_string oc src);
+  let lexbuf = Lexing.from_string src in
+  lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+  let m = March_desugar.Desugar.desugar_module (March_parser.Parse.module_of_lexbuf lexbuf) in
+  let decls = List.map (function
+      | DImpl (idef, sp) ->
+        DImpl ({ idef with impl_methods = List.map (fun (n, (fd : fn_def)) ->
+            (n, { fd with fn_name = { fd.fn_name with span = dummy_span } }))
+            idef.impl_methods }, sp)
+      | d -> d) m.mod_decls in
+  let run granted =
+    let text = "IO.FileRead(\"/srv/\")" in
+    let entries = match G.parse_scope_text text with Ok es -> es | Error e -> Alcotest.fail e in
+    G.set_active
+      (if granted then
+         [ { G.g_pkg = "up"; g_root = root; g_manifest = "forge.toml"; g_line = 2;
+             g_text = text; g_entries = entries; g_scoped = true } ]
+       else []);
+    Fun.protect ~finally:(fun () -> G.set_active [])
+      (fun () ->
+         let env = March_eval.Eval.eval_module_env
+             { m with mod_decls =
+                        Lazy.force authority_decl_for_eval
+                        :: load_stdlib_file_for_test "list.march"
+                        :: load_stdlib_file_for_test "scope.march" :: decls } in
+         vstr (call_fn env "from_json" [ March_eval.Eval.VInt 0 ]))
+  in
+  Alcotest.(check string) "no grant: admitted" "ok" (run false);
+  let got = run true in
+  Alcotest.(check bool) ("a DFn-path impl method runs under the grant: " ^ got) true
+    (ends_with ~suffix:(up_refusal "/etc/json") got)
 
 let test_grant_impl_method_eval () =
   with_up_env ~granted:true (fun env ->
@@ -6008,6 +6087,8 @@ let eval_suites =
           Alcotest.test_case "grant_module_closure_eval" `Quick (with_reset test_grant_module_closure_eval);
           Alcotest.test_case "grant_module_init_eval" `Quick (with_reset test_grant_module_init_eval);
           Alcotest.test_case "grant_impl_method_eval" `Quick (with_reset test_grant_impl_method_eval);
+          Alcotest.test_case "grant_eager_default_eval" `Quick (with_reset test_grant_eager_default_eval);
+          Alcotest.test_case "grant_impl_dfn_path_eval" `Quick (with_reset test_grant_impl_dfn_path_eval);
           Alcotest.test_case "dotted module name"  `Quick (with_reset test_eval_dotted_module);
           Alcotest.test_case "literal"             `Quick test_eval_literal;
           Alcotest.test_case "arithmetic"          `Quick test_eval_arithmetic;

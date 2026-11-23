@@ -1,0 +1,56 @@
+-- A granted package's actors (init, handler, on_stop, a supervised child
+-- and its restart), a task it spawns, and a panic inside it: each runs
+-- under the grant, and the app's authority is back once the call returns.
+mod Lifecycle do
+  needs IO.FileRead, IO.Spawn, IO.Console, Actor.Introspect
+
+  type GetReq = GetReq
+
+  fn probe(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "allowed"
+    Err(_) -> "refused"
+    end
+  end
+
+  actor W do
+    state { s : String }
+    init  { s: probe("/etc/hosts") }
+    on Get(reply_to) do
+      Actor.reply(reply_to, "init=" ++ state.s ++ " handler=" ++ probe("/etc/hosts"))
+      state
+    end
+    on_stop do
+      println("on_stop: " ++ probe("/etc/hosts"))
+    end
+  end
+
+  actor Sup do
+    state { w : Int }
+    init  { w: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      W w
+    end
+  end
+
+  fn start() do spawn(W) end
+
+  fn task_probe() do
+    let t = Authority.must(Task.async(fn () -> probe("/etc/hosts")))
+    match Task.await(t) do
+    Ok(v) -> v
+    Err(_) -> "task err"
+    end
+  end
+
+  fn task_handle() do
+    Authority.must(Task.async(fn () -> probe("/etc/hosts")))
+  end
+
+  fn boom() do
+    let _ = probe("/x")
+    panic("boom")
+  end
+end
