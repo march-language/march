@@ -285,14 +285,26 @@ let lib_paths ?(release=false) proj =
    compiler as a file, [<project>/.forge/dep-grants], named by
    MARCH_DEP_GRANTS: one line per granted package,
    [<package>\t<lib root>\t<manifest>:<line>\t<scope text>] (format and
-   loader: lib/caps/dep_grants.ml).  Only the root project's grants are
-   written (plan Q1); a grant in a dependency's own forge.toml is shown by
-   `forge audit` as not applied.  With no grant the file is not written (an
-   old one is removed) and the variable is not set, so a grant-free build's
-   prefix and cache keys are exactly what they were before grants. *)
+   loader: lib/caps/dep_grants.ml), named by a digest of its text.  Only
+   the root project's grants are written (plan Q1); a grant in a
+   dependency's own forge.toml is shown by `forge audit` as not applied.
+   With no grant in scope no file is written and the variable is not set,
+   so a grant-free build's prefix and cache keys are exactly what they were
+   before grants. *)
 
-let dep_grants_file proj =
-  Filename.concat proj.Project.root (Filename.concat ".forge" "dep-grants")
+(** A grant forge cannot place: the dep's library root is not installed, or
+    not on the MARCH_LIB_PATH the command runs with.  Skipping it would run
+    the dep ungranted, so it is an error naming the grant's forge.toml line
+    ([forge/bin/main.ml] reports it as a command error). *)
+exception Grant_error of string
+
+(* The grants file for one exact text: content-addressed, so commands with
+   different scopes (dev, release, test with test-deps, install, the REPL,
+   a notebook) running at once on one project never read each other's
+   grants, and a reader never sees a half-written file. *)
+let dep_grants_file proj text =
+  Filename.concat proj.Project.root
+    (Filename.concat ".forge" ("dep-grants-" ^ Digest.to_hex (Digest.string text)))
 
 (* The root directory a dep puts on MARCH_LIB_PATH: the first entry
    [dep_to_lib_paths] gives it ([collect_lib_dirs] lists the root itself
@@ -325,6 +337,9 @@ let within ~root dir =
     there is none.  Roots are real paths, as the compiler stores them; the
     manifest is the project's forge.toml as an absolute path. *)
 let dep_grants_text ~scope ~lib_paths proj : string option =
+  (match Project.grant_conflict proj with
+   | Some msg -> raise (Grant_error (Filename.concat proj.Project.root "" ^ msg))
+   | None -> ());
   let coords = Project.dep_coords ~project_root:proj.Project.root in
   let root = abs_path proj.Project.root in
   let manifest = Filename.concat (real root) "forge.toml" in
@@ -339,10 +354,19 @@ let dep_grants_text ~scope ~lib_paths proj : string option =
           | None -> None
           | Some (grant, line) ->
             match dep_lib_root ~coords ~root (name, dep) with
-            | None -> None
+            | None ->
+              raise (Grant_error (Printf.sprintf
+                "%s:%d: dependency '%s' is granted `%s`, but it is not installed (run \
+                 `forge deps`), so the grant cannot be applied"
+                manifest line name (if grant = [] then "()" else String.concat ", " grant)))
             | Some lib_root ->
               let lib_root = real (abs_path lib_root) in
-              if not (List.exists (fun d -> within ~root:lib_root d) on_path) then None
+              if not (List.exists (fun d -> within ~root:lib_root d) on_path) then
+                raise (Grant_error (Printf.sprintf
+                  "%s:%d: dependency '%s' is granted `%s`, but its library root %s is not \
+                   on the MARCH_LIB_PATH this command uses, so the grant cannot be applied"
+                  manifest line name (if grant = [] then "()" else String.concat ", " grant)
+                  lib_root))
               else
                 let text = if grant = [] then "()" else String.concat ", " grant in
                 Some (Printf.sprintf "%s\t%s\t%s:%d\t%s" name lib_root manifest line text)
@@ -356,21 +380,24 @@ let dep_grants_text ~scope ~lib_paths proj : string option =
          (("# Dependency grants, written by forge from " ^ manifest ^ ". Do not edit.") :: lines)
        ^ "\n")
 
-(** Write (or remove) the project's grants file for [scope] and [lib_paths],
-    and return the shell assignment that points the compiler at it,
-    [MARCH_DEP_GRANTS='<abs path>' ], or [""] when no dep is granted.  The
-    file is rewritten only when its text changes. *)
+(** Write the project's grants file for [scope] and [lib_paths] and return
+    the shell assignment that points the compiler at it,
+    [MARCH_DEP_GRANTS='<abs path>' ], or [""] when no dep in scope is
+    granted.  The file is named by its contents ([dep_grants_file]) and
+    written through a unique temporary file renamed into place, so it is
+    never seen half-written and never changes once it exists.  Files are
+    never deleted here: another command may still name one.  Raises
+    [Grant_error] for a grant it cannot place. *)
 let dep_grants_env ~scope ~lib_paths proj : string =
-  let file = abs_path (dep_grants_file proj) in
   match dep_grants_text ~scope ~lib_paths proj with
-  | None ->
-    if Sys.file_exists file then (try Sys.remove file with Sys_error _ -> ());
-    ""
+  | None -> ""
   | Some text ->
+    let file = abs_path (dep_grants_file proj text) in
     let current = try Some (Project.read_file file) with Sys_error _ -> None in
     if current <> Some text then begin
-      Project.mkdir_p (Filename.dirname file);
-      let tmp = file ^ ".tmp" in
+      let dir = Filename.dirname file in
+      Project.mkdir_p dir;
+      let tmp = Filename.temp_file ~temp_dir:dir "dep-grants." ".tmp" in
       let oc = open_out_bin tmp in
       output_string oc text;
       close_out oc;

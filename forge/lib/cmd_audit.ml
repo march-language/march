@@ -500,11 +500,19 @@ let read_baseline path : (string * string list) list =
     [grant = [...]] lines [write_baseline] emits (read with the TOML reader:
     grant entries hold commas and quotes).  A baseline written before grants
     has none. *)
+exception Baseline_error of string
+
 let read_baseline_grants path : (string * string list) list =
   if not (Sys.file_exists path) then []
   else
     match Toml.parse_located (Project.read_file path) with
-    | Error _ -> []
+    | Error (line, msg) ->
+      (* Fatal: reading it as "no grants recorded" would forget every
+         recorded grant, and a removed grant would no longer escalate. *)
+      raise (Baseline_error
+               (Printf.sprintf "%s:%d: %s (cannot read the recorded grants; fix or \
+                                re-record it with `forge audit --record`)"
+                  (Filename.basename path) line msg))
     | Ok doc ->
       List.filter_map (fun pairs ->
           match Toml.get_string pairs "name", List.assoc_opt "grant" pairs with
@@ -602,6 +610,29 @@ let string_of_change = function
 (* ------------------------------------------------------------------ *)
 
 let plural n ~one ~many = if n = 1 then one else many
+
+let change_dep = function
+  | Added (n, _) | Widened (n, _) | Narrowed (n, _) | Removed n
+  | Grant_widened (n, _) | Grant_narrowed (n, _) | Grant_removed n | Grant_added (n, _) -> n
+
+(** The closing line over [escalations]: counted by dependency (one can
+    both ask for more and have its grant widened), and worded by what
+    changed: capabilities a dependency asks for, or a grant the project
+    widened or dropped. *)
+let escalation_summary (escalations : change list) : string =
+  let deps_of p = List.sort_uniq compare (List.map change_dep (List.filter p escalations)) in
+  let asking = deps_of (function Added _ | Widened _ -> true | _ -> false) in
+  let granting = deps_of (function Grant_widened _ | Grant_removed _ -> true | _ -> false) in
+  let all = List.sort_uniq compare (asking @ granting) in
+  let n = List.length all in
+  let deps = Printf.sprintf "%d dependenc%s" n (plural n ~one:"y" ~many:"ies") in
+  match asking, granting with
+  | _, [] -> Printf.sprintf "%s %s asking for capabilities %s did not have." deps
+               (plural n ~one:"is" ~many:"are") (plural n ~one:"it" ~many:"they")
+  | [], _ -> Printf.sprintf "%s %s a grant that was widened or removed." deps
+               (plural n ~one:"has" ~many:"have")
+  | _ -> Printf.sprintf "%s %s new authority to review (capabilities asked for, or a \
+                         grant widened or removed)." deps (plural n ~one:"has" ~many:"have")
 
 (* How many lines of a reason to print per dependency. `march caps` on a
    dependency with real type errors prints every one of them; the first few
@@ -792,7 +823,10 @@ let check_proj ?(inferred = false) ?(allow_unanalyzable = false) (proj : Project
     let baseline =
       List.filter (fun (n, _) -> not (List.mem n un_names)) (read_baseline path)
     in
-    let changes = diff_grants ~baseline_grants:(read_baseline_grants path) ~baseline ~current in
+    match read_baseline_grants path with
+    | exception Baseline_error m -> Error m
+    | baseline_grants ->
+    let changes = diff_grants ~baseline_grants ~baseline ~current in
     let escalations = List.filter is_escalation changes in
     let escalation_code =
       if changes = [] then begin
@@ -811,10 +845,7 @@ let check_proj ?(inferred = false) ?(allow_unanalyzable = false) (proj : Project
           0
         end
         else begin
-          Printf.printf
-            "%d dependenc%s asking for capabilities it did not have.\n"
-            (List.length escalations)
-            (if List.length escalations = 1 then "y is" else "ies are");
+          print_endline (escalation_summary escalations);
           print_endline "Review the change, then accept it with `forge audit --record`.";
           1
         end
@@ -927,8 +958,10 @@ let gate_dependency_change ?(for_deps = false) ~(accept : bool)
         let baseline =
           List.filter (fun (n, _) -> List.mem n touched) (read_baseline path)
         in
-        let baseline_grants =
-          List.filter (fun (n, _) -> List.mem n touched) (read_baseline_grants path) in
+        match read_baseline_grants path with
+        | exception Baseline_error m -> Error m
+        | all_grants ->
+        let baseline_grants = List.filter (fun (n, _) -> List.mem n touched) all_grants in
         let changes =
           diff_grants ~baseline_grants ~baseline ~current:c.deps
           |> List.filter (function Removed _ -> false | _ -> true)

@@ -79,6 +79,8 @@ let parse_quoted_string s i =
 let parse_literal_string s i =
   let n = String.length s in
   if i >= n || s.[i] <> '\'' then fail "expected \"'\"";
+  if i + 2 < n && s.[i + 1] = '\'' && s.[i + 2] = '\'' then
+    fail "multi-line literal strings ('''...''') are not supported; use '...' on one line";
   match String.index_from_opt s (i + 1) '\'' with
   | None -> fail "unterminated literal string"
   | Some j -> (String.sub s (i + 1) (j - i - 1), j + 1)

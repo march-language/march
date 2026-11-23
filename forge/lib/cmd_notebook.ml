@@ -165,6 +165,7 @@ let notebook_dep_lib_paths nb_path =
     match Project.load_from_dir dir with
     | Error _ -> []
     | Ok proj ->
+      let coords = Project.dep_coords ~project_root:proj.Project.root in
       List.filter_map (fun (dep_name, dep) ->
         match dep with
         | Project.PathDep rel_path ->
@@ -173,7 +174,10 @@ let notebook_dep_lib_paths nb_path =
           let lib = Filename.concat abs "lib" in
           if Sys.file_exists lib then Some lib else Some abs
         | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
-          Project.git_dep_lib_path dep_name
+          (* forge.lock's coordinates, as the build (and its grants file)
+             resolve them: without them a second cached version could be
+             loaded while the grant names the locked one. *)
+          Project.git_dep_lib_path ~coords dep_name
         | Project.RegistryDep _ -> None
       ) proj.Project.deps
 

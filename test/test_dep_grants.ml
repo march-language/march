@@ -179,6 +179,52 @@ let test_membership_symlink () =
       Alcotest.(check (option string)) "symlinked file attributed by real path" (Some "dep") (pkg link);
       Alcotest.(check (option string)) "app file" None (pkg (Filename.concat app "other.march")))
 
+(* Fix round 1 (C1): membership is decided by the location the loader
+   found a file at AND its real path.  A file under a granted root that is
+   a symlink to code outside it (or under a symlinked subdirectory) is a
+   conflict, and still the package's (fail closed).  A project reached
+   through a symlinked parent (/tmp -> /private/tmp) is not a conflict. *)
+let test_membership_symlink_escape () =
+  with_reset (fun () ->
+      let d = tmpdir () in
+      let root = Filename.concat d "dep" in
+      let lib = Filename.concat root "lib" and hidden = Filename.concat root "hidden" in
+      let hidden_sub = Filename.concat hidden "sub" in
+      List.iter mkdir_p [ root; lib; hidden; hidden_sub ];
+      write (Filename.concat lib "plain.march") "";
+      write (Filename.concat hidden "esc.march") "";
+      write (Filename.concat hidden_sub "deep.march") "";
+      Unix.symlink "../hidden/esc.march" (Filename.concat lib "esc.march");
+      Unix.symlink "../hidden/sub" (Filename.concat lib "sub");
+      (* The whole tree also reached through a symlinked parent. *)
+      let alias = Filename.concat (tmpdir ()) "alias" in
+      Unix.symlink d alias;
+      let alias_lib = Filename.concat alias "dep/lib" in
+      let f = grants_file d [ "dep	" ^ lib ^ "	forge.toml:1	IO.Console" ] in
+      let saved = Sys.getenv_opt "MARCH_LIB_PATH" in
+      Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_LIB_PATH" (Option.value saved ~default:""))
+        (fun () ->
+           Unix.putenv "MARCH_LIB_PATH"
+             (String.concat ":" [ alias_lib; Filename.concat alias_lib "sub" ]);
+           G.set_active (ok (G.load ~flag:f ()));
+           let pkg p = Option.map (fun g -> g.G.g_pkg) (G.package_of_file p) in
+           Alcotest.(check (option string)) "plain file, spelled through the alias" (Some "dep")
+             (pkg (Filename.concat alias_lib "plain.march"));
+           Alcotest.(check (list string)) "no conflict for it" []
+             (List.map (fun c -> c.G.c_file) (G.conflicts ()));
+           let esc = Filename.concat alias_lib "esc.march" in
+           let deep = Filename.concat alias_lib "sub/deep.march" in
+           Alcotest.(check (option string)) "a symlinked file is still the package's" (Some "dep")
+             (pkg esc);
+           Alcotest.(check (option string)) "so is a file in a symlinked subdirectory" (Some "dep")
+             (pkg deep);
+           Alcotest.(check (list string)) "both are conflicts" [ esc; deep ]
+             (List.map (fun c -> c.G.c_file) (G.conflicts ()));
+           List.iter (fun c ->
+               Alcotest.(check (option string)) "resolves outside" None
+                 (Option.map (fun g -> g.G.g_pkg) c.G.c_resolved))
+             (G.conflicts ())))
+
 let test_flag_overrides_env () =
   with_reset (fun () ->
       let d = tmpdir () in
@@ -1091,8 +1137,15 @@ let test_forge_build_and_run () =
       let d = forge_project () in
       let code, out = forge_in d "build" in
       if code <> 0 then Alcotest.failf "forge build failed (exit %d):\n%s" code out;
-      let grants = Filename.concat d ".forge/dep-grants" in
-      if not (Sys.file_exists grants) then Alcotest.fail "forge build wrote no .forge/dep-grants";
+      let grants =
+        let fd = Filename.concat d ".forge" in
+        match
+          (if Sys.file_exists fd then Array.to_list (Sys.readdir fd) else [])
+          |> List.filter (fun f -> String.starts_with ~prefix:"dep-grants-" f)
+        with
+        | [ f ] -> Filename.concat fd f
+        | fs -> Alcotest.failf "expected one .forge/dep-grants-<digest>, found %d" (List.length fs)
+      in
       let ic = open_in_bin grants in
       let text = really_input_string ic (in_channel_length ic) in
       close_in ic;
@@ -1114,6 +1167,37 @@ let test_forge_build_and_run () =
          IO.FileRead(\"/etc/hosts\") refused by the grant to package reader \
          (IO.FileRead(\"/srv/data\"))\nexit 0\n"
         ran)
+
+(* Fix round 1 (C1): a granted dependency whose file is a symlink to code
+   outside its library root (and, separately, whose lib/ holds a symlinked
+   subdirectory) must not run ungranted: the build is refused with
+   `dep_grant_invalid` at the grant's forge.toml line. *)
+let test_forge_symlink_escape () =
+  with_reset (fun () ->
+      let check_refused what (code, out) =
+        if code = 0 then Alcotest.failf "%s: forge build passed:\n%s" what out;
+        List.iter (fun m ->
+            if not (has_sub out m) then
+              Alcotest.failf "%s: the output does not mention %S:\n%s" what m out)
+          [ "[dep_grant_invalid]"; "forge.toml:11";
+            "lies under the granted root of package `reader` but resolves to" ]
+      in
+      (* a symlinked file *)
+      let d = forge_project () in
+      let r = Filename.concat d "deps/reader" in
+      Unix.mkdir (Filename.concat r "hidden") 0o755;
+      Sys.rename (Filename.concat r "lib/reader.march") (Filename.concat r "hidden/reader.march");
+      Unix.symlink "../hidden/reader.march" (Filename.concat r "lib/reader.march");
+      check_refused "a symlinked file" (forge_in d "build");
+      (* a symlinked subdirectory *)
+      let d = forge_project () in
+      let r = Filename.concat d "deps/reader" in
+      Unix.mkdir (Filename.concat r "hidden") 0o755;
+      Unix.mkdir (Filename.concat r "hidden/sub") 0o755;
+      Sys.rename (Filename.concat r "lib/reader.march")
+        (Filename.concat r "hidden/sub/reader.march");
+      Unix.symlink "../hidden/sub" (Filename.concat r "lib/sub");
+      check_refused "a symlinked subdirectory" (forge_in d "build"))
 
 (* A malformed grant in forge.toml (a relative path scope) is reported by
    `forge check` and `forge build` as `dep_grant_invalid` at its forge.toml
@@ -1145,6 +1229,7 @@ let tests =
         Alcotest.test_case "parse_scope_text" `Quick test_parse_scope_text;
         Alcotest.test_case "membership_longest_prefix" `Quick test_membership_longest_prefix;
         Alcotest.test_case "membership_symlink" `Quick test_membership_symlink;
+        Alcotest.test_case "membership_symlink_escape" `Quick test_membership_symlink_escape;
         Alcotest.test_case "flag_overrides_env" `Quick test_flag_overrides_env;
         Alcotest.test_case "digest_tracks_contents" `Quick test_digest_tracks_contents ] );
     ( "dep_module_conflict",
@@ -1203,4 +1288,6 @@ let tests =
         Alcotest.test_case "forge build writes the grants and the program is refused" `Quick
           test_forge_build_and_run;
         Alcotest.test_case "a malformed grant is reported at its forge.toml line" `Quick
-          test_forge_bad_grant_at_manifest_line ] ) ]
+          test_forge_bad_grant_at_manifest_line;
+        Alcotest.test_case "a symlink out of a granted root is refused" `Quick
+          test_forge_symlink_escape ] ) ]

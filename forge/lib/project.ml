@@ -301,6 +301,25 @@ let grant_of (proj : project) name : (string list * int) option =
   | Some { grant = Some g; grant_line; _ } -> Some (g, grant_line)
   | _ -> None
 
+(** A dependency declared more than once (inline and as [deps.X], or in two
+    sections) with different grants, as
+    [forge.toml:<line>: dependency 'x' is declared again ...]; [grant_of]
+    reads the first declaration, so the other would be silently dropped.
+    Checked where the grants are applied (the root project, plan Q1), so a
+    dependency's own manifest is never refused for it. *)
+let grant_conflict (proj : project) : string option =
+  List.find_map (fun (name, (e : dep_entry)) ->
+      match List.find_opt (fun (n, (e' : dep_entry)) -> n = name && e'.grant <> e.grant)
+              proj.dep_entries with
+      | Some (_, e') ->
+        let a, b = if e.grant_line <= e'.grant_line then e, e' else e', e in
+        Some (Printf.sprintf
+                "forge.toml:%d: dependency '%s' is declared again with a different grant \
+                 (first declared at line %d); give every declaration the same grant"
+                b.grant_line name a.grant_line)
+      | None -> None)
+    proj.dep_entries
+
 (** Parse [archive.task.NAME] sections into archive_task list. *)
 let parse_archive_tasks doc =
   let prefix = "archive.task." in

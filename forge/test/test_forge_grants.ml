@@ -73,6 +73,14 @@ let test_toml_literal_strings () =
     [ "IO.NetConnect(\"a.test\", methods(get, post))"; "IO.Clock" ]
     (Toml.get_string_list t "e")
 
+let test_toml_triple_quote_message () =
+  match Toml.parse_located "[t]\na = \'\'\'x\'\'\'\n" with
+  | Ok _ -> Alcotest.fail "a multi-line literal string must not parse"
+  | Error (line, m) ->
+    Alcotest.(check int) "its line" 2 line;
+    Alcotest.(check bool) ("says what is unsupported: " ^ m) true
+      (contains m "multi-line literal strings")
+
 let test_toml_unterminated_literal () =
   match Toml.parse_located "[t]\na = 'oops\n" with
   | Ok _ -> Alcotest.fail "an unterminated literal string must not parse"
@@ -164,58 +172,114 @@ let two_packages ?(grant = Some "['IO.FileRead(\"/srv/data\")']") () =
        (match grant with None -> "" | Some g -> ", grant = " ^ g));
   dir
 
-let grants_file dir = Filename.concat dir ".forge/dep-grants"
+(* The grants file a prefix names (content-addressed, Fix round 1 I1). *)
+let grants_of_env env =
+  match Cmd_build.dep_grants_file_of_env env with
+  | Some f -> f
+  | None -> Alcotest.failf "no MARCH_DEP_GRANTS in %s" env
+
+let grants_files dir =
+  let d = Filename.concat dir ".forge" in
+  if not (Sys.file_exists d) then []
+  else
+    Sys.readdir d |> Array.to_list
+    |> List.filter (fun f -> String.starts_with ~prefix:"dep-grants" f)
+    |> List.sort compare
+
+let entry_lines file =
+  String.split_on_char '\n' (read_file file) |> List.filter (fun l -> l <> "" && l.[0] <> '#')
 
 let test_build_writes_grants_file () =
   let dir = two_packages () in
   let p = load dir in
   let env = Cmd_build.lib_path_env p in
-  let file = grants_file dir in
+  let file = grants_of_env env in
+  Alcotest.(check string) "under .forge/, named by its contents"
+    (Filename.concat dir (".forge/dep-grants-" ^ Digest.to_hex (Digest.string (read_file file))))
+    file;
   Alcotest.(check bool) ("MARCH_DEP_GRANTS is set: " ^ env) true
     (contains env ("MARCH_DEP_GRANTS=" ^ Filename.quote file ^ " "));
-  Alcotest.(check bool) "the file exists" true (Sys.file_exists file);
   let lib_root = Unix.realpath (Filename.concat dir "deps/reader/lib") in
-  let lines =
-    String.split_on_char '\n' (read_file file)
-    |> List.filter (fun l -> l <> "" && l.[0] <> '#')
-  in
   Alcotest.(check (list string)) "one line: package, lib root, manifest:line, scope text"
     [ Printf.sprintf "reader\t%s\t%s:5\tIO.FileRead(\"/srv/data\")" lib_root
         (Filename.concat dir "forge.toml") ]
-    lines;
+    (entry_lines file);
   (* The lib root forge writes is on the MARCH_LIB_PATH it sets. *)
-  Alcotest.(check bool) "the root is on MARCH_LIB_PATH" true (contains env lib_root)
+  Alcotest.(check bool) "the root is on MARCH_LIB_PATH" true (contains env lib_root);
+  Alcotest.(check (list string)) "no temporary file left" [ Filename.basename file ]
+    (grants_files dir)
 
 let test_build_grant_nothing () =
   let dir = two_packages ~grant:(Some "[]") () in
-  ignore (Cmd_build.lib_path_env (load dir));
-  let lines =
-    String.split_on_char '\n' (read_file (grants_file dir))
-    |> List.filter (fun l -> l <> "" && l.[0] <> '#')
-  in
-  match lines with
+  let env = Cmd_build.lib_path_env (load dir) in
+  match entry_lines (grants_of_env env) with
   | [ l ] ->
     Alcotest.(check bool) ("grant = [] is written as ()" ^ l) true
       (String.ends_with ~suffix:"\t()" l)
-  | _ -> Alcotest.failf "expected one line, got %d" (List.length lines)
+  | ls -> Alcotest.failf "expected one line, got %d" (List.length ls)
 
 let test_no_grant_no_file () =
   let dir = two_packages ~grant:None () in
   let env = Cmd_build.lib_path_env (load dir) in
   Alcotest.(check bool) ("no MARCH_DEP_GRANTS: " ^ env) false (contains env "MARCH_DEP_GRANTS");
-  Alcotest.(check bool) "no grants file" false (Sys.file_exists (grants_file dir));
-  (* A file left from an earlier build that had a grant is removed, so it
-     cannot be mistaken for the current grants. *)
+  Alcotest.(check (list string)) "no grants file" [] (grants_files dir);
+  (* A file another command (another scope) wrote is left alone: that
+     command may still be reading it. *)
   mkdir_p (Filename.concat dir ".forge");
-  write_file (grants_file dir) "stale\n";
+  write_file (Filename.concat dir ".forge/dep-grants-other") "x\n";
   let env' = Cmd_build.lib_path_env (load dir) in
   Alcotest.(check string) "the prefix is unchanged" env env';
-  Alcotest.(check bool) "a stale grants file is removed" false (Sys.file_exists (grants_file dir))
+  Alcotest.(check (list string)) "another scope's file is not deleted" [ "dep-grants-other" ]
+    (grants_files dir)
+
+(* I1: two scopes with different grants (a dev build sees a granted
+   dev-dep, a release build does not) name two files, and running one never
+   changes the file the other names. *)
+let test_scopes_do_not_share_a_file () =
+  let dir = two_packages () in
+  mkdir_p (Filename.concat dir "deps/clock/lib");
+  write_file (Filename.concat dir "deps/clock/lib/clock.march") "mod Clock do\nend\n";
+  let toml = Filename.concat dir "forge.toml" in
+  write_file toml
+    (read_file toml ^ "\n[dev-deps]\nclock = { path = \"deps/clock\", grant = ['IO.Clock'] }\n");
+  let p = load dir in
+  let dev = grants_of_env (Cmd_build.lib_path_env p) in
+  let dev_text = read_file dev in
+  let release = grants_of_env (Cmd_build.lib_path_env ~release:true p) in
+  Alcotest.(check bool) "two files" true (dev <> release);
+  Alcotest.(check string) "the dev file is untouched by the release build" dev_text (read_file dev);
+  Alcotest.(check bool) "the dev scope grants clock" true (contains dev_text "clock\t");
+  Alcotest.(check bool) "the release scope does not" false (contains (read_file release) "clock\t")
+
+(* I2: a grant forge cannot place is an error at its forge.toml line, never
+   a silently ungranted dependency. *)
+let test_unplaceable_grant_is_an_error () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml")
+    "[package]\nname = \"app\"\n\n[deps]\nghost = { path = \"deps/ghost\", grant = ['IO.Console'] }\n";
+  match Cmd_build.lib_path_env (load dir) with
+  | env -> Alcotest.failf "a grant for a missing dep was skipped: %s" env
+  | exception Cmd_build.Grant_error m ->
+    Alcotest.(check bool) ("names forge.toml:5 and the dep: " ^ m) true
+      (contains m "forge.toml:5" && contains m "'ghost'")
+
+(* M3: a dep declared twice with different grants is an error, not a
+   silently dropped grant. *)
+let test_duplicate_declaration_grants () =
+  let dir = two_packages ~grant:None () in
+  let toml = Filename.concat dir "forge.toml" in
+  write_file toml
+    (read_file toml ^ "\n[dev-deps]\nreader = { path = \"deps/reader\", grant = ['IO.Clock'] }\n");
+  match Cmd_build.lib_path_env (load dir) with
+  | env -> Alcotest.failf "the second declaration's grant was dropped: %s" env
+  | exception Cmd_build.Grant_error m ->
+    Alcotest.(check bool) ("names both lines: " ^ m) true
+      (contains m "forge.toml:8" && contains m "line 5")
 
 let test_test_env_carries_grants () =
   let dir = two_packages () in
   let lib_path_env, _, _, env_pfx = Cmd_test.project_env (load dir) in
-  let want = "MARCH_DEP_GRANTS=" ^ Filename.quote (grants_file dir) in
+  let want = "MARCH_DEP_GRANTS=" ^ Filename.quote (grants_of_env lib_path_env) in
   Alcotest.(check bool) "forge test's prefix" true (contains lib_path_env want);
   (* The prefix forge test rebuilds MARCH_LIB_PATH behind (with test/ added)
      keeps it too. *)
@@ -228,8 +292,8 @@ let test_check_cache_key_hashes_grants () =
   let files = [ Filename.concat dir "lib/app.march" ] in
   let k1 = Cmd_build.check_all_cache_key ~lib_path_env:env ~compiler_id:"c" files in
   (* One byte of the grant text, same path, same prefix. *)
-  let text = read_file (grants_file dir) in
-  write_file (grants_file dir)
+  let text = read_file (grants_of_env env) in
+  write_file (grants_of_env env)
     (Str.global_replace (Str.regexp_string "/srv/data") "/srv/datb" text);
   let k2 = Cmd_build.check_all_cache_key ~lib_path_env:env ~compiler_id:"c" files in
   Alcotest.(check bool) "a grants-file edit changes the key" true (k1 <> k2);
@@ -271,6 +335,28 @@ let test_baseline_records_grant () =
   Alcotest.(check bool) "no grant line" false (contains (read_file path) "grant")
 
 let escalates changes = List.exists Cmd_audit.is_escalation changes
+
+(* M1: an unreadable lock is fatal, not "no grants recorded". *)
+let test_corrupt_lock_is_fatal () =
+  let dir = fresh_dir () in
+  let path = Filename.concat dir "forge.caps.lock" in
+  write_file path "[[package]]\nname = \"a\"\ngrant = [\"IO.Clock\"\n";
+  match Cmd_audit.read_baseline_grants path with
+  | _ -> Alcotest.fail "a lock that does not parse read as no grants"
+  | exception Cmd_audit.Baseline_error m ->
+    Alcotest.(check bool) ("names the lock: " ^ m) true (contains m "forge.caps.lock")
+
+(* M2: the closing line counts dependencies, and says what changed. *)
+let test_escalation_summary () =
+  let s = Cmd_audit.escalation_summary in
+  Alcotest.(check string) "one dep, caps and grant"
+    "1 dependency has new authority to review (capabilities asked for, or a grant widened or removed)."
+    (s [ Cmd_audit.Widened ("a", [ "IO.Clock" ]); Cmd_audit.Grant_widened ("a", [ "IO.Clock" ]) ]);
+  Alcotest.(check string) "grant only" "1 dependency has a grant that was widened or removed."
+    (s [ Cmd_audit.Grant_removed "a" ]);
+  Alcotest.(check string) "caps only, two deps"
+    "2 dependencies are asking for capabilities they did not have."
+    (s [ Cmd_audit.Widened ("a", [ "IO.Clock" ]); Cmd_audit.Added ("b", [ "IO.Console" ]) ])
 
 let test_diff_grants () =
   let base_grants = [ ("alpha", [ "IO.FileRead(\"/srv/data\")" ]) ] in
@@ -341,7 +427,8 @@ let () =
   Alcotest.run "forge-grants"
     [ ( "toml",
         [ Alcotest.test_case "literal strings with , ] #" `Quick test_toml_literal_strings;
-          Alcotest.test_case "unterminated literal string" `Quick test_toml_unterminated_literal ] );
+          Alcotest.test_case "unterminated literal string" `Quick test_toml_unterminated_literal;
+          Alcotest.test_case "''' says it is unsupported" `Quick test_toml_triple_quote_message ] );
       ( "project",
         [ Alcotest.test_case "grants round-trip with their lines" `Quick test_project_grants;
           Alcotest.test_case "a malformed grant is an error at its line" `Quick
@@ -351,11 +438,18 @@ let () =
             test_build_writes_grants_file;
           Alcotest.test_case "grant = [] is ()" `Quick test_build_grant_nothing;
           Alcotest.test_case "no grant: no file, no env" `Quick test_no_grant_no_file;
+          Alcotest.test_case "scopes never share a file" `Quick test_scopes_do_not_share_a_file;
+          Alcotest.test_case "an unplaceable grant is an error" `Quick
+            test_unplaceable_grant_is_an_error;
+          Alcotest.test_case "a dep declared twice with two grants" `Quick
+            test_duplicate_declaration_grants;
           Alcotest.test_case "forge test's env" `Quick test_test_env_carries_grants;
           Alcotest.test_case "check cache key hashes the file" `Quick
             test_check_cache_key_hashes_grants ] );
       ( "audit",
         [ Alcotest.test_case "forge.caps.lock records the grant" `Quick test_baseline_records_grant;
           Alcotest.test_case "diff: widened grant escalates" `Quick test_diff_grants;
+          Alcotest.test_case "a corrupt lock is fatal" `Quick test_corrupt_lock_is_fatal;
+          Alcotest.test_case "the summary counts deps" `Quick test_escalation_summary;
           Alcotest.test_case "collect: grant, no grant, not applied" `Quick
             test_collect_grants_and_nested ] ) ]

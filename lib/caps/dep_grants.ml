@@ -189,6 +189,19 @@ let active_digest : string option ref = ref None
 let membership : (string, grant option) Hashtbl.t = Hashtbl.create 64
 let proven : (string, unit) Hashtbl.t = Hashtbl.create 64
 
+(* MARCH_LIB_PATH's directories as (lexical spelling, real path), read once
+   per [set_active] (the variable does not change within a compilation). *)
+let lib_entries : (string * string) list option ref = ref None
+
+type conflict = {
+  c_file : string;  (** the file as the loader named it *)
+  c_real : string;  (** its real path *)
+  c_logical : grant option;  (** the package its spelled location is in *)
+  c_resolved : grant option;  (** the package its real path is in *)
+}
+
+let conflict_tbl : (string, conflict) Hashtbl.t = Hashtbl.create 4
+
 let digest_of (gs : grant list) : string option =
   match gs with
   | [] -> None
@@ -206,6 +219,8 @@ let set_active (gs : grant list) =
   active_grants := gs;
   active_digest := digest_of gs;
   Hashtbl.reset membership;
+  Hashtbl.reset conflict_tbl;
+  lib_entries := None;
   Hashtbl.reset proven
 
 let active () = !active_grants
@@ -219,6 +234,68 @@ let contains ~root path =
   String.length path > String.length pre
   && String.sub path 0 (String.length pre) = pre
 
+(* A path made absolute against the working directory and normalised
+   lexically ("." and empty segments dropped, ".." pops), with no symlink
+   resolved: the path as the loader spelled it. *)
+let lexical_abs (p : string) : string =
+  let p = if Filename.is_relative p then Filename.concat (Sys.getcwd ()) p else p in
+  let segs =
+    List.fold_left (fun acc seg ->
+        match seg with
+        | "" | "." -> acc
+        | ".." -> (match acc with [] -> [] | _ :: tl -> tl)
+        | s -> s :: acc)
+      [] (String.split_on_char '/' p)
+  in
+  "/" ^ String.concat "/" (List.rev segs)
+
+
+let get_lib_entries () =
+  match !lib_entries with
+  | Some l -> l
+  | None ->
+    let l =
+      match Sys.getenv_opt "MARCH_LIB_PATH" with
+      | None -> []
+      | Some s ->
+        List.filter_map (fun d ->
+            if d = "" then None
+            else
+              let sp = lexical_abs d in
+              let real = try Unix.realpath d with Unix.Unix_error _ -> sp in
+              Some (sp, real))
+          (String.split_on_char ':' s)
+    in
+    lib_entries := Some l;
+    l
+
+
+let longest (gs : grant list) (path : string) : grant option =
+  List.fold_left
+    (fun best g ->
+       if contains ~root:g.g_root path then
+         match best with
+         | Some b when String.length b.g_root >= String.length g.g_root -> best
+         | _ -> Some g
+       else best)
+    None gs
+
+let same a b =
+  match a, b with
+  | None, None -> true
+  | Some x, Some y -> x.g_pkg = y.g_pkg
+  | _ -> false
+
+(* Membership is decided by both the path the loader found the file under
+   and the file's real path, and the two must agree (fail closed).  The
+   spelled location: for each MARCH_LIB_PATH directory D whose lexical
+   spelling contains the file's, the real path of D followed by the rest of
+   the file's spelling (so a project reached through a symlinked parent,
+   /tmp -> /private/tmp, still matches the real-path roots).  A file under a
+   granted root that is a symlink to code outside it (or a symlinked
+   subdirectory) would otherwise run ungranted: such a file is recorded as
+   a conflict (reported as [dep_grant_invalid]) and treated as the granted
+   package's. *)
 let package_of_file (file : string) : grant option =
   match !active_grants with
   | [] -> None
@@ -226,22 +303,40 @@ let package_of_file (file : string) : grant option =
     match Hashtbl.find_opt membership file with
     | Some r -> r
     | None ->
+      let spelled = lexical_abs file in
+      let real = try Some (Unix.realpath file) with Unix.Unix_error _ -> None in
+      let logical =
+        List.filter_map (fun (d_sp, d_real) ->
+            if contains ~root:d_sp spelled then
+              let rest = String.sub spelled (String.length d_sp)
+                  (String.length spelled - String.length d_sp) in
+              Some (longest gs (if d_real = "/" then rest else d_real ^ rest))
+            else None)
+          (get_lib_entries ())
+      in
+      let resolved = Option.map (longest gs) real in
+      let all = (match resolved with Some r -> [ r ] | None -> []) @ logical in
       let r =
-        match Unix.realpath file with
-        | exception Unix.Unix_error _ -> None
-        | real ->
-          List.fold_left
-            (fun best g ->
-               if contains ~root:g.g_root real then
-                 match best with
-                 | Some b when String.length b.g_root >= String.length g.g_root ->
-                   best
-                 | _ -> Some g
-               else best)
-            None gs
+        match all with
+        | [] -> None
+        | first :: rest ->
+          if List.for_all (same first) rest then first
+          else begin
+            let logical_pkg = List.find_map Fun.id logical in
+            let resolved_pkg = Option.join resolved in
+            Hashtbl.replace conflict_tbl file
+              { c_file = file; c_real = Option.value real ~default:spelled;
+                c_logical = logical_pkg; c_resolved = resolved_pkg };
+            (* fail closed: some grant applies *)
+            match logical_pkg with Some g -> Some g | None -> resolved_pkg
+          end
       in
       Hashtbl.replace membership file r;
       r)
+
+let conflicts () =
+  Hashtbl.fold (fun _ c acc -> c :: acc) conflict_tbl []
+  |> List.sort (fun a b -> compare a.c_file b.c_file)
 
 (* Decision 2: a grant's root is a MARCH_LIB_PATH directory or a parent of
    one (forge puts a dep's root and its subdirectories on the path). *)

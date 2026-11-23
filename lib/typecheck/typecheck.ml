@@ -11230,6 +11230,37 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
           (Err.sorted ctx);
         Hashtbl.replace kinds g.G.g_pkg (List.sort_uniq String.compare ks))
       grants;
+    (* ── Files on both sides of a granted root ([G.package_of_file] decides
+       membership by the spelled location and the real path; a symlink
+       under a root that leads out of it, or into it, is refused rather than
+       letting the package's code run ungranted). *)
+    List.iter (fun (c : G.conflict) ->
+        let describe = function
+          | Some (g : G.grant) -> Printf.sprintf "in package `%s`" g.G.g_pkg
+          | None -> "outside every granted package"
+        in
+        let g, msg =
+          match c.G.c_logical, c.G.c_resolved with
+          | Some g, other ->
+            ( g,
+              Printf.sprintf
+                "`%s` lies under the granted root of package `%s` but resolves to `%s`, %s."
+                c.G.c_file g.G.g_pkg c.G.c_real
+                (match other with None -> "outside it" | o -> describe o) )
+          | None, Some g ->
+            ( g,
+              Printf.sprintf
+                "`%s` resolves to `%s`, under the granted root of package `%s`, but is \
+                 loaded from outside it."
+                c.G.c_file c.G.c_real g.G.g_pkg )
+          | None, None -> assert false
+        in
+        report ~code:Err.Code.dep_grant_invalid ~span:(manifest_span g)
+          ~notes:[ "granted at " ^ at g;
+                   "hint: a granted package's files must lie under its library root, \
+                    not be symlinks to code elsewhere" ]
+          msg)
+      (G.conflicts ());
     (* ── Which keys are whose ── *)
     let pkg_of_key (k : string) : string option =
       let pre = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes k in

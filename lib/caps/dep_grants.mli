@@ -53,9 +53,29 @@ val active : unit -> grant list
 (** The installed grants; [[]] means no grants (every pass is the identity). *)
 
 val package_of_file : string -> grant option
-(** The grant whose library root is the longest prefix of [file]'s real
-    path ([None] under no root, and always [None] when no grants are
-    active, without touching the file system).  Memoised per file name. *)
+(** The granted package [file] belongs to: the grant with the longest
+    library root containing the file.  Decided twice, and the two must
+    agree: by the file's real path, and by the location the loader found it
+    at (each MARCH_LIB_PATH directory whose spelling contains the file's,
+    taken at its real path, plus the rest of the file's spelling).  When they
+    disagree (a file under a granted root that is a symlink to code outside
+    it, a symlinked subdirectory, or the reverse) the file is recorded in
+    {!conflicts} and the package of its spelled location is returned (else
+    the real path's), so the grant still applies.  [None] under no root, and
+    always [None] when no grants are active, without touching the file
+    system.  Memoised per file name. *)
+
+type conflict = {
+  c_file : string;  (** the file as the loader named it *)
+  c_real : string;  (** its real path *)
+  c_logical : grant option;  (** the package its spelled location is in *)
+  c_resolved : grant option;  (** the package its real path is in *)
+}
+
+val conflicts : unit -> conflict list
+(** Every file [package_of_file] found on both sides of a granted root so
+    far, by file name.  The type checker reports each as
+    [dep_grant_invalid]. *)
 
 val digest : unit -> string option
 (** A hex digest of the active grants, for cache keys; [None] when no grants
