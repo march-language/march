@@ -89,8 +89,10 @@ let test_baseline_roundtrip () =
   let dir = tmp_dir "audit-baseline" in
   let path = Filename.concat dir "forge.caps.lock" in
   let deps =
-    [ { Cmd_audit.dc_name = "alpha"; dc_caps = ["IO.FileRead"; "IO.Net"]; dc_installed = true };
-      { Cmd_audit.dc_name = "beta";  dc_caps = [];                        dc_installed = true } ]
+    [ { Cmd_audit.dc_name = "alpha"; dc_caps = ["IO.FileRead"; "IO.Net"]; dc_installed = true;
+      dc_grant = None; dc_nested_grants = [] };
+      { Cmd_audit.dc_name = "beta";  dc_caps = [];                        dc_installed = true;
+      dc_grant = None; dc_nested_grants = [] } ]
   in
   Cmd_audit.write_baseline path deps;
   let read = Cmd_audit.read_baseline path in
@@ -110,7 +112,8 @@ let test_baseline_missing_file_is_empty () =
 (* ------------------------------------------------------------------ *)
 
 let dep name caps =
-  { Cmd_audit.dc_name = name; dc_caps = caps; dc_installed = true }
+  { Cmd_audit.dc_name = name; dc_caps = caps; dc_installed = true;
+      dc_grant = None; dc_nested_grants = [] }
 
 let test_diff_detects_widening () =
   let changes =

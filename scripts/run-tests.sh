@@ -208,6 +208,10 @@ for r in "${RUNNERS[@]}"; do
   # fail with Unix.ENOENT on create_process, which reads like a broken server
   # rather than a missing build target.
   [[ "$r" == "test_jsonrpc" ]] && BUILD_TARGETS+=("lsp/bin/main.exe")
+  # run_dep_grants' "forge" group runs the real forge (`forge build` of a
+  # granted project); its dune stanza depends on it, building the exe alone
+  # does not.
+  [[ "$r" == "run_dep_grants" ]] && BUILD_TARGETS+=("forge/bin/main.exe")
 done
 if [[ -n "${MARCH_TEST_SKIP_BUILD:-}" ]]; then
   echo "(skipped: MARCH_TEST_SKIP_BUILD set)"

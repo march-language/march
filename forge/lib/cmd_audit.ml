@@ -158,6 +158,14 @@ type dep_caps = {
   dc_name : string;
   dc_caps : string list;
   dc_installed : bool;
+  dc_grant : string list option;
+  (** The project's own forge.toml grant for this dependency (ocap phase 6),
+      [None] for no grant.  The audit reports it beside the capabilities and
+      forge.caps.lock records it. *)
+  dc_nested_grants : (string * string list) list;
+  (** Grants written for this dependency in OTHER packages' forge.toml
+      (package, grant).  Only the root project's grants apply (plan Q1), so
+      these are reported as not applied. *)
 }
 
 (** What one audit run found. [deps] is every dependency whose set is known
@@ -274,7 +282,9 @@ let collect ?(inferred = false) ?only (proj : Project.project) : (collected, str
      type errors abort every dependency's analysis. *)
   let env_for dir =
     match Project.load_from_dir dir with
-    | Ok dp -> Cmd_build.lib_path_env dp
+    (* ~grants:false: the dependency's own forge.toml grants apply to
+       nothing (plan Q1), and nothing is written into its tree. *)
+    | Ok dp -> Cmd_build.lib_path_env ~grants:false dp
     | Error _ -> ""
   in
   (* The toolchain every dependency's `march caps` resolves to: the same
@@ -311,6 +321,8 @@ let collect ?(inferred = false) ?only (proj : Project.project) : (collected, str
        | Error e -> Error e)
   in
   let tbl : (string, dep_caps) Hashtbl.t = Hashtbl.create 32 in
+  (* child -> (granting package, grant), from dependencies' own forge.toml *)
+  let nested : (string, string * string list) Hashtbl.t = Hashtbl.create 8 in
   let failed : (string, string) Hashtbl.t = Hashtbl.create 8 in
   let seen : (string, unit) Hashtbl.t = Hashtbl.create 32 in
   let rec visit ~base ~name ~dep =
@@ -326,10 +338,19 @@ let collect ?(inferred = false) ?only (proj : Project.project) : (collected, str
       (if wanted name then
          match caps () with
          | Ok caps ->
-           Hashtbl.replace tbl name { dc_name = name; dc_caps = caps; dc_installed = installed }
+           Hashtbl.replace tbl name
+             { dc_name = name; dc_caps = caps; dc_installed = installed;
+               dc_grant = Option.map fst (Project.grant_of proj name);
+               dc_nested_grants = [] }
          | Error e -> Hashtbl.replace failed name e);
       match Project.load_from_dir dir with
-      | Ok p -> List.iter (fun (cn, cd) -> visit ~base:dir ~name:cn ~dep:cd) p.Project.deps
+      | Ok p ->
+        List.iter (fun (cn, (e : Project.dep_entry)) ->
+            match e.Project.grant with
+            | Some g when List.mem_assoc cn p.Project.deps -> Hashtbl.add nested cn (name, g)
+            | _ -> ())
+          p.Project.dep_entries;
+        List.iter (fun (cn, cd) -> visit ~base:dir ~name:cn ~dep:cd) p.Project.deps
       | Error _ -> ()
     end
   in
@@ -338,6 +359,8 @@ let collect ?(inferred = false) ?only (proj : Project.project) : (collected, str
   | () ->
     Ok { deps =
            Hashtbl.fold (fun _ v acc -> v :: acc) tbl []
+           |> List.map (fun d ->
+               { d with dc_nested_grants = List.sort compare (Hashtbl.find_all nested d.dc_name) })
            |> List.sort (fun a b -> compare a.dc_name b.dc_name);
          unanalyzable =
            Hashtbl.fold (fun n e acc -> (n, e) :: acc) failed []
@@ -383,6 +406,22 @@ let baseline_mode path : [ `Declared | `Inferred ] option =
 
 let baseline_inferred path = baseline_mode path = Some `Inferred
 
+(* A TOML basic string: grant entries hold quotes and commas, which
+   [read_baseline_grants] reads back with the TOML reader. *)
+let toml_string s =
+  let b = Buffer.create (String.length s + 2) in
+  Buffer.add_char b '"';
+  String.iter (function
+      | '"' -> Buffer.add_string b "\\\""
+      | '\\' -> Buffer.add_string b "\\\\"
+      | '\n' -> Buffer.add_string b "\\n"
+      | '\t' -> Buffer.add_string b "\\t"
+      | '\r' -> Buffer.add_string b "\\r"
+      | c -> Buffer.add_char b c)
+    s;
+  Buffer.add_char b '"';
+  Buffer.contents b
+
 let write_baseline ?(inferred = false) path (deps : dep_caps list) =
   let oc = open_out path in
   output_string oc
@@ -396,8 +435,17 @@ let write_baseline ?(inferred = false) path (deps : dep_caps list) =
       output_string oc "[[package]]\n";
       output_string oc (Printf.sprintf "name = %S\n" d.dc_name);
       output_string oc
-        (Printf.sprintf "caps = [%s]\n\n"
-           (String.concat ", " (List.map (fun c -> Printf.sprintf "%S" c) d.dc_caps))))
+        (Printf.sprintf "caps = [%s]\n"
+           (String.concat ", " (List.map (fun c -> Printf.sprintf "%S" c) d.dc_caps)));
+      (* The project's grant for it, when it has one: a widened or dropped
+         grant is new authority too.  No line for no grant, so a grant-free
+         baseline reads exactly as before. *)
+      (match d.dc_grant with
+       | None -> ()
+       | Some g ->
+         output_string oc
+           (Printf.sprintf "grant = [%s]\n" (String.concat ", " (List.map toml_string g))));
+      output_string oc "\n")
     deps;
   close_out oc
 
@@ -448,6 +496,22 @@ let read_baseline path : (string * string list) list =
     List.rev !entries
   end
 
+(** The recorded grant of each dependency that has one, from the
+    [grant = [...]] lines [write_baseline] emits (read with the TOML reader:
+    grant entries hold commas and quotes).  A baseline written before grants
+    has none. *)
+let read_baseline_grants path : (string * string list) list =
+  if not (Sys.file_exists path) then []
+  else
+    match Toml.parse_located (Project.read_file path) with
+    | Error _ -> []
+    | Ok doc ->
+      List.filter_map (fun pairs ->
+          match Toml.get_string pairs "name", List.assoc_opt "grant" pairs with
+          | Some n, Some (Toml.Array _) -> Some (n, Toml.get_string_list pairs "grant")
+          | _ -> None)
+        (Toml.get_all_sections doc "package")
+
 (* ------------------------------------------------------------------ *)
 (*  Diffing and reporting                                              *)
 (* ------------------------------------------------------------------ *)
@@ -457,17 +521,32 @@ type change =
   | Widened of string * string list    (** existing dependency, newly-requested caps *)
   | Narrowed of string * string list   (** existing dependency, caps it no longer asks for *)
   | Removed of string                  (** dependency is gone *)
+  | Grant_widened of string * string list
+  (** the project's grant to a dependency gained these entries *)
+  | Grant_narrowed of string * string list
+  (** the grant lost these entries *)
+  | Grant_removed of string
+  (** the dependency had a grant and now has none: no grant means no limit *)
+  | Grant_added of string * string list
+  (** a dependency recorded without a grant now has this one: a new limit *)
 
-(** Only [Added] and [Widened] represent new authority, and only those fail the
-    audit. A dependency that stops asking for a capability is reported for
+(** Only [Added], [Widened], [Grant_widened] and [Grant_removed] represent new
+    authority, and only those fail the audit. A dependency that stops asking
+    for a capability, or whose grant narrows or appears, is reported for
     completeness but is not a reason to block a build — narrowing is the
-    direction you want. *)
+    direction you want.
+
+    Grants are compared entry by entry, as written: an entry not in the
+    recorded grant is a widening even when it is in fact narrower than one
+    it replaced (`IO.Network` to `IO.NetConnect("a.test")`), which errs on
+    the side of review. *)
 let is_escalation = function
   | Added (_, caps) -> caps <> []
-  | Widened _ -> true
-  | Narrowed _ | Removed _ -> false
+  | Widened _ | Grant_widened _ | Grant_removed _ -> true
+  | Narrowed _ | Removed _ | Grant_narrowed _ | Grant_added _ -> false
 
-let diff ~(baseline : (string * string list) list) ~(current : dep_caps list) : change list =
+let diff_grants ~(baseline_grants : (string * string list) list)
+    ~(baseline : (string * string list) list) ~(current : dep_caps list) : change list =
   let changes = ref [] in
   List.iter
     (fun d ->
@@ -477,7 +556,16 @@ let diff ~(baseline : (string * string list) list) ~(current : dep_caps list) : 
         let gained = List.filter (fun c -> not (List.mem c old)) d.dc_caps in
         let lost = List.filter (fun c -> not (List.mem c d.dc_caps)) old in
         if gained <> [] then changes := Widened (d.dc_name, gained) :: !changes;
-        if lost <> [] then changes := Narrowed (d.dc_name, lost) :: !changes)
+        if lost <> [] then changes := Narrowed (d.dc_name, lost) :: !changes;
+        (match List.assoc_opt d.dc_name baseline_grants, d.dc_grant with
+         | None, None -> ()
+         | Some _, None -> changes := Grant_removed d.dc_name :: !changes
+         | None, Some g -> changes := Grant_added (d.dc_name, g) :: !changes
+         | Some og, Some g ->
+           let gained = List.filter (fun e -> not (List.mem e og)) g in
+           let lost = List.filter (fun e -> not (List.mem e g)) og in
+           if gained <> [] then changes := Grant_widened (d.dc_name, gained) :: !changes;
+           if lost <> [] then changes := Grant_narrowed (d.dc_name, lost) :: !changes))
     current;
   List.iter
     (fun (name, _) ->
@@ -485,6 +573,11 @@ let diff ~(baseline : (string * string list) list) ~(current : dep_caps list) : 
         changes := Removed name :: !changes)
     baseline;
   List.rev !changes
+
+(** [diff_grants] against a baseline that records no grants. *)
+let diff ~baseline ~current = diff_grants ~baseline_grants:[] ~baseline ~current
+
+let grant_text g = if g = [] then "()" else String.concat ", " g
 
 let string_of_change = function
   | Added (n, []) -> Printf.sprintf "  + %s — new dependency, declares no capabilities" n
@@ -495,6 +588,14 @@ let string_of_change = function
   | Narrowed (n, caps) ->
     Printf.sprintf "  - %s — no longer needs: %s" n (String.concat ", " caps)
   | Removed n -> Printf.sprintf "  - %s — dependency removed" n
+  | Grant_widened (n, es) ->
+    Printf.sprintf "  ! %s — its grant now ALSO allows: %s" n (String.concat ", " es)
+  | Grant_narrowed (n, es) ->
+    Printf.sprintf "  - %s — its grant no longer allows: %s" n (String.concat ", " es)
+  | Grant_removed n ->
+    Printf.sprintf "  ! %s — its grant was REMOVED (no grant: limited only by its own needs)" n
+  | Grant_added (n, g) ->
+    Printf.sprintf "  - %s — now granted: %s" n (grant_text g)
 
 (* ------------------------------------------------------------------ *)
 (*  Entry points                                                       *)
@@ -537,16 +638,31 @@ let unanalyzable_hint =
   "Fix them (`march check` over the dependency reproduces the error), or pass \
    --allow-unanalyzable to gate on the analyzable subset while these stay listed."
 
+(** One dependency's report line: its capabilities, then its grant from
+    the project's forge.toml ("no grant" when it has none, so an ungranted
+    dependency is visible in review), then any grant another package's
+    forge.toml writes for it, marked not applied (plan Q1). *)
+let describe_dep (d : dep_caps) : string =
+  let caps =
+    if not d.dc_installed then "not installed (run `forge deps`)"
+    else if d.dc_caps = [] then "no capabilities"
+    else String.concat ", " d.dc_caps
+  in
+  let grant = match d.dc_grant with
+    | None -> "no grant"
+    | Some g -> "grant: " ^ grant_text g
+  in
+  let nested =
+    List.map (fun (pkg, g) ->
+        Printf.sprintf "; grant from %s's forge.toml not applied (%s)" pkg (grant_text g))
+      d.dc_nested_grants
+  in
+  Printf.sprintf "  %s — %s — %s%s" d.dc_name caps grant (String.concat "" nested)
+
 let print_sets ~inferred (c : collected) =
   if c.deps = [] && c.unanalyzable = [] then print_endline "no dependencies"
   else
-    List.iter
-      (fun d ->
-        if not d.dc_installed then
-          Printf.printf "  %s — not installed (run `forge deps`)\n" d.dc_name
-        else if d.dc_caps = [] then Printf.printf "  %s — no capabilities\n" d.dc_name
-        else Printf.printf "  %s — %s\n" d.dc_name (String.concat ", " d.dc_caps))
-      c.deps;
+    List.iter (fun d -> print_endline (describe_dep d)) c.deps;
   print_endline "";
   print_endline (scope_note ~inferred)
 
@@ -600,7 +716,10 @@ let record ?(inferred = false) ?(allow_unanalyzable = false) (proj : Project.pro
       List.filter_map
         (fun (name, _) ->
           match List.assoc_opt name previous with
-          | Some caps -> Some { dc_name = name; dc_caps = caps; dc_installed = true }
+          | Some caps ->
+            Some { dc_name = name; dc_caps = caps; dc_installed = true;
+                   dc_grant = Option.map fst (Project.grant_of proj name);
+                   dc_nested_grants = [] }
           | None -> None)
         c.unanalyzable
     in
@@ -673,7 +792,7 @@ let check_proj ?(inferred = false) ?(allow_unanalyzable = false) (proj : Project
     let baseline =
       List.filter (fun (n, _) -> not (List.mem n un_names)) (read_baseline path)
     in
-    let changes = diff ~baseline ~current in
+    let changes = diff_grants ~baseline_grants:(read_baseline_grants path) ~baseline ~current in
     let escalations = List.filter is_escalation changes in
     let escalation_code =
       if changes = [] then begin
@@ -748,10 +867,13 @@ let touched_entries ~(before : Resolver_lockfile.entry list)
 (** Merge [updates] into the baseline at [path], keeping every other entry and
     the recorded mode. *)
 let update_baseline ~inferred path (updates : dep_caps list) =
+  let grants = read_baseline_grants path in
   let kept =
     read_baseline path
     |> List.filter (fun (n, _) -> not (List.exists (fun d -> d.dc_name = n) updates))
-    |> List.map (fun (n, caps) -> { dc_name = n; dc_caps = caps; dc_installed = true })
+    |> List.map (fun (n, caps) ->
+        { dc_name = n; dc_caps = caps; dc_installed = true;
+          dc_grant = List.assoc_opt n grants; dc_nested_grants = [] })
   in
   write_baseline ~inferred path
     (List.sort (fun a b -> compare a.dc_name b.dc_name) (kept @ updates))
@@ -805,8 +927,10 @@ let gate_dependency_change ?(for_deps = false) ~(accept : bool)
         let baseline =
           List.filter (fun (n, _) -> List.mem n touched) (read_baseline path)
         in
+        let baseline_grants =
+          List.filter (fun (n, _) -> List.mem n touched) (read_baseline_grants path) in
         let changes =
-          diff ~baseline ~current:c.deps
+          diff_grants ~baseline_grants ~baseline ~current:c.deps
           |> List.filter (function Removed _ -> false | _ -> true)
         in
         let escalations = List.filter is_escalation changes in
@@ -843,8 +967,9 @@ let gate_dependency_change ?(for_deps = false) ~(accept : bool)
                  (String.concat ", "
                     (List.map
                        (function
-                         | Added (n, _) | Widened (n, _) -> n
-                         | Narrowed (n, _) | Removed n -> n)
+                         | Added (n, _) | Widened (n, _) | Grant_widened (n, _)
+                         | Grant_added (n, _) | Grant_narrowed (n, _) -> n
+                         | Narrowed (n, _) | Removed n | Grant_removed n -> n)
                        escalations
                      @ List.map fst c.unanalyzable)))
         end
@@ -918,7 +1043,7 @@ let caps_of_tree ~inferred dir : (string list, string) result =
   else
     let env_prefix =
       match Project.load_from_dir dir with
-      | Ok dp -> Cmd_build.lib_path_env dp
+      | Ok dp -> Cmd_build.lib_path_env ~grants:false dp
       | Error _ -> ""
     in
     inferred_caps_of_dir ~env_prefix dir
@@ -1007,10 +1132,12 @@ let run_laws ~strength () : (int, string) result =
   match Project.load () with
   | Error e -> Error e
   | Ok proj -> (
-    let _, _, lib_paths, toolchain_pfx = Cmd_test.project_env proj in
+    (* [env_pfx]: the toolchain's PATH entry and the project's grants
+       (MARCH_DEP_GRANTS), as forge test runs under them. *)
+    let _, _, lib_paths, env_pfx = Cmd_test.project_env proj in
     let src = Filename.concat proj.Project.root "src" in
     let paths = lib_paths @ (if Sys.file_exists src then [ src ] else []) in
-    let lib_path_env = Printf.sprintf "%sMARCH_LIB_PATH=%s " toolchain_pfx (String.concat ":" paths) in
+    let lib_path_env = Printf.sprintf "%sMARCH_LIB_PATH=%s " env_pfx (String.concat ":" paths) in
     let root = proj.Project.root ^ Filename.dir_sep in
     let display f =
       if String.starts_with ~prefix:root f then String.sub f (String.length root) (String.length f - String.length root) else f

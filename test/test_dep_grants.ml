@@ -985,6 +985,157 @@ let test_proof_bit_read () =
           "grant-frame Mixed.shout pkg=mixed proven=false wrapped=true";
           "grant-frame Mixed.first_of pkg=mixed proven=false wrapped=true" ])
 
+(* ── Task 7: caches and forge ─────────────────────────────────────────── *)
+
+(* [march query key] in [d] (same private HOME and MARCH_LIB_PATH as
+   [check_in]); [grants] is the MARCH_DEP_GRANTS value, if any.  Returns the
+   source-level key and the flags line. *)
+let query_key ?grants ~libs d file : string * string =
+  let out = Filename.concat d "key.out" in
+  let cmd =
+    Printf.sprintf "cd %s && HOME=%s MARCH_LIB_PATH=%s %s %s query key %s > %s 2>&1"
+      (Filename.quote d) (Filename.quote (Lazy.force private_home))
+      (Filename.quote (String.concat ":" libs))
+      (match grants with Some g -> "MARCH_DEP_GRANTS=" ^ Filename.quote g | None -> "")
+      (Filename.quote (main_exe ())) (Filename.quote file) (Filename.quote out) in
+  let code = Sys.command cmd in
+  let ic = open_in_bin out in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  if code <> 0 then Alcotest.failf "march query key failed (exit %d):\n%s" code s;
+  let field name =
+    match
+      List.find_opt (fun l -> has_sub l name) (String.split_on_char '\n' s)
+    with
+    | Some l -> String.trim l
+    | None -> Alcotest.failf "no %S line in:\n%s" name s
+  in
+  let key =
+    match String.split_on_char ' ' (field "source-level key") |> List.filter (( <> ) "") with
+    | _ :: _ :: k :: _ -> k
+    | _ -> Alcotest.failf "unexpected key line in:\n%s" s
+  in
+  (key, field "flags")
+
+(* Decision 12 for --compile (Task 3 tested --check): the grants' digest
+   is a flag tag of the compile key, one byte of the grants file changes it,
+   and with no grants (no file, or a file holding only comments) there is
+   no tag and the key is the grant-free one. *)
+let test_compile_key_tracks_grants () =
+  with_reset (fun () ->
+      let s = dep "shout" in
+      let d = project () in
+      let k0, f0 = query_key ~libs:[ s ] d (app "kind") in
+      if has_sub f0 "grants:" then Alcotest.failf "a grant-free key has a grants tag: %s" f0;
+      let comments = Filename.concat d "comments-only" in
+      write comments "# no grants\n";
+      let kc, fc = query_key ~grants:comments ~libs:[ s ] d (app "kind") in
+      Alcotest.(check string) "a file with no entries: the grant-free key" k0 kc;
+      Alcotest.(check string) "and the same flags" f0 fc;
+      let g = grants_file d [ Printf.sprintf "shout\t%s\tforge.toml:2\tIO.Console" s ] in
+      let k1, f1 = query_key ~grants:g ~libs:[ s ] d (app "kind") in
+      if not (has_sub f1 "grants:") then Alcotest.failf "no grants tag: %s" f1;
+      if k1 = k0 then Alcotest.fail "grants did not change the compile key";
+      ignore (grants_file d [ Printf.sprintf "shout\t%s\tforge.toml:3\tIO.Console" s ]);
+      let k2, _ = query_key ~grants:g ~libs:[ s ] d (app "kind") in
+      if k2 = k1 then Alcotest.fail "a one-byte grants-file edit did not change the compile key")
+
+(* The real forge, hermetic: the just-built march as the bare `march` on
+   PATH, an empty MARCH_HOME, the private HOME, and the staged stdlib and
+   runtime (a PATH-symlinked march cannot find them exe-relative). *)
+let forge_exe () =
+  Filename.concat (Filename.dirname (main_exe ())) "../forge/bin/main.exe"
+
+let hermetic_bin =
+  lazy begin
+    let d = tmpdir () in
+    let real p = if Filename.is_relative p then Filename.concat (Sys.getcwd ()) p else p in
+    Unix.symlink (real (main_exe ())) (Filename.concat d "march");
+    d
+  end
+
+let forge_in d args : int * string =
+  let out = Filename.concat d "forge.out" in
+  let staged sub =
+    realpath (Filename.concat (Filename.dirname (main_exe ())) ("../" ^ sub)) in
+  let cmd =
+    Printf.sprintf
+      "cd %s && PATH=%s:\"$PATH\" MARCH_HOME=%s HOME=%s MARCH_STDLIB=%s MARCH_RUNTIME_DIR=%s %s %s > %s 2>&1"
+      (Filename.quote d) (Filename.quote (Lazy.force hermetic_bin)) (Filename.quote (tmpdir ()))
+      (Filename.quote (Lazy.force private_home)) (Filename.quote (staged "stdlib"))
+      (Filename.quote (staged "runtime")) (Filename.quote (forge_exe ())) args (Filename.quote out) in
+  let code = Sys.command cmd in
+  let ic = open_in_bin out in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  (code, s)
+
+(* A fresh, writable copy of test/dep_grants/forge_e2e (dune stages source
+   trees read-only). *)
+let forge_project () =
+  let d = Filename.concat (tmpdir ()) "forge_e2e" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "cp -R %s %s && chmod -R u+w %s"
+         (Filename.quote (Filename.concat (fixtures ()) "forge_e2e")) (Filename.quote d)
+         (Filename.quote d)) in
+  if rc <> 0 then Alcotest.fail "could not copy the forge_e2e fixture";
+  d
+
+(* `forge build` of a two-package project whose forge.toml grants the dep
+   reads under /srv/data: forge writes .forge/dep-grants and points the
+   compiler at it, and the built program's read of /etc/hosts is refused
+   by the grant at run time. *)
+let test_forge_build_and_run () =
+  with_reset (fun () ->
+      let d = forge_project () in
+      let code, out = forge_in d "build" in
+      if code <> 0 then Alcotest.failf "forge build failed (exit %d):\n%s" code out;
+      let grants = Filename.concat d ".forge/dep-grants" in
+      if not (Sys.file_exists grants) then Alcotest.fail "forge build wrote no .forge/dep-grants";
+      let ic = open_in_bin grants in
+      let text = really_input_string ic (in_channel_length ic) in
+      close_in ic;
+      let want_line =
+        Printf.sprintf "reader\t%s\t%s:11\tIO.FileRead(\"/srv/data\")"
+          (realpath (Filename.concat d "deps/reader/lib")) (Filename.concat d "forge.toml") in
+      if not (has_sub text want_line) then
+        Alcotest.failf "the grants file lacks %S:\n%s" want_line text;
+      let out_file = Filename.concat d "run.out" in
+      ignore
+        (Sys.command
+           (Printf.sprintf "cd %s && ./.march/build/debug/forge_e2e > %s 2>&1; echo \"exit $?\" >> %s"
+              (Filename.quote d) (Filename.quote out_file) (Filename.quote out_file)));
+      let ic = open_in_bin out_file in
+      let ran = really_input_string ic (in_channel_length ic) in
+      close_in ic;
+      Alcotest.(check string) "the built program"
+        "allowed /srv/data/x\n\
+         IO.FileRead(\"/etc/hosts\") refused by the grant to package reader \
+         (IO.FileRead(\"/srv/data\"))\nexit 0\n"
+        ran)
+
+(* A malformed grant in forge.toml (a relative path scope) is reported by
+   `forge check` and `forge build` as `dep_grant_invalid` at its forge.toml
+   line. *)
+let test_forge_bad_grant_at_manifest_line () =
+  with_reset (fun () ->
+      let d = forge_project () in
+      let toml = Filename.concat d "forge.toml" in
+      let ic = open_in_bin toml in
+      let text = really_input_string ic (in_channel_length ic) in
+      close_in ic;
+      write toml
+        (Str.global_replace (Str.regexp_string "/srv/data") "srv/data" text);
+      List.iter (fun cmd ->
+          let code, out = forge_in d cmd in
+          if code = 0 then Alcotest.failf "forge %s passed a malformed grant:\n%s" cmd out;
+          List.iter (fun m ->
+              if not (has_sub out m) then
+                Alcotest.failf "forge %s: the output does not mention %S:\n%s" cmd m out)
+            [ "[dep_grant_invalid]"; "forge.toml:11" ])
+        [ "check"; "build" ])
+
 let tests =
   [ ( "dep_grants",
       [ Alcotest.test_case "load_none" `Quick test_load_none;
@@ -1045,4 +1196,11 @@ let tests =
         Alcotest.test_case "an interface default body runs under the grant at load" `Quick
           test_eager_default_under_grant;
         Alcotest.test_case "an app actor named like a dep actor keeps the app's authority"
-          `Quick test_actor_name_clash ] ) ]
+          `Quick test_actor_name_clash ] );
+    ( "forge",
+      [ Alcotest.test_case "the compile key tracks the grants" `Quick
+          test_compile_key_tracks_grants;
+        Alcotest.test_case "forge build writes the grants and the program is refused" `Quick
+          test_forge_build_and_run;
+        Alcotest.test_case "a malformed grant is reported at its forge.toml line" `Quick
+          test_forge_bad_grant_at_manifest_line ] ) ]

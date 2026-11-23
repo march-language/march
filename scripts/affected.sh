@@ -173,7 +173,9 @@ classify() {
     lib/format/*|lib/lint/*|lib/refactor/*)
       add SUITES compiler lsp; reason "$f" "compiler, lsp" ;;
     lib/forge/*|forge/*)
-      add DUNE @forge/test/runtest; add SUITES compiler; reason "$f" "forge tests, compiler" ;;
+      # dep_grants: its "forge" group runs `forge build` on a granted project.
+      add DUNE @forge/test/runtest; add SUITES compiler dep_grants
+      reason "$f" "forge tests, compiler, dep_grants" ;;
     lsp/*)
       add SUITES $ALL_LSP; reason "$f" "lsp suites" ;;
     bin/*)

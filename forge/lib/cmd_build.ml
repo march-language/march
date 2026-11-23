@@ -279,9 +279,137 @@ let lib_paths ?(release=false) proj =
   @ (if Sys.file_exists gen_dir then [gen_dir] else [])
   @ (if Sys.file_exists config_dir then [config_dir] else [])
 
+(* ── Dependency grants (ocap phase 6, plan decisions 3 and 13) ──────────
+
+   A dep's [grant = [...]] in the project's own forge.toml reaches the
+   compiler as a file, [<project>/.forge/dep-grants], named by
+   MARCH_DEP_GRANTS: one line per granted package,
+   [<package>\t<lib root>\t<manifest>:<line>\t<scope text>] (format and
+   loader: lib/caps/dep_grants.ml).  Only the root project's grants are
+   written (plan Q1); a grant in a dependency's own forge.toml is shown by
+   `forge audit` as not applied.  With no grant the file is not written (an
+   old one is removed) and the variable is not set, so a grant-free build's
+   prefix and cache keys are exactly what they were before grants. *)
+
+let dep_grants_file proj =
+  Filename.concat proj.Project.root (Filename.concat ".forge" "dep-grants")
+
+(* The root directory a dep puts on MARCH_LIB_PATH: the first entry
+   [dep_to_lib_paths] gives it ([collect_lib_dirs] lists the root itself
+   first among its sorted subdirectories). *)
+let dep_lib_root ?coords ~root (dep_name, dep) =
+  match dep with
+  | Project.PathDep rel_path ->
+    let abs_path =
+      if Filename.is_relative rel_path then Filename.concat root rel_path else rel_path in
+    let d = Filename.concat abs_path "lib" in
+    if Sys.file_exists d then Some d
+    else if Sys.file_exists abs_path then Some abs_path
+    else None
+  | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _
+  | Project.RegistryDep _ ->
+    Project.git_dep_lib_path ?coords dep_name
+
+let abs_path p = if Filename.is_relative p then Filename.concat (Sys.getcwd ()) p else p
+
+let real p = try Unix.realpath p with Unix.Unix_error _ -> p
+
+(* [dir] is [root] or under it. *)
+let within ~root dir =
+  dir = root || String.starts_with ~prefix:(root ^ "/") dir
+
+(** The grants file's text for the deps of [scope] that the project grants
+    and whose library root is on [lib_paths] (or contains a directory on
+    it: a dep forge does not put on the path is governed by nothing the
+    build loads, and the compiler would reject its line), or [None] when
+    there is none.  Roots are real paths, as the compiler stores them; the
+    manifest is the project's forge.toml as an absolute path. *)
+let dep_grants_text ~scope ~lib_paths proj : string option =
+  let coords = Project.dep_coords ~project_root:proj.Project.root in
+  let root = abs_path proj.Project.root in
+  let manifest = Filename.concat (real root) "forge.toml" in
+  let on_path = List.map (fun d -> real (abs_path d)) lib_paths in
+  let seen = Hashtbl.create 8 in
+  let lines =
+    List.filter_map (fun (name, dep) ->
+        if Hashtbl.mem seen name then None
+        else begin
+          Hashtbl.replace seen name ();
+          match Project.grant_of proj name with
+          | None -> None
+          | Some (grant, line) ->
+            match dep_lib_root ~coords ~root (name, dep) with
+            | None -> None
+            | Some lib_root ->
+              let lib_root = real (abs_path lib_root) in
+              if not (List.exists (fun d -> within ~root:lib_root d) on_path) then None
+              else
+                let text = if grant = [] then "()" else String.concat ", " grant in
+                Some (Printf.sprintf "%s\t%s\t%s:%d\t%s" name lib_root manifest line text)
+        end)
+      scope
+  in
+  if lines = [] then None
+  else
+    Some
+      (String.concat "\n"
+         (("# Dependency grants, written by forge from " ^ manifest ^ ". Do not edit.") :: lines)
+       ^ "\n")
+
+(** Write (or remove) the project's grants file for [scope] and [lib_paths],
+    and return the shell assignment that points the compiler at it,
+    [MARCH_DEP_GRANTS='<abs path>' ], or [""] when no dep is granted.  The
+    file is rewritten only when its text changes. *)
+let dep_grants_env ~scope ~lib_paths proj : string =
+  let file = abs_path (dep_grants_file proj) in
+  match dep_grants_text ~scope ~lib_paths proj with
+  | None ->
+    if Sys.file_exists file then (try Sys.remove file with Sys_error _ -> ());
+    ""
+  | Some text ->
+    let current = try Some (Project.read_file file) with Sys_error _ -> None in
+    if current <> Some text then begin
+      Project.mkdir_p (Filename.dirname file);
+      let tmp = file ^ ".tmp" in
+      let oc = open_out_bin tmp in
+      output_string oc text;
+      close_out oc;
+      Sys.rename tmp file
+    end;
+    Printf.sprintf "MARCH_DEP_GRANTS=%s " (Filename.quote file)
+
+(** The grants file a prefix built by {!dep_grants_env} names, if any:
+    the inverse of its [Filename.quote].  [check_all_cache_key] hashes that
+    file's contents, so the key covers exactly what the compiler reads. *)
+let dep_grants_file_of_env (env : string) : string option =
+  let tag = "MARCH_DEP_GRANTS='" in
+  let n = String.length env and tl = String.length tag in
+  let rec find i =
+    if i + tl > n then None
+    else if String.sub env i tl = tag then Some (i + tl)
+    else find (i + 1)
+  in
+  match find 0 with
+  | None -> None
+  | Some start ->
+    (* Filename.quote: '...' with each ' written as '\'' *)
+    let b = Buffer.create 64 in
+    let rec go i =
+      if i >= n then None
+      else if env.[i] = '\'' then
+        if i + 3 < n && String.sub env i 4 = "'\\''" then (Buffer.add_char b '\''; go (i + 4))
+        else Some (Buffer.contents b)
+      else (Buffer.add_char b env.[i]; go (i + 1))
+    in
+    go start
+
 (** [lib_paths] as the shell prefix every [march] invocation runs under:
-    [MARCH_LIB_PATH=...], behind the resolved toolchain's PATH entry. *)
-let lib_path_env ?(release=false) proj =
+    [MARCH_LIB_PATH=...], behind the resolved toolchain's PATH entry, and
+    [MARCH_DEP_GRANTS] when the project grants a dep in scope.  [~grants:false]
+    leaves grants out: `forge audit` analyzes each dependency in its own
+    scope, where its own forge.toml's grants do not apply (plan Q1) and
+    must not be written into its tree. *)
+let lib_path_env ?(release=false) ?(grants=true) proj =
   let all_lib_paths = lib_paths ~release proj in
   (* Put the resolved toolchain (project .march-version pin, else global) first
      on PATH so the bare `march` in the commands below uses the pinned version.
@@ -294,7 +422,11 @@ let lib_path_env ?(release=false) proj =
     | Some n -> Printf.sprintf "MARCH_REFINE_RLIMIT=%d " n
     | None -> ""
   in
-  Printf.sprintf "%s%sMARCH_LIB_PATH=%s " toolchain_pfx rlimit quoted
+  let grants_env =
+    if grants then dep_grants_env ~scope:(build_scope ~release proj) ~lib_paths:all_lib_paths proj
+    else ""
+  in
+  Printf.sprintf "%s%s%sMARCH_LIB_PATH=%s " toolchain_pfx rlimit grants_env quoted
 
 (** Online half of [deps_preflight]: re-hash every cached git/registry tree
     this command will use against forge.lock and, on a mismatch, re-fetch the
@@ -590,7 +722,11 @@ let compiler_identity ~toolchain_prefix =
     MARCH_LIB_PATH, only the env-var string itself.  Editing a local
     `path = "../foo"` dependency's source in place, without touching
     forge.toml/forge.lock (and thus without changing MARCH_LIB_PATH), will
-    not invalidate this cache.  Delete `.forge/check-cache/` if that bites. *)
+    not invalidate this cache.  Delete `.forge/check-cache/` if that bites.
+
+    The dependency-grants file the prefix names (MARCH_DEP_GRANTS) is hashed
+    by contents: a narrowed grant must re-check.  A prefix with no grants
+    adds nothing, so a grant-free key is unchanged. *)
 let check_all_cache_key ~lib_path_env ~compiler_id files =
   let buf = Buffer.create 4096 in
   (* The compiler too: a new compiler can add checks (ocap phase 3 ran the
@@ -609,6 +745,11 @@ let check_all_cache_key ~lib_path_env ~compiler_id files =
        with Sys_error _ -> ())
     ) (List.sort String.compare files);
   Buffer.add_string buf lib_path_env;
+  (match dep_grants_file_of_env lib_path_env with
+   | None -> ()
+   | Some f ->
+     Buffer.add_string buf "\x00grants:";
+     Buffer.add_string buf (try Project.read_file f with Sys_error _ -> "<unreadable>"));
   Digest.to_hex (Digest.string (Buffer.contents buf))
 
 (** Typecheck every file in [files] together in a single [march check]

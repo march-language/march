@@ -150,6 +150,12 @@ type = "notebook"
   end;
   toml_path
 
+(** The notebook project's forge.toml, if it has one. *)
+let notebook_project nb_path =
+  let dir = Filename.dirname nb_path in
+  if not (Sys.file_exists (Filename.concat dir "forge.toml")) then None
+  else Result.to_option (Project.load_from_dir dir)
+
 (** Resolve deps from a notebook's forge.toml and return lib paths. *)
 let notebook_dep_lib_paths nb_path =
   let dir = Filename.dirname nb_path in
@@ -207,9 +213,18 @@ let run_serve ~input ~port ~no_open () =
   let march = find_march () in
   let display_title = if is_temp then "Untitled Notebook" else Filename.basename input_path in
   let all_lib_paths = lib_paths @ nb_dep_paths in
+  (* The notebook project's dependency grants (ocap phase 6), for its deps
+     on this path.  The scroll task's own lib paths carry no grants. *)
+  let grants_env =
+    if is_temp then ""
+    else match notebook_project input_path with
+      | Some proj ->
+        Cmd_build.dep_grants_env ~scope:proj.Project.deps ~lib_paths:nb_dep_paths proj
+      | None -> ""
+  in
   let lib_path_env = match all_lib_paths with
-    | [] -> ""
-    | ps -> Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote (String.concat ":" ps))
+    | [] -> grants_env
+    | ps -> Printf.sprintf "%sMARCH_LIB_PATH=%s " grants_env (Filename.quote (String.concat ":" ps))
   in
   let nb_env =
     Printf.sprintf "FORGE_NB_INPUT=%s FORGE_NB_PORT=%d FORGE_NB_MARCH=%s FORGE_NB_TITLE=%s"

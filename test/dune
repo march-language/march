@@ -103,11 +103,13 @@
  (name run_dep_grants)
  (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))   ; see "CI sharding" above
  (modules run_dep_grants test_dep_grants)
- (libraries march_caps march_ast march_parser march_desugar march_resolver march_errors alcotest unix)
+ (libraries march_caps march_ast march_parser march_desugar march_resolver march_errors alcotest unix str)
  ; the stdlib, for the conflict cases that name a stdlib module; the
  ; compiler and the fixtures, for the end-to-end `march --check` cases
  ; the runtime, for the cases that compile and run a program (Task 4)
- (deps ../bin/main.exe (source_tree ../stdlib) (source_tree ../runtime) (source_tree dep_grants))
+ ; forge, for the end-to-end `forge build` cases (Task 7)
+ (deps ../bin/main.exe ../forge/bin/main.exe (source_tree ../stdlib) (source_tree ../runtime)
+       (source_tree dep_grants))
  (action (run %{test} -e)))
 
 (test

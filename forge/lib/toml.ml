@@ -1,6 +1,9 @@
 (** Minimal TOML parser for forge.toml.
-    Supports: quoted strings, booleans, bare values, inline tables, arrays
-    (which may span lines), sections, [[array-of-tables]], comments.
+    Supports: quoted strings (["..."] with escapes, and single-quoted
+    ['...'] literal strings with none, so a dependency grant such as
+    ['IO.FileRead("/srv/data")'] needs no escaping), booleans, bare values,
+    inline tables, arrays (which may span lines, and whose strings may hold
+    [,], []] and [#]), sections, [[array-of-tables]], comments.
 
     Every line is either parsed or rejected: a malformed line raises
     [Parse_error] naming its line number, rather than being dropped. The
@@ -71,6 +74,15 @@ let parse_quoted_string s i =
   if !pos >= n then fail "unterminated string";
   (Buffer.contents buf, !pos + 1)
 
+(* A TOML literal string: ['...'], no escapes, ends at the next ['].
+   Returns the contents and the index after the closing quote. *)
+let parse_literal_string s i =
+  let n = String.length s in
+  if i >= n || s.[i] <> '\'' then fail "expected \"'\"";
+  match String.index_from_opt s (i + 1) '\'' with
+  | None -> fail "unterminated literal string"
+  | Some j -> (String.sub s (i + 1) (j - i - 1), j + 1)
+
 let parse_bare_key s i =
   let n = String.length s in
   let start = i in
@@ -90,6 +102,7 @@ let parse_key s i =
   let n = String.length s in
   if i >= n then fail "expected key, got end of input";
   if s.[i] = '"' then parse_quoted_string s i
+  else if s.[i] = '\'' then parse_literal_string s i
   else parse_bare_key s i
 
 let rec parse_value s i =
@@ -99,6 +112,9 @@ let rec parse_value s i =
   match s.[i] with
   | '"' ->
     let (v, i') = parse_quoted_string s i in
+    (Str v, i')
+  | '\'' ->
+    let (v, i') = parse_literal_string s i in
     (Str v, i')
   | '{' ->
     let (tbl, i') = parse_inline_table s (i + 1) in
@@ -168,18 +184,30 @@ and parse_inline_table s i =
     (List.rev !pairs, !i)
   end
 
-(* Position of a [#] comment start outside a quoted string, if any. *)
+(* Where a string is while scanning a line: outside, in a basic ["..."]
+   string (backslash escapes), or in a literal ['...'] string (none). *)
+type scan = Out | Basic | Literal
+
+(* One step of the string-state scan at [s.[i]]: the new state and how many
+   characters it consumed. *)
+let scan_step st s i =
+  match st, s.[i] with
+  | Basic, '\\' -> (Basic, 2)
+  | Basic, '"' -> (Out, 1)
+  | Literal, '\'' -> (Out, 1)
+  | Out, '"' -> (Basic, 1)
+  | Out, '\'' -> (Literal, 1)
+  | st, _ -> (st, 1)
+
+(* Position of a [#] comment start outside a string, if any. *)
 let comment_start s =
   let n = String.length s in
-  let rec go i in_str =
+  let rec go i st =
     if i >= n then None
-    else match s.[i] with
-      | '\\' when in_str -> go (i + 2) true
-      | '"' -> go (i + 1) (not in_str)
-      | '#' when not in_str -> Some i
-      | _ -> go (i + 1) in_str
+    else if st = Out && s.[i] = '#' then Some i
+    else let (st', k) = scan_step st s i in go (i + k) st'
   in
-  go 0 false
+  go 0 Out
 
 let strip_comment s =
   match comment_start s with
@@ -190,15 +218,15 @@ let strip_comment s =
    string? Used to join an array that spans lines. *)
 let opens_unclosed s =
   let n = String.length s in
-  let depth = ref 0 and in_str = ref false and i = ref 0 in
+  let depth = ref 0 and st = ref Out and i = ref 0 in
   while !i < n do
-    (match s.[!i] with
-     | '\\' when !in_str -> incr i
-     | '"' -> in_str := not !in_str
-     | ('[' | '{') when not !in_str -> incr depth
-     | (']' | '}') when not !in_str -> decr depth
+    (match !st, s.[!i] with
+     | Out, ('[' | '{') -> incr depth
+     | Out, (']' | '}') -> decr depth
      | _ -> ());
-    incr i
+    let (st', k) = scan_step !st s !i in
+    st := st';
+    i := !i + k
   done;
   !depth > 0
 
@@ -260,6 +288,9 @@ let parse_located text : (document, int * string) result =
            let key =
              if String.length key >= 2 && key.[0] = '"' then
                (try fst (parse_quoted_string key 0)
+                with Parse_error m -> err lineno m)
+             else if String.length key >= 2 && key.[0] = '\'' then
+               (try fst (parse_literal_string key 0)
                 with Parse_error m -> err lineno m)
              else key
            in

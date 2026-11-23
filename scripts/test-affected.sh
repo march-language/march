@@ -89,6 +89,8 @@ expect suites "dep_grants" -- lib/parser/parse.ml
 expect suites "dep_grants" -- bin/main.ml
 expect suites "dep_grants" -- lib/typecheck/scoped_literal_check.ml
 expect suites "dep_grants" -- test/dep_grants/apps/kind/main.march
+expect suites "dep_grants" -- forge/lib/cmd_build.ml
+expect suites "dep_grants" -- test/dep_grants/forge_e2e/forge.toml
 
 # The FULL fallback: no rule, shared helpers, test wiring, the language corpus.
 expect suites "ALL" -- lib/some_new_library/x.ml
