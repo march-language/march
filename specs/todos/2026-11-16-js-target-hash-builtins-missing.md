@@ -27,12 +27,18 @@ test that pins `hash` output.
 
 ## Decision (2026-11-23, owner)
 
-**Not settled.** The owner chose BigInt on JS so `hash` returns the same values as the C runtime
-and the interpreter. That does not work as stated: the JS target stores an Int in a JS double,
-exact only within ±(2^53 − 1), and an Int result outside that range throws (`__int_result` in
-`runtime/march_runtime.mjs`; `specs/lang/type-system.md`, the JS Int section). A 62-bit hash
-computed in BigInt would throw for almost every input when returned as an Int. The choices left:
+Option 2 below, decided by the owner on 2026-11-23 after BigInt alone turned out not to fit:
+compute each hash with BigInt on the JS target, exactly as the C runtime does, then fold the 62-bit
+result into the exact JS integer range there only (for example `BigInt.asIntN(53, h)`, or XOR the
+high bits into the low 53 before narrowing; choose one in the fix and document it). Native and
+interpreted `hash` values do not change. JS `hash` values differ from native ones, which matters
+only if a hash is stored or sent between engines; say so in the builtin reference and in
+`specs/lang/type-system.md`'s JS Int section. The test that pins hash output gets a JS half that
+pins the folded values.
 
+Why not BigInt alone: the JS target stores an Int in a JS double, exact only within ±(2^53 − 1),
+and an Int result outside that range throws (`__int_result` in `runtime/march_runtime.mjs`), so a
+62-bit hash cannot be returned as an Int. The options considered were:
 1. Mask `hash` to 53 bits or fewer on every engine. JS can then return the same values, but hash
    values change everywhere, including `Hamt`'s layout and iteration order.
 2. Compute in BigInt on JS and fold the result into the safe range there only. JS stays usable,
