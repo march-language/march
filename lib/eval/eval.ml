@@ -622,9 +622,43 @@ let in_module_init (k : unit -> 'a) : 'a =
   module_init := true;
   Fun.protect ~finally:(fun () -> module_init := saved) k
 
+(** Ocap phase 6 (dependency grants; lib/tir/auth_rt.ml [grants] is the
+    compiled twin).  A grant's frame is the value [VCon (grant_tag, [layer;
+    enter])]: [layer] is the package's [Authority.grant_layer], one value per
+    package and run ([grant_frame_of]), and [enter] is
+    [Authority.enter_grant].  Entering it ([enter_grant_around]) runs code
+    under the authority in force intersected with the grant.
+
+    It is also the 5th field of a [VClosure] that runs as one of the
+    package's named functions would: a lambda made by the package's
+    module-level code, or a package impl method (decision 9, design §21).
+    [apply_inner] enters it instead of installing an authority.  The tag is
+    compared physically, so no authority value can be taken for it. *)
+let grant_tag = "$grant"
+
+(** The grant frame of the module-level code running now ([None] outside a
+    granted package's module-level code): what a function value made there
+    carries instead of an authority. *)
+let init_grant : value option ref = ref None
+
+(** Whether [layer] (physically: [grant_frame_of] builds one per package) is
+    in the current slot.  Then entering it again changes nothing (the March
+    [Authority.enter_grant] would return the slot as it is), so the call
+    skips it: a call inside a granted package costs this walk of one to three
+    layers and nothing else. *)
+let layer_in_force (layer : value) : bool =
+  let rec go = function
+    | VCon ("Cons", [ x; rest ]) -> x == layer || go rest
+    | _ -> false
+  in
+  go !Eval_builtins.cap_slot
+
+(** [enter_grant_around], set once [apply] exists (below [framed_call]). *)
+let grant_enter_hook : (value -> (unit -> value) -> value) ref = ref (fun _ k -> k ())
+
 (** The authority a function value made here captures. *)
 let current_capture () : value option =
-  if !module_init then None else Some !Eval_builtins.cap_slot
+  if !module_init then !init_grant else Some !Eval_builtins.cap_slot
 
 (** Run [k] under the authority [a] (no write when it is already in force). *)
 let with_authority (a : value) (k : unit -> 'a) : 'a =
@@ -641,21 +675,30 @@ let with_authority (a : value) (k : unit -> 'a) : 'a =
     authority in force here.  Anything else as it is: a lambda captured
     when it was made, a module-level value captures nothing. *)
 let capture_named_value (name : string) (v : value) : value =
+  let named bname =
+    if String.starts_with ~prefix:"<rec:" bname then
+      match String.rindex_opt bname '/' with
+      | Some slash ->
+        let fname = String.sub bname 5 (slash - 5) in
+        name = fname || String.ends_with ~suffix:("." ^ fname) name
+      | None -> false
+    else bname = name
+  in
   match v with
   | VBuiltin (bname, f) when not !module_init ->
-    let named =
-      if String.starts_with ~prefix:"<rec:" bname then
-        match String.rindex_opt bname '/' with
-        | Some slash ->
-          let fname = String.sub bname 5 (slash - 5) in
-          name = fname || String.ends_with ~suffix:("." ^ fname) name
-        | None -> false
-      else bname = name
-    in
-    if not named then v
+    if not (named bname) then v
     else
       let a = !Eval_builtins.cap_slot in
       VBuiltin (bname, fun args -> with_authority a (fun () -> f args))
+  | VBuiltin (bname, f) ->
+    (* Module-level code: nothing is captured, except that a granted
+       package's named function value runs under its grant whoever calls it
+       (`let reader = File.read`; the compiled twin is the eta lambda
+       [Auth_rt.grants] makes of it). *)
+    (match !init_grant with
+     | Some g when named bname ->
+       VBuiltin (bname, fun args -> !grant_enter_hook g (fun () -> f args))
+     | _ -> v)
   | _ -> v
 
 (** Set by [EApp] just before it evaluates an [EVar] callee, so the [EVar]
@@ -2093,6 +2136,11 @@ and apply_inner (fn_val : value) (args : value list) : value =
        physically already in force. *)
     let saved_cap =
       match cap with
+      | Some (VCon (t, [ layer; enter ])) when t == grant_tag ->
+        (* A grant frame (ocap phase 6, [grant_tag]): the caller's authority
+           intersected with the grant, entered as [enter_grant_around]
+           does. *)
+        if layer_in_force layer then None else Some (apply enter [ layer ])
       | Some a when a != !Eval_builtins.cap_slot ->
         let s = !Eval_builtins.cap_slot in
         Eval_builtins.cap_slot := a;
@@ -2651,9 +2699,13 @@ and eval_expr_inner (env : env) (e : expr) : value =
            actor_name (List.length init_names)
            (if List.length init_names = 1 then "" else "s") (List.length init_args);
        let init_env = List.combine init_names init_args @ !env_ref in
+       (* ocap phase 4: the spawner's authority, for life; ocap phase 6: a
+          granted package's actor intersects it with the grant, and its init
+          runs under it too. *)
+       let authority = !Eval_runtime.spawn_authority_hook actor_name in
        (* Phase 2: if this actor is a supervisor, spawn children first and
           inject their pids into the init state. *)
-       let init_state = match def.actor_supervise with
+       let init_state = with_authority authority (fun () -> match def.actor_supervise with
          | None ->
            eval_expr init_env def.actor_init
          | Some sup_cfg ->
@@ -2672,13 +2724,15 @@ and eval_expr_inner (env : env) (e : expr) : value =
                let child_args = List.map (eval_expr init_env) sf.sf_init_args in
                (* Spawned here, by the supervisor's spawn: under the
                   authority in force at it, which every restart restores. *)
+               let child_authority = !Eval_runtime.spawn_authority_hook child_actor_name in
                let child_init_state =
-                 eval_actor_init_state child_env_ref child_def child_actor_name child_args in
+                 with_authority child_authority (fun () ->
+                     eval_actor_init_state child_env_ref child_def child_actor_name child_args) in
                let child_pid = !next_pid in
                next_pid := child_pid + 1;
                let child_inst = {
                  ai_name = child_actor_name; ai_def = child_def;
-                 ai_env_ref = child_env_ref; ai_authority = !Eval_builtins.cap_slot;
+                 ai_env_ref = child_env_ref; ai_authority = child_authority;
                  ai_init_args = child_args;
                  ai_state = child_init_state; ai_alive = true;
                  ai_terminal_reason = Normal;
@@ -2712,11 +2766,10 @@ and eval_expr_inner (env : env) (e : expr) : value =
               VRecord (updated @ extras)
             | _ ->
               (* Non-record state: just use the init as-is *)
-              base_state)
+              base_state))
        in
        let inst = { ai_name     = actor_name; ai_def = def; ai_env_ref = env_ref;
-                    (* ocap phase 4: the spawner's authority, for life. *)
-                    ai_authority = !Eval_builtins.cap_slot;
+                    ai_authority = authority;
                     ai_init_args = init_args;
                     ai_state    = init_state; ai_alive = true;
                     ai_terminal_reason = Normal;
@@ -3840,10 +3893,13 @@ let spawn_from_spec (spec : value) : unit =
               (* A `Supervisor.spec` child names its actor by string and
                  carries no init arguments: an actor whose init takes some
                  is reported by [eval_actor_init_state]'s arity check. *)
-              let init_state = eval_actor_init_state env_ref def actor_name [] in
+              let authority = !Eval_runtime.spawn_authority_hook actor_name in
+              let init_state =
+                with_authority authority (fun () ->
+                    eval_actor_init_state env_ref def actor_name []) in
               let inst = {
                 ai_name = actor_name; ai_def = def; ai_env_ref = env_ref;
-                ai_authority = !Eval_builtins.cap_slot;
+                ai_authority = authority;
                 ai_init_args = [];
                 ai_state = init_state; ai_alive = true;
                 ai_terminal_reason = Normal;
@@ -3929,6 +3985,120 @@ let framed_call (def : fn_def) (defn_prefix : string) (env_ref : env ref)
            (fun () -> call args))
   | _ -> call
 
+(** Ocap phase 6: the grant frames ([grant_tag]) built this run, one per
+    package (keyed by the package name as written, and its grant text, never
+    by a mangled name), so the layer is physically the same value at every
+    entry and [layer_in_force] can find it.  Cleared by [eval_module_env]. *)
+let grant_frames : (string * string, value) Hashtbl.t = Hashtbl.create 4
+
+(** The grant frame of [g], built on first use with the March
+    [Authority.grant_layer] (the layer the compiled wrapper builds) and
+    [Authority.enter_grant]. *)
+let grant_frame_of (g : March_caps.Dep_grants.grant) (env : env) : value =
+  let key = (g.g_pkg, g.g_text) in
+  match Hashtbl.find_opt grant_frames key with
+  | Some f -> f
+  | None ->
+    ensure_module_loaded "Authority";
+    let layer =
+      apply (lookup "Authority.grant_layer" env) [ VString g.g_pkg; VString g.g_text ] in
+    let f = VCon (grant_tag, [ layer; lookup "Authority.enter_grant" env ]) in
+    Hashtbl.replace grant_frames key f;
+    f
+
+(** The grant frame of the package [file] belongs to, if it is granted.
+    With no grants this is [None] at once, touching nothing
+    ([Dep_grants.package_of_file]); each file's package is looked up once. *)
+let grant_frame_of_file (file : string) (env : env) : value option =
+  match March_caps.Dep_grants.package_of_file file with
+  | None -> None
+  | Some g -> Some (grant_frame_of g env)
+
+(** Run [k] inside the grant frame [frame]: the authority in force
+    intersected with the grant ([Authority.enter_grant], which pushes the
+    layer unless the same grant is already anywhere in the list), restored
+    on leaving, even when [k] raises.  When the layer is already in force (a
+    call inside the package) nothing is entered. *)
+let enter_grant_around (frame : value) (k : unit -> value) : value =
+  match frame with
+  | VCon (_, [ layer; enter ]) ->
+    if layer_in_force layer then k ()
+    else begin
+      let saved = apply enter [ layer ] in
+      Fun.protect ~finally:(fun () -> Eval_builtins.cap_slot := saved) k
+    end
+  | _ -> k ()
+
+let () = grant_enter_hook := enter_grant_around
+
+(** Ocap phase 6 (decision 6; [Auth_rt.grants] is the compiled twin, which
+    drops the frame where the checker proved it changes nothing): the call
+    of a fn declared in a granted package's [file] runs inside the package's
+    grant frame.  It wraps [framed_call], as the compiled grant wrapper wraps
+    the `needs` frame.  The package is decided here, once per definition, so
+    a fn outside every granted package (every fn, when there are no grants)
+    is [call] itself: no per-call check, allocation or lookup.  The frame is
+    built at the first call, when [Authority] is surely loaded. *)
+let granted_call (file : string) (env_ref : env ref)
+    (call : value list -> value) : value list -> value =
+  match March_caps.Dep_grants.package_of_file file with
+  | None -> call
+  | Some g ->
+    let frame = lazy (grant_frame_of g !env_ref) in
+    fun args -> enter_grant_around (Lazy.force frame) (fun () -> call args)
+
+(** Evaluate a granted package's module-level code ([k]: a top-level let's
+    initialiser, decision 9) inside its grant frame, with [init_grant] set so
+    a function value it makes runs as one of the package's functions.  Code
+    of a file in no granted package runs with [init_grant] cleared (a stdlib
+    module loaded on demand from inside a granted initialiser is not the
+    package's). *)
+let with_module_grant (file : string) (env : env) (k : unit -> value) : value =
+  let saved = !init_grant in
+  match grant_frame_of_file file env with
+  | None ->
+    (match saved with
+     | None -> k ()
+     | Some _ ->
+       init_grant := None;
+       Fun.protect ~finally:(fun () -> init_grant := saved) k)
+  | Some frame ->
+    init_grant := Some frame;
+    Fun.protect ~finally:(fun () -> init_grant := saved)
+      (fun () -> enter_grant_around frame k)
+
+(** Ocap phase 6: actors declared in a granted package, by name (bare and
+    qualified, as [actor_defs_tbl]), with the env their grant frame is built
+    from.  Cleared by [eval_module_env]. *)
+let actor_grants : (string, March_caps.Dep_grants.grant * env) Hashtbl.t = Hashtbl.create 4
+
+let note_actor_grant (name : string) (qual : string) (file : string) (env : env) : unit =
+  match March_caps.Dep_grants.package_of_file file with
+  | None -> ()
+  | Some g ->
+    Hashtbl.replace actor_grants name (g, env);
+    if qual <> name then Hashtbl.replace actor_grants qual (g, env)
+
+(** The authority an actor named [name] is spawned under, for life: the
+    spawner's, and for a granted package's actor that intersected with the
+    grant.  Its init, every handler, `on_stop` and each restart run under it,
+    which is what the compiled `_spawn` and handler wrappers give each of
+    them (the spawner's authority with the grant entered on top, or as it is
+    when the grant is already in force). *)
+let spawn_authority (name : string) : value =
+  match Hashtbl.find_opt actor_grants name with
+  | None -> !Eval_builtins.cap_slot
+  | Some (g, env) ->
+    (match grant_frame_of g env with
+     | VCon (_, [ layer; enter ]) when not (layer_in_force layer) ->
+       let saved = apply enter [ layer ] in
+       let a = !Eval_builtins.cap_slot in
+       Eval_builtins.cap_slot := saved;
+       a
+     | _ -> !Eval_builtins.cap_slot)
+
+let () = Eval_runtime.spawn_authority_hook := spawn_authority
+
 (** Evaluate a single declaration, extending [env].
     Returns the updated environment. *)
 let rec eval_decl (env : env) (d : decl) : env =
@@ -3954,6 +4124,7 @@ let rec eval_decl (env : env) (d : decl) : env =
        correct here) — see [VClosure]'s doc comment. *)
     let defn_prefix = effective_module_prefix () in
     let rec_closure = VBuiltin (rec_name,
+                                granted_call def.fn_name.span.file env_ref @@
                                 framed_call def defn_prefix env_ref (fun args ->
                                   let call_env = !env_ref in
                                   let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix, None) in
@@ -3963,8 +4134,10 @@ let rec eval_decl (env : env) (d : decl) : env =
     env_ref := env';
     env'
 
-  | DLet (_, b, _) ->
-    let v = in_module_init (fun () -> eval_expr env b.bind_expr) in
+  | DLet (_, b, sp) ->
+    let v =
+      with_module_grant sp.file env (fun () ->
+          in_module_init (fun () -> eval_expr env b.bind_expr)) in
     (match match_pattern v b.bind_pat with
      | Some bs -> bs @ env
      | None    -> eval_error "top-level let binding pattern failed")
@@ -3990,7 +4163,7 @@ let rec eval_decl (env : env) (d : decl) : env =
      | _ -> ());
     env
 
-  | DActor (_, name, def, _) ->
+  | DActor (_, name, def, asp) ->
     (* Register actor definition so spawn() can find it later.
        Also register under the qualified name (e.g. "ActorDemo.Counter") so
        that spawn(ActorDemo.Counter) works when the actor is defined inside a
@@ -4002,6 +4175,7 @@ let rec eval_decl (env : env) (d : decl) : env =
     let qual = current_doc_prefix () ^ name.txt in
     if qual <> name.txt then
       Hashtbl.replace actor_defs_tbl qual (def, env_ref);
+    note_actor_grant name.txt qual asp.file env;
     env
 
   | DMod (name, _, decls, _) ->
@@ -4042,7 +4216,9 @@ let rec eval_decl (env : env) (d : decl) : env =
            point in the walk) — see [VClosure]'s doc comment. *)
         let defn_prefix = effective_module_prefix () in
         let rec_closure = VBuiltin (rec_name,
-                                    framed_call def defn_prefix inner_ref (fun args ->
+                                    granted_call def.fn_name.span.file inner_ref @@
+                                    granted_call def.fn_name.span.file inner_ref @@
+            framed_call def defn_prefix inner_ref (fun args ->
                                       let call_env = !inner_ref in
                                       let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix, None) in
                                       apply fn_v args)) in
@@ -4251,6 +4427,13 @@ let rec eval_decl (env : env) (d : decl) : env =
       String.length idef.impl_iface.txt >= 4
       && String.sub idef.impl_iface.txt 0 4 = "Json"
     in
+    (* ocap phase 6: an impl written in a granted package runs under the
+       grant, as its compiled methods are wrapped ([Auth_rt.grants] tags
+       impl methods by the impl's file).  The plain closures below carry the
+       grant frame in place of an authority; a method that goes through
+       [DFn] gets [granted_call] there.  [None] (no grant) keeps them as
+       they were. *)
+    let impl_grant = grant_frame_of_file sp.file env in
     List.fold_left (fun env (mname, fn_def) ->
         (* Type-dispatched methods (show/eq/compare/hash) use a
            non-self-referential closure so recursive calls inside the body go
@@ -4303,20 +4486,30 @@ let rec eval_decl (env : env) (d : decl) : env =
         in
         let new_env = match fn_def.fn_clauses with
           | [{ fc_params = []; fc_body; _ }] ->
-            let v = eval_expr env fc_body in
+            let v = match impl_grant with
+              | None -> eval_expr env fc_body
+              | Some _ ->
+                (* A default method's body is a lambda: made as the
+                   package's module-level code makes one, it carries the
+                   grant frame. *)
+                let saved = !init_grant in
+                init_grant := impl_grant;
+                Fun.protect ~finally:(fun () -> init_grant := saved)
+                  (fun () -> in_module_init (fun () -> eval_expr env fc_body))
+            in
             (mname.txt, v) :: env
           | _ when is_dispatched ->
             (* Plain closure: method name in body → builtin dispatch, not self. *)
             let clause = List.hd fn_def.fn_clauses in
             let params = clause_params clause in
-            let clo = VClosure (env, params, clause.fc_body, effective_module_prefix (), None) in
+            let clo = VClosure (env, params, clause.fc_body, effective_module_prefix (), impl_grant) in
             (mname.txt, clo) :: env
           | _ when is_general_iface ->
             (* Plain closure over [env_for_body]: method name in body →
                dispatcher, not self (see comment above). *)
             let clause = List.hd fn_def.fn_clauses in
             let params = clause_params clause in
-            let clo = VClosure (env_for_body, params, clause.fc_body, effective_module_prefix (), None) in
+            let clo = VClosure (env_for_body, params, clause.fc_body, effective_module_prefix (), impl_grant) in
             (mname.txt, clo) :: env
           | _ ->
             eval_decl env (DFn (fn_def, sp))
@@ -4608,6 +4801,9 @@ let eval_module_env ?launch (m : module_) : env =
   module_stack := [];
   Hashtbl.clear module_registry;
   Hashtbl.clear actor_defs_tbl;
+  Hashtbl.clear actor_grants;
+  Hashtbl.clear grant_frames;
+  init_grant := None;
   Hashtbl.clear actor_registry;
   Hashtbl.clear named_registry;
   Hashtbl.clear reg_names_pending;
@@ -4675,6 +4871,7 @@ let eval_module_env ?launch (m : module_) : env =
       let rec_name = Printf.sprintf "<rec:%s/%d>" def.fn_name.txt arity in
       let defn_prefix = effective_module_prefix () in
       let rec_closure = VBuiltin (rec_name,
+                                  granted_call def.fn_name.span.file env_ref @@
                                   framed_call def defn_prefix env_ref (fun args ->
                                     let call_env = !env_ref in
                                     let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix, None) in
@@ -4727,8 +4924,10 @@ let eval_module_env ?launch (m : module_) : env =
       env_ref := env'';
       make_recursive_env env_ref rest env''
 
-    | DLet (_, b, _) :: rest ->
-      let v = in_module_init (fun () -> eval_expr env b.bind_expr) in
+    | DLet (_, b, sp) :: rest ->
+      let v =
+        with_module_grant sp.file env (fun () ->
+            in_module_init (fun () -> eval_expr env b.bind_expr)) in
       let env' = match match_pattern v b.bind_pat with
         | Some bs -> bs @ env
         | None    -> eval_error "top-level let pattern failed"
@@ -4736,7 +4935,7 @@ let eval_module_env ?launch (m : module_) : env =
       env_ref := env';
       make_recursive_env env_ref rest env'
 
-    | DActor (_, name, def, _) :: rest ->
+    | DActor (_, name, def, asp) :: rest ->
       (* Register actor with the shared env_ref so handlers can call module fns.
          Also register qualified name for spawn(Mod.Actor) support. *)
       note_actor_handlers name.txt def.actor_handlers;
@@ -4744,6 +4943,7 @@ let eval_module_env ?launch (m : module_) : env =
       let qual = current_doc_prefix () ^ name.txt in
       if qual <> name.txt then
         Hashtbl.replace actor_defs_tbl qual (def, env_ref);
+      note_actor_grant name.txt qual asp.file env;
       make_recursive_env env_ref rest env
 
     | DMod (mname, _, _, _) as d :: rest ->

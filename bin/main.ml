@@ -8077,6 +8077,13 @@ let () =
        request, not on the command line. We run it through the interpreter
        under a debug context driven by the DAP session. *)
 
+    (* The interpreter honours dependency grants (ocap phase 6), so the
+       debugger loads them as a run does: `--dep-grants FILE`, else
+       MARCH_DEP_GRANTS. *)
+    let dep_grants_flag, _ =
+      peel_dep_grants (Array.to_list (Array.sub argv 2 (Array.length argv - 2))) in
+    install_dep_grants ?flag:dep_grants_flag ();
+
     (* Build a runnable for a source path: parse → desugar → prepend stdlib →
        run_module (the same shape as the interpreter run path). The session
        installs the debug context; this thunk must not install its own. *)

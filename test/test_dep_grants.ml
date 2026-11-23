@@ -692,6 +692,26 @@ let run_built ~target d : string =
 
 let have_node = lazy (Sys.command "command -v node >/dev/null 2>&1" = 0)
 
+(* Task 5: run [file] in the interpreter (or, with [~jit:true], through
+   `--jit`) as [build_in] builds it: same project directory, private HOME,
+   MARCH_LIB_PATH and grants file.  The output ends with `exit N`, as
+   [run_built]'s does, so the two compare directly. *)
+let run_interp ?(jit = false) ~libs d file : string =
+  let out = Filename.concat d "interp.out" in
+  let grants = Filename.concat d "dep-grants" in
+  let cmd =
+    Printf.sprintf "cd %s && HOME=%s MARCH_LIB_PATH=%s %s %s %s %s > %s 2>&1; echo \"exit $?\" >> %s"
+      (Filename.quote d) (Filename.quote (Lazy.force private_home))
+      (Filename.quote (String.concat ":" libs))
+      (if Sys.file_exists grants then "MARCH_DEP_GRANTS=" ^ Filename.quote grants else "")
+      (Filename.quote (main_exe ())) (if jit then "--jit" else "")
+      (Filename.quote file) (Filename.quote out) (Filename.quote out) in
+  ignore (Sys.command cmd);
+  let ic = open_in_bin out in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  s
+
 (* A scoped grant: the dependency computes a path outside it, and the
    compiled program (native, and JS under node) gets the grant's refusal. *)
 let test_scoped_refusal_runs () =
@@ -708,7 +728,10 @@ let test_scoped_refusal_runs () =
           let code, out = build_in ~target ~libs:[ r ] d (app "scoped_refusal") in
           if code <> 0 then Alcotest.failf "%s build failed (exit %d):\n%s" what code out;
           Alcotest.(check string) what want (run_built ~target d))
-        targets)
+        targets;
+      Alcotest.(check string) "interp" want (run_interp ~libs:[ r ] d (app "scoped_refusal"));
+      Alcotest.(check string) "jit" want
+        (run_interp ~jit:true ~libs:[ r ] d (app "scoped_refusal")))
 
 (* A granted package's actor, spawned by the app: its handler and init
    are the package's code and are wrapped, so the handler is refused what
@@ -731,7 +754,11 @@ let test_actor_handler_under_grant () =
       Alcotest.(check string) "native"
         "IO.FileRead(\"/etc/hosts\") refused by the grant to package prober \
          (IO.FileRead(\"/srv/data\"), IO.Spawn)\nmain: allowed\nexit 0\n"
-        (run_built ~target:`Native d))
+        (run_built ~target:`Native d);
+      Alcotest.(check string) "interp"
+        "IO.FileRead(\"/etc/hosts\") refused by the grant to package prober \
+         (IO.FileRead(\"/srv/data\"), IO.Spawn)\nmain: allowed\nexit 0\n"
+        (run_interp ~libs:[ p ] d (app "actor_refusal")))
 
 (* Fix round 1 (C1): a function value made by a granted package's
    module-level code, a lambda or a named function read as a value, runs
@@ -753,7 +780,10 @@ let test_module_level_values_under_grant () =
           let code, out = build_in ~target ~libs:[ l ] d (app "module_value") in
           if code <> 0 then Alcotest.failf "%s build failed (exit %d):\n%s" what code out;
           Alcotest.(check string) what want (run_built ~target d))
-        targets)
+        targets;
+      Alcotest.(check string) "interp" want (run_interp ~libs:[ l ] d (app "module_value"));
+      Alcotest.(check string) "jit" want
+        (run_interp ~jit:true ~libs:[ l ] d (app "module_value")))
 
 (* Fix round 1 (I2): a granted fn whose generic `show(x)` mono resolves
    to the app's impl keeps its frame under an unscoped grant, so the impl
@@ -771,7 +801,9 @@ let test_app_impl_from_generic_code () =
           if code <> 0 then Alcotest.failf "%s: build failed (exit %d):\n%s" grant code out;
           if not (has_sub out "grant-frame Genx.describe pkg=genx proven=true wrapped=true\n") then
             Alcotest.failf "%s: Genx.describe not kept:\n%s" grant out;
-          Alcotest.(check string) grant "<refused>\nexit 0\n" (run_built ~target:`Native d))
+          Alcotest.(check string) grant "<refused>\nexit 0\n" (run_built ~target:`Native d);
+          Alcotest.(check string) (grant ^ " interp") "<refused>\nexit 0\n"
+            (run_interp ~libs:[ g ] d (app "app_impl")))
         [ "IO.Clock"; "IO.FileRead(\"/srv\")" ])
 
 (* Fix round 2 (R1): the same with string interpolation, `"[${x}]"`, whose
@@ -787,7 +819,9 @@ let test_app_impl_from_interpolation () =
           if code <> 0 then Alcotest.failf "%s: build failed (exit %d):\n%s" grant code out;
           if not (has_sub out "grant-frame Genfmt.bracket pkg=genfmt proven=true wrapped=true\n")
           then Alcotest.failf "%s: Genfmt.bracket not kept:\n%s" grant out;
-          Alcotest.(check string) grant "[refused]\nexit 0\n" (run_built ~target:`Native d))
+          Alcotest.(check string) grant "[refused]\nexit 0\n" (run_built ~target:`Native d);
+          Alcotest.(check string) (grant ^ " interp") "[refused]\nexit 0\n"
+            (run_interp ~libs:[ g ] d (app "app_impl_interp")))
         [ "IO.Clock"; "IO.FileRead(\"/srv\")" ])
 
 (* The proof bit crosses stages by the checker's key: the lowering reads
@@ -845,7 +879,7 @@ let tests =
         Alcotest.test_case "import inside a granted package" `Quick test_import_inside_package;
         Alcotest.test_case "same type name in the app" `Quick test_same_type_name ] );
     ( "frames",
-      [ Alcotest.test_case "a scoped grant refuses at run time, native and JS" `Quick
+      [ Alcotest.test_case "a scoped grant refuses at run time, native, JS, interp and --jit" `Quick
           test_scoped_refusal_runs;
         Alcotest.test_case "the proof bit is read by the checker's key" `Quick
           test_proof_bit_read;

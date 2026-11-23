@@ -78,12 +78,15 @@ let write_program content =
 
 (* Spawn `march dap`, run [k ~ic ~oc ~path], always clean up. A SIGALRM guards
    against a hung server. *)
-let with_dap content k =
+let with_dap ?path ?(env = [||]) content k =
   Sys.set_signal Sys.sigalrm
     (Sys.Signal_handle (fun _ -> failwith "march dap did not respond (timeout)"));
   ignore (Unix.alarm 30);
-  let path = write_program content in
-  let (ic, oc, ec) = Unix.open_process_args_full exe [| exe; "dap" |] (Unix.environment ()) in
+  let path = match path with
+    | Some p -> let oc = open_out p in output_string oc content; close_out oc; p
+    | None -> write_program content in
+  let (ic, oc, ec) =
+    Unix.open_process_args_full exe [| exe; "dap" |] (Array.append (Unix.environment ()) env) in
   let finish () =
     (try req oc "disconnect" (`Assoc []) with _ -> ());
     (try ignore (Unix.close_process_full (ic, oc, ec)) with _ -> ());
@@ -263,6 +266,50 @@ let test_multiple_breakpoints () =
       Alcotest.(check bool) "second stop on line 5" true (stop2 <> None && at5);
       Alcotest.(check bool) "terminates after both" true term)
 
+(* ocap phase 6: `march dap` runs the interpreter, so it loads the
+   dependency grants as a run does (MARCH_DEP_GRANTS here).  The program sits
+   in a granted library root, so its own functions are the package's and
+   run under the grant. *)
+let prog_grant = String.concat "\n" [
+  "mod Main do";
+  "  fn probe() do";
+  "    match Authority.check(\"IO.FileRead\", \"/etc/hosts\") do";
+  "    Ok(_) -> \"allowed\"";
+  "    Err(e) -> Authority.describe(e)";
+  "    end";
+  "  end";
+  "  fn main() do";
+  "    println(probe())";
+  "  end";
+  "end"; "" ]
+
+let test_dep_grants_honoured () =
+  let dir = Unix.realpath (Filename.temp_dir "march_dap_grant" "") in
+  let grants = Filename.concat dir "dep-grants" in
+  let oc = open_out grants in
+  Printf.fprintf oc "dbg\t%s\tforge.toml:2\tIO.Console\n" dir;
+  close_out oc;
+  let want = "refused by the grant to package dbg (IO.Console)" in
+  with_dap ~path:(Filename.concat dir "main.march") ~env:[| "MARCH_DEP_GRANTS=" ^ grants |]
+    prog_grant (fun ~ic ~oc ~path ->
+      ignore (boot ~ic ~oc ~path ());
+      let saw = ref false and term = ref false in
+      let rec loop n =
+        if (!saw && !term) || n <= 0 then ()
+        else match read_frame ic with
+          | None -> ()
+          | Some j ->
+            if is_event "terminated" j then term := true;
+            if is_event "output" j &&
+               (match member "output" (member "body" j) with
+                | `String s -> str_contains s want | _ -> false)
+            then saw := true;
+            loop (n - 1)
+      in
+      loop 60;
+      Alcotest.(check bool) "the grant's refusal is printed" true !saw;
+      Alcotest.(check bool) "terminates" true !term)
+
 let () =
   Alcotest.run "dap"
     [ "stdio", [
@@ -271,4 +318,5 @@ let () =
           Alcotest.test_case "program output -> output events" `Quick test_output_events;
           Alcotest.test_case "panic still terminates"          `Quick test_panic_terminates;
           Alcotest.test_case "multiple breakpoints"            `Quick test_multiple_breakpoints;
+          Alcotest.test_case "dependency grants honoured"      `Quick test_dep_grants_honoured;
         ] ]
