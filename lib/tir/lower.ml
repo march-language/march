@@ -1066,6 +1066,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                      fn_body   = rhs;
                      fn_kind   = Tir.FnNormal;  (* module-level `let` as zero-arg fn *)
                    } in
+                   (* As a DFn's: qualify bare references to the module's fns. *)
+                   let fn = Lower_decls.rename_scoped_vars scopes fn in
                    Lower_state.note_module_let fn;
                    Lower_state.note_fn_grant ~final:fn.fn_name ~key:(Some fn.fn_name)
                      ~file:let_sp.Ast.file;

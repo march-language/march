@@ -1305,6 +1305,10 @@ git log is authoritative for exact commits.
   in dependency order (a library module checked before one it calls no longer fails), and an
   `impl` declared inside a module is visible to the rest of the file and to later inputs (a
   `show` of that module's type was "does not implement interface `Show`").
+- **A library module's `let` that names one of its own functions compiles.** `let own =
+  helper` at the top of a module loaded from `MARCH_LIB_PATH` (or of a nested module, naming a
+  parent's function) referred to an undefined `@helper` when compiled; the interpreter was
+  right.
 - **A function named like a stdlib loop no longer leaks its capabilities into the stdlib.**
   A local `fn go(...)` (or any local `fn`) was not in scope for the rest of its block in the
   compiler's capability bookkeeping, so the stdlib's local `fn go` loops were recorded as calls

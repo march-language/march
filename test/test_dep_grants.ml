@@ -748,6 +748,24 @@ let test_scoped_refusal_runs () =
       Alcotest.(check string) "jit" want
         (run_interp ~jit:true ~libs:[ r ] d (app "scoped_refusal")))
 
+(* Task 6, no grants: a library module's module-level let that names one
+   of its own (or its parent module's) functions by bare name.  Natively the
+   let's zero-arg fn kept the bare name, an undefined `@bang` at link time
+   (the interpreter was right). *)
+let test_lib_let_names_own_fn () =
+  with_reset (fun () ->
+      let l = dep "selfref" in
+      let d = project () in
+      let want = "own! parent!\nexit 0\n" in
+      let targets = `Native :: (if Lazy.force have_node then [ `Js ] else []) in
+      List.iter (fun target ->
+          let what = match target with `Native -> "native" | `Js -> "js" in
+          let code, out = build_in ~target ~libs:[ l ] d (app "selfref") in
+          if code <> 0 then Alcotest.failf "%s build failed (exit %d):\n%s" what code out;
+          Alcotest.(check string) what want (run_built ~target d))
+        targets;
+      Alcotest.(check string) "interp" want (run_interp ~libs:[ l ] d (app "selfref")))
+
 (* A granted package's actor, spawned by the app: its handler and init
    are the package's code and are wrapped, so the handler is refused what
    the grant refuses, while main keeps its own authority.  Native only:
@@ -955,6 +973,8 @@ let tests =
           test_scoped_refusal_runs;
         Alcotest.test_case "the proof bit is read by the checker's key" `Quick
           test_proof_bit_read;
+        Alcotest.test_case "a library let naming its own fn builds (no grants)" `Quick
+          test_lib_let_names_own_fn;
         Alcotest.test_case "a dep actor's handler runs under the grant" `Quick
           test_actor_handler_under_grant;
         Alcotest.test_case "module-level function values run under the grant" `Quick

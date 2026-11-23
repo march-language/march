@@ -547,6 +547,10 @@ let rec lower_stdlib_mod_decls ?(enclosing = []) (env : Lower_state.env) prefix 
              fn_body   = rhs;
              fn_kind   = Tir.FnNormal;  (* module-level `let` as zero-arg fn *)
            } in
+           (* Qualify its bare references to this module's (and enclosing
+              modules') fns, as a DFn's are: `let own = own_check` in a
+              library module otherwise named an undefined `@own_check`. *)
+           let fn = rename_scoped_vars scopes fn in
            Lower_state.note_module_let fn;
            Lower_state.note_fn_grant ~final:fn.fn_name ~key:(Some fn.fn_name)
              ~file:let_sp.Ast.file;
