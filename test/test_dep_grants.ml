@@ -618,6 +618,21 @@ let test_proven () =
       if proven "Mixed.shout" then Alcotest.failf "Mixed.shout (IO.Console) proven:\n%s" out;
       if proven "Mixed.first_of" then Alcotest.failf "Mixed.first_of (unknown) proven:\n%s" out)
 
+(* A package's own call of `Authority.check` asks about a kind no row can
+   name, so a function reaching it is never proven, and natively it keeps
+   its frame under an unscoped grant (Task 6: it had been proven and its
+   frame dropped, so native admitted what the interpreter refused). *)
+let test_authority_check_not_proven () =
+  with_reset (fun () ->
+      let p = dep "peeker" in
+      let d = project ~grants:[ ("peeker", p, "IO.Console") ] () in
+      let code, out = check_in ~env:"MARCH_DUMP_DEP_PROVEN=1" ~libs:[ p ] d (app "peeker") in
+      expect_pass "Peeker.peek's check names no kind statically" (code, out);
+      let proven k = has_sub out ("dep-proven " ^ k ^ "\n") in
+      if proven "Peeker.peek" then
+        Alcotest.failf "Peeker.peek (calls Authority.check) proven:\n%s" out;
+      if not (proven "Peeker.twice") then Alcotest.failf "Peeker.twice (pure) not proven:\n%s" out)
+
 (* Fix round 3: a granted package that reaches another package's function
    through its own `import` is judged on that reach, and none of its
    functions on the way is proven. *)
@@ -930,6 +945,7 @@ let tests =
         Alcotest.test_case "a dep actor spawned" `Quick test_spawn_actor;
         Alcotest.test_case "impls of a dep type" `Quick test_impl_of_dep_type;
         Alcotest.test_case "proven" `Quick test_proven;
+        Alcotest.test_case "Authority.check is never proven" `Quick test_authority_check_not_proven;
         Alcotest.test_case "same-named methods elsewhere" `Quick test_same_named_methods;
         Alcotest.test_case "hint as written" `Quick test_hint_as_written;
         Alcotest.test_case "import inside a granted package" `Quick test_import_inside_package;

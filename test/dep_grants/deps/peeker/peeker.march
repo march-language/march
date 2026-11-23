@@ -1,0 +1,14 @@
+-- A package that asks `Authority.check` about a kind named at run time: no
+-- capability row covers it, so no proof by kind can drop its grant frame.
+mod Peeker do
+  needs IO.FileRead
+
+  fn peek(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed"
+    Err(_) -> "refused"
+    end
+  end
+
+  fn twice(s : String) : String do s ++ s end
+end

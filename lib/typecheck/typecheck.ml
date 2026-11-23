@@ -11590,6 +11590,13 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
           Hashtbl.replace memo q b;
           b
     in
+    (* A package's own call (or value use) of `Authority.check` asks about
+       a kind its row cannot name (the kind is a run-time String, and the
+       function has no capability row of its own), so a function reaching
+       one is not proven by kind: natively its grant frame must stay, or
+       the check would see the caller's whole authority (the interpreter
+       always frames). The stdlib's own checks are behind rows. *)
+    let authority_check_key = "Authority.check" in
     let full_reach (start : string) : (string * string list) list * bool =
       let caps = Hashtbl.create 8 in
       let order = ref [] in
@@ -11617,7 +11624,7 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
                  | Some row ->
                    List.iter (fun c -> note c (path @ [ q ])) row.March_caps.Cap_rows.caps
                  | None -> ());
-                if stdlib_unknown q then unknown := true
+                if stdlib_unknown q || q = authority_check_key then unknown := true
               | Some q -> if not (Hashtbl.mem visited q) then Queue.push (q, path @ [ q ]) queue
               | None -> if not (Hashtbl.mem builtin_names w) then unknown := true)
             (refs_of v)
