@@ -162,3 +162,8 @@ sighting prints symbol names for the trapping pc and its callers (the CI binary
 is not kept, so names are what matter). Read the frames and the `insn=` word
 first: a zero word or ASCII bytes means a wild jump (look at who called
 through a pointer); a real encoding means an instruction M1 lacks.
+
+## Decision (2026-11-23, owner)
+
+Closing rule for a flake that cannot be reproduced: it closes after 10 clean CI runs of the
+test on the leg that saw it, with evidence capture on. Record the run ids in the progress file.
