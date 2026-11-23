@@ -759,13 +759,8 @@ let rec rewrite_calls
      (colliding-type runtime routing). *)
   let iface_target (name : string) (args : Tir.atom list)
     : ((string * string) list * string) option =
-    let rec find_iface_impls n =
-      match Hashtbl.find_opt iface_methods n with
-      | Some impls -> Some impls
-      | None ->
-        (match String.index_opt n '.' with
-         | None -> None
-         | Some i -> find_iface_impls (String.sub n (i + 1) (String.length n - i - 1)))
+    let find_iface_impls n =
+      Tir_names.find_iface_impls ~to_string_alias:false iface_methods n
     in
     match find_iface_impls name with
     | None -> None
@@ -936,33 +931,18 @@ let rec rewrite_calls
          | Some i -> String.sub name (i + 1) (String.length name - i - 1)
          | None -> name
        in
-       let rec find_iface_impls name =
-         match Hashtbl.find_opt iface_methods name with
-         | Some impls -> Some impls
-         | None ->
-           (match String.index_opt name '.' with
-            | None ->
-              (* `to_string` is a universal formatter aliased to the Show
-                 interface's `show` method (mirrors lower.ml's lower-time
-                 `to_string` -> `show` redirection, `dispatch_name` a few
-                 hundred lines up in that file).  That redirection only fires
-                 when the argument's type is concretely known AT THE CALLING
-                 FUNCTION'S OWN lowering time — a call inside a still-generic
-                 function (e.g. `pfn print_row(row) = to_string(row)`, row:
-                 TVar then) is left as the literal `to_string` builtin because
-                 there was no concrete type to resolve against yet.  Once mono
-                 specializes such a function to a concrete argument type,
-                 retry the same redirection here so the specialized body
-                 dispatches to the real `Show$T.show` instead of falling
-                 through at codegen to the generic runtime
-                 `march_value_to_string`, which only understands a few
-                 primitive representations and prints "#<tag:N>" for anything
-                 else (every List/record/user ADT). *)
-              if name = "to_string" then Hashtbl.find_opt iface_methods "show"
-              else None
-            | Some i ->
-              find_iface_impls (String.sub name (i + 1) (String.length name - i - 1)))
-       in
+       (* [Tir_names.find_iface_impls]: the name, then `to_string` as Show's
+          `show` (a universal formatter aliased to it, mirroring lower.ml's
+          lower-time `to_string` -> `show` redirection, which only fires when
+          the argument's type is concretely known at the calling function's
+          own lowering time: a call inside a still-generic function is left
+          as the literal `to_string` builtin, so once mono specializes it to a
+          concrete type the same redirection is retried here, dispatching to
+          the real `Show$T.show` instead of the generic runtime
+          `march_value_to_string`, which prints "#<tag:N>" for any
+          List/record/user ADT), then the same with module prefixes
+          progressively stripped. *)
+       let find_iface_impls name = Tir_names.find_iface_impls iface_methods name in
        (match find_iface_impls orig_name with
         | None ->
           expr   (* Not an interface method — truly external/builtin *)
@@ -1193,19 +1173,9 @@ let rec rewrite_calls
              (same logic as EApp above).  This handles the common case where
              lower.ml/defun emits ECallPtr for cross-module interface dispatch
              when the first argument's type is erased to TVar "_". *)
-          let rec find_iface_impls name =
-            match Hashtbl.find_opt iface_methods name with
-            | Some impls -> Some impls
-            | None ->
-              (match String.index_opt name '.' with
-               | None ->
-                 (* `to_string` -> `show` alias — see the twin comment in the
-                    EApp branch above for why this retry is needed. *)
-                 if name = "to_string" then Hashtbl.find_opt iface_methods "show"
-                 else None
-               | Some i ->
-                 find_iface_impls (String.sub name (i + 1) (String.length name - i - 1)))
-          in
+          (* [Tir_names.find_iface_impls], with the `to_string` -> `show`
+             alias: see the twin comment in the EApp branch above. *)
+          let find_iface_impls name = Tir_names.find_iface_impls iface_methods name in
           (match find_iface_impls orig_name with
            | None -> expr   (* Truly external/builtin — unchanged *)
            | Some impls ->

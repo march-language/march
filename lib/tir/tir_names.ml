@@ -967,3 +967,20 @@ let is_drop_fn (name : string) : bool =
   let p = drop_fn_prefix in
   String.length name >= String.length p
   && String.sub name 0 (String.length p) = p
+
+(** Mono's rule for the impls an interface-method call [name] may dispatch
+    to, over a dispatch table [tbl] ([Lower.get_iface_methods ()]): the name
+    as written, else (with [to_string_alias], the default) the universal
+    formatter [to_string] read as the Show interface's [show], else the same
+    lookup with its first module qualifier stripped ([Conduit.Storage.get]
+    -> [Storage.get] -> [get]).  The one copy [Mono] resolves with and
+    [Auth_rt.grants] seeds its dispatch reach with, so the two cannot drift. *)
+let rec find_iface_impls ?(to_string_alias = true) (tbl : (string, 'a) Hashtbl.t) (name : string)
+  : 'a option =
+  match Hashtbl.find_opt tbl name with
+  | Some impls -> Some impls
+  | None -> (
+    match String.index_opt name '.' with
+    | None -> if to_string_alias && name = "to_string" then Hashtbl.find_opt tbl "show" else None
+    | Some i ->
+      find_iface_impls ~to_string_alias tbl (String.sub name (i + 1) (String.length name - i - 1)))

@@ -774,6 +774,22 @@ let test_app_impl_from_generic_code () =
           Alcotest.(check string) grant "<refused>\nexit 0\n" (run_built ~target:`Native d))
         [ "IO.Clock"; "IO.FileRead(\"/srv\")" ])
 
+(* Fix round 2 (R1): the same with string interpolation, `"[${x}]"`, whose
+   `to_string(x)` mono resolves to the app's `Show` impl. *)
+let test_app_impl_from_interpolation () =
+  with_reset (fun () ->
+      let g = dep "genfmt" in
+      List.iter (fun grant ->
+          let d = project ~grants:[ ("genfmt", g, grant) ] () in
+          let code, out =
+            build_in ~env:"MARCH_DUMP_GRANT_FRAMES=1" ~target:`Native ~libs:[ g ] d
+              (app "app_impl_interp") in
+          if code <> 0 then Alcotest.failf "%s: build failed (exit %d):\n%s" grant code out;
+          if not (has_sub out "grant-frame Genfmt.bracket pkg=genfmt proven=true wrapped=true\n")
+          then Alcotest.failf "%s: Genfmt.bracket not kept:\n%s" grant out;
+          Alcotest.(check string) grant "[refused]\nexit 0\n" (run_built ~target:`Native d))
+        [ "IO.Clock"; "IO.FileRead(\"/srv\")" ])
+
 (* The proof bit crosses stages by the checker's key: the lowering reads
    [Dep_grants.proven] by the fn's module path and name.  Under an unscoped
    grant a proven fn's frame is dropped and an unproven one's kept. *)
@@ -838,4 +854,6 @@ let tests =
         Alcotest.test_case "module-level function values run under the grant" `Quick
           test_module_level_values_under_grant;
         Alcotest.test_case "an app impl reached from generic package code keeps the frame"
-          `Quick test_app_impl_from_generic_code ] ) ]
+          `Quick test_app_impl_from_generic_code;
+        Alcotest.test_case "an app impl reached by interpolation keeps the frame" `Quick
+          test_app_impl_from_interpolation ] ) ]

@@ -445,6 +445,22 @@ let reaches_authority (m : Tir.tir_module) : SSet.t =
           f.Tir.fn_body;
       !hit)
 
+(* An actor's glue fns that the runtime holds and calls itself (its
+   dispatch, on_stop and inspect, stored by [A_spawn]; [A_spawn] itself, a
+   supervisor child's respawn thunk): never turned into a capturing value
+   (see [captures]). *)
+let actor_glue_of (m : Tir.tir_module) : SSet.t =
+  List.fold_left
+    (fun acc td ->
+       match td with
+       | Tir.TDRecord (n, _) when Tir_names.is_actor_struct_name n ->
+         let a = String.sub n 0 (String.length n - String.length Tir_names.actor_struct_suffix) in
+         List.fold_left (fun s sfx -> SSet.add (a ^ sfx) s) acc
+           [ Tir_names.actor_dispatch_suffix; Tir_names.actor_on_stop_suffix;
+             Tir_names.actor_inspect_suffix; Tir_names.actor_spawn_suffix ]
+       | _ -> acc)
+    SSet.empty m.Tir.tm_types
+
 (* ── Dependency grants (ocap phase 6, Task 4) ─────────────────────────
 
    Every function defined in a granted package [P] runs under [P]'s grant
@@ -493,7 +509,10 @@ let reaches_authority (m : Tir.tir_module) : SSet.t =
 (** The fns of [m] that reach, through direct calls, a call of a function
     value ([reaches_indirect_call]'s seed) or a call of an interface method
     that lowering left unresolved (generic code: mono may resolve it to an
-    impl outside the package, e.g. the app's).  The grant frame's drop rule
+    impl outside the package, e.g. the app's), by mono's own resolution
+    rule ([Tir_names.find_iface_impls]: so [to_string(x)], which string
+    interpolation lowers to, counts as Show's [show], and a qualified name
+    as its unqualified method).  The grant frame's drop rule
     uses it: what such a call runs is not the package's proven code.  (The
     [needs]-clause frames keep [reaches_indirect_call].) *)
 let reaches_indirect_or_dispatch (m : Tir.tir_module) : SSet.t =
@@ -502,7 +521,9 @@ let reaches_indirect_or_dispatch (m : Tir.tir_module) : SSet.t =
       calls_fn_value f.Tir.fn_params f.Tir.fn_body
       || (let hit = ref false in
           iter_calls
-            (fun n -> if (not (Hashtbl.mem defined n)) && Hashtbl.mem ifaces n then hit := true)
+            (fun n ->
+               if (not (Hashtbl.mem defined n)) && Tir_names.find_iface_impls ifaces n <> None
+               then hit := true)
             f.Tir.fn_body;
           !hit))
 
@@ -561,8 +582,11 @@ let grants (m : Tir.tir_module) ~(tbl : (string, Lower_state.fn_grant) Hashtbl.t
         List.iter (fun (f : Tir.fn_def) -> Hashtbl.replace defined f.Tir.fn_name f) m.Tir.tm_fns;
         let reach = lazy (reaches_authority m) in
         let add (v : Tir.var) b = SSet.add v.Tir.v_name b in
+        let actor_glue = actor_glue_of m in
+        (* [captures]'s test for a value that must not run under its
+           caller's authority (kept in step with its [named_value]). *)
         let named_value bound (v : Tir.var) : (Tir.ty list * Tir.ty) option =
-          if SSet.mem v.Tir.v_name bound then None
+          if SSet.mem v.Tir.v_name bound || SSet.mem v.Tir.v_name actor_glue then None
           else
             let of_ty = match v.Tir.v_ty with
               | Tir.TFn ((_ :: _ as ps), r) -> Some (ps, r)
@@ -835,19 +859,7 @@ let captures (m : Tir.tir_module) ~(has_frames : bool) ~(repl : bool) : Tir.tir_
        them through borrowing trampolines ([Llvm_emit.clo_wrap_borrowed])
        without handing over a reference, so a capturing eta closure in their
        place was released once per message and underflowed. *)
-    let actor_glue =
-      List.fold_left
-        (fun acc td ->
-           match td with
-           | Tir.TDRecord (n, _) when Tir_names.is_actor_struct_name n ->
-             let a =
-               String.sub n 0 (String.length n - String.length Tir_names.actor_struct_suffix) in
-             List.fold_left (fun s sfx -> SSet.add (a ^ sfx) s) acc
-               [ Tir_names.actor_dispatch_suffix; Tir_names.actor_on_stop_suffix;
-                 Tir_names.actor_inspect_suffix; Tir_names.actor_spawn_suffix ]
-           | _ -> acc)
-        SSet.empty m.Tir.tm_types
-    in
+    let actor_glue = actor_glue_of m in
     let counter = ref 0 in
     let fresh prefix ty =
       incr counter;

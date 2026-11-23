@@ -1263,6 +1263,27 @@ let test_grant_iface_dispatch_kept () =
   let _, out, _ = grants_of generic_src [ ("Dep.describe", grant_of ()) ] in
   check_wrapped out "Dep.describe"
 
+let interp_src = {|mod A do
+  needs IO.Console
+  type Probe = Probe
+  impl Show(Probe) do
+    fn show(_p) do "probe" end
+  end
+  mod Dep do
+    fn bracket(x) do "[${x}]" end
+  end
+  fn main() do
+    println(Dep.bracket(Probe))
+  end
+end
+|}
+
+(* R1: interpolation on a type variable lowers to [to_string(x)], which mono
+   resolves to Show impls: the frame is kept, as for [show(x)]. *)
+let test_grant_interp_dispatch_kept () =
+  let _, out, _ = grants_of interp_src [ ("Dep.bracket", grant_of ()) ] in
+  check_wrapped out "Dep.bracket"
+
 let two_pkg_src = {|mod A do
   needs IO.Console
   mod Other do
@@ -1390,6 +1411,8 @@ let tests =
           test_grant_layer_names_injective;
         Alcotest.test_case "a generic interface call keeps the frame" `Quick
           test_grant_iface_dispatch_kept;
+        Alcotest.test_case "interpolation of a generic value keeps the frame" `Quick
+          test_grant_interp_dispatch_kept;
         Alcotest.test_case "a call into another granted package keeps its wrapper" `Quick
           test_grant_cross_package_keeps_wrapper;
         Alcotest.test_case "the grant wraps a needs frame" `Quick test_grant_around_needs_frame;
