@@ -1,9 +1,12 @@
 -- DEP: gate deps/gate none
 -- A dependency with no grant keeps today's behaviour (design §10, the
 -- `legacy` line): it gets no frame and is limited only by its own `needs`
--- and its caller's authority, so every path and kind the app may use (here
--- the launch request, which also holds `gate`'s IO.Process) is allowed to
--- `gate` too. `grant_refuses_scoped` is the same calls with a grant.
+-- and its caller's authority. Here the app runs with no launch grant and an
+-- unscoped request, which installs no launch layer, so the app's authority
+-- is unrestricted and so is the ungranted `gate`'s: even IO.Process, which
+-- the app never declares, is allowed (`gate`'s `needs` line does not widen
+-- the launch request). `grant_ungranted_dep_caller_limits` shows the caller's
+-- authority refusing; `grant_refuses_scoped` is the same calls with a grant.
 mod GrantUngrantedDepUnrestricted do
   needs IO.Console
   needs IO.FileRead

@@ -11595,7 +11595,17 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
        function has no capability row of its own), so a function reaching
        one is not proven by kind: natively its grant frame must stay, or
        the check would see the caller's whole authority (the interpreter
-       always frames). The stdlib's own checks are behind rows. *)
+       always frames). The stdlib's own checks are behind rows.
+       The match is on this exact resolved name, which is complete because
+       every route to a check from package code goes through it: a direct
+       call, a value use (`let f = Authority.check`), a lambda; `import` /
+       `alias` of Authority do not resolve, and the raw builtins
+       (`cap_check_raw`, `cap_layers`) are stdlib-only.  A stdlib key only
+       contributes its row, so this stays sound only while every stdlib
+       call of `Authority.check` names a literal kind (its row then holds
+       it): test_dep_grants "every stdlib Authority.check names a literal
+       kind" guards that.  A stdlib function forwarding a caller's kind
+       String would need adding here. *)
     let authority_check_key = "Authority.check" in
     let full_reach (start : string) : (string * string list) list * bool =
       let caps = Hashtbl.create 8 in

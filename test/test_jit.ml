@@ -417,6 +417,14 @@ let test_repl_session_fn_redefinition_interp () =
   check_redefinition ~label:"interpreter mode"
     (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" redefinition_session)
 
+(* Run [k] with fresh temp dirs named by [prefixes], removed afterwards. *)
+let with_temp_dirs (prefixes : string list) (k : string list -> unit) : unit =
+  let dirs = List.map (fun p -> Filename.temp_dir p "") prefixes in
+  Fun.protect
+    ~finally:(fun () ->
+        List.iter (fun d -> ignore (Sys.command ("rm -rf " ^ Filename.quote d))) dirs)
+    (fun () -> k dirs)
+
 (* ── A preloaded file reaches MARCH_LIB_PATH modules ──────────────────
    `march repl FILE` preloads FILE (as forge interactive and the cap
    conformance suite's REPL mode do).  Its imports used to be resolved with
@@ -427,8 +435,8 @@ let test_repl_session_fn_redefinition_interp () =
    the module. *)
 
 let test_repl_preload_lib_path_interp () =
-  let lib = Filename.temp_dir "march_repl_lib" "" in
-  let app = Filename.temp_dir "march_repl_app" "" in
+  with_temp_dirs [ "march_repl_lib"; "march_repl_app" ] @@ fun dirs ->
+  let lib = List.nth dirs 0 and app = List.nth dirs 1 in
   let write path s = let oc = open_out path in output_string oc s; close_out oc in
   write (Filename.concat lib "libmod.march")
     "mod Libmod do\n  fn hello() : String do \"hi from the lib path\" end\nend\n";
@@ -457,9 +465,8 @@ let test_repl_preload_lib_path_interp () =
    implement interface `Show`".  Here `Upper` (first on MARCH_LIB_PATH) calls
    `Lower`, and `Lower` holds the impl. *)
 let test_repl_preload_order_and_impls_interp () =
-  let a = Filename.temp_dir "march_repl_liba" "" in
-  let b = Filename.temp_dir "march_repl_libb" "" in
-  let app = Filename.temp_dir "march_repl_app" "" in
+  with_temp_dirs [ "march_repl_liba"; "march_repl_libb"; "march_repl_app" ] @@ fun dirs ->
+  let a = List.nth dirs 0 and b = List.nth dirs 1 and app = List.nth dirs 2 in
   let write path s = let oc = open_out path in output_string oc s; close_out oc in
   write (Filename.concat a "upper.march")
     "mod Upper do\n  fn up() : String do Lower.tag(\"up\") end\nend\n";

@@ -2310,23 +2310,9 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                      desugared.March_ast.Ast.mod_decls,
                      March_ast.Ast.dummy_span)
                  in
-                 let all_decls = extra_decls @ [file_mod] in
-                 List.iter (fun decl ->
-                   let input_ctx = March_errors.Errors.create () in
-                   let input_tc  = { !tc_env with errors = input_ctx } in
-                   let new_tc    = March_typecheck.Typecheck.check_decl input_tc decl in
-                   if not (March_errors.Errors.has_errors input_ctx) then begin
-                     (try
-                       env := March_eval.Eval.eval_decl !env decl;
-                       March_eval.Eval.install_global_tail !env;
-                       tc_env := { new_tc with errors = March_errors.Errors.create () }
-                     with _ -> ())
-                   end else
-                     List.iter (fun (d : March_errors.Errors.diagnostic) ->
-                       add_line Notty.A.(fg red)
-                         (Printf.sprintf "error: %s" d.message)
-                     ) (March_errors.Errors.sorted input_ctx)
-                 ) all_decls;
+                 (* The same loader as the first load: dependency order,
+                    module impls registered. *)
+                 tui_load_decls_list path (extra_decls @ [file_mod]);
                  add_line Notty.A.(fg green) (Printf.sprintf "reloaded %s" path))))
         | src when (let t = String.trim src in
                       (String.length t >= 8 && String.sub t 0 8 = ":inspect")

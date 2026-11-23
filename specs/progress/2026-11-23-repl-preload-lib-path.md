@@ -21,6 +21,10 @@ REPL's file loading (`lib/repl/repl.ml`), each also present without grants:
    which had the same fix for the stdlib) now also runs on each module the REPL
    loads.
 
+The TUI's `:reload` goes through the same loader (`tui_load_decls_list`) as
+the TUI's first load, so a reload keeps the dependency order and module impls
+(review follow-up). It has no automated test: the TUI needs a terminal.
+
 Tests: `test/test_jit.ml`, group `repl_session`, "a preloaded file reaches
 MARCH_LIB_PATH modules (interpreter)" and "a loaded file's modules load in
 dependency order, impls too (interpreter)". Both fail without the fix.

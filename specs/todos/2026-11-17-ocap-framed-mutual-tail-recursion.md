@@ -24,3 +24,10 @@ recursion crosses the boundary: a
 dropped P function (proven, unscoped) calling a kept one, a `$auth` body of a P function that
 also has a framed `needs` clause (its calls keep the wrapper names), and recursion that goes
 app → package → app callback → package.
+
+**Pinned by `test/cap_conformance/grant_callback_reentry.march` (ocap p6 Task 6).**
+It recurses app -> granted dep -> app callback -> dep only 1,000 deep: the kept
+grant frame around `Gate.bounce` is not a tail position, so 3,000 deep already
+overflows the stack compiled (`--opt 0`) and under node, while the same program
+with `gate` ungranted runs 10,000 deep as tail calls. Review Focus 3 asks for
+10,000: whoever lifts this limit raises the fixture's depth to 10,000.

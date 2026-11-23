@@ -633,6 +633,61 @@ let test_authority_check_not_proven () =
         Alcotest.failf "Peeker.peek (calls Authority.check) proven:\n%s" out;
       if not (proven "Peeker.twice") then Alcotest.failf "Peeker.twice (pure) not proven:\n%s" out)
 
+(* The guard behind [test_authority_check_not_proven]: the checker treats a
+   package's own reference to `Authority.check` as an unknown reach, but a
+   stdlib function contributes only its row.  That is sound while every
+   stdlib call of `Authority.check` names its kind as a literal (the row then
+   carries it).  A stdlib function forwarding a caller's kind String would
+   let a package ask about any kind through it, proven by kind, and natively
+   frameless under an unscoped grant.  So: every `Authority.check` in stdlib
+   code (comments stripped) is followed by an open paren and a string
+   literal. *)
+let test_stdlib_checks_name_literal_kinds () =
+  let stdlib = Filename.concat (Filename.dirname (Filename.dirname (fixtures ()))) "stdlib" in
+  let rec files d =
+    Array.to_list (Sys.readdir d)
+    |> List.concat_map (fun f ->
+        let p = Filename.concat d f in
+        if Sys.is_directory p then files p
+        else if Filename.check_suffix f ".march" then [ p ] else [])
+  in
+  let needle = "Authority.check" in
+  let nl = String.length needle in
+  let bad = ref [] in
+  List.iter (fun path ->
+      let ic = open_in_bin path in
+      let lines = String.split_on_char '\n' (really_input_string ic (in_channel_length ic)) in
+      close_in ic;
+      List.iteri (fun i line ->
+          let code =
+            match String.index_opt line '-' with
+            | Some _ ->
+              let rec cut j =
+                if j + 1 >= String.length line then line
+                else if line.[j] = '-' && line.[j + 1] = '-' then String.sub line 0 j
+                else cut (j + 1) in
+              cut 0
+            | None -> line in
+          let n = String.length code in
+          let rec scan j =
+            if j + nl <= n then begin
+              if String.sub code j nl = needle then begin
+                let k = j + nl in
+                let next_ident = k < n && (match code.[k] with
+                    | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true | _ -> false) in
+                if not next_ident && not (k + 2 <= n && String.sub code k 2 = "(\"") then
+                  bad := Printf.sprintf "%s:%d: %s" path (i + 1) (String.trim line) :: !bad
+              end;
+              scan (j + 1)
+            end in
+          scan 0)
+        lines)
+    (files stdlib);
+  if !bad <> [] then
+    Alcotest.failf
+      "a stdlib Authority.check without a literal kind (see the comment on this test):\n%s"
+      (String.concat "\n" (List.rev !bad))
+
 (* Fix round 3: a granted package that reaches another package's function
    through its own `import` is judged on that reach, and none of its
    functions on the way is proven. *)
@@ -964,6 +1019,8 @@ let tests =
         Alcotest.test_case "impls of a dep type" `Quick test_impl_of_dep_type;
         Alcotest.test_case "proven" `Quick test_proven;
         Alcotest.test_case "Authority.check is never proven" `Quick test_authority_check_not_proven;
+        Alcotest.test_case "every stdlib Authority.check names a literal kind" `Quick
+          test_stdlib_checks_name_literal_kinds;
         Alcotest.test_case "same-named methods elsewhere" `Quick test_same_named_methods;
         Alcotest.test_case "hint as written" `Quick test_hint_as_written;
         Alcotest.test_case "import inside a granted package" `Quick test_import_inside_package;
