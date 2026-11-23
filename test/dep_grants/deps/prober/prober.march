@@ -1,0 +1,24 @@
+-- An actor of a granted package: its handler is the package's code, so it
+-- runs under the grant whoever spawns it (the app here), intersected with
+-- the authority the actor was spawned under.  The check is written in the
+-- handler itself, so only the handler's own frame can refuse it.
+mod Prober do
+  needs IO.FileRead
+  needs IO.Spawn
+
+  type ProbeReq = ProbeReq
+
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+    on Probe(reply_to) do
+      let p = "/etc/" ++ "hosts"
+      let v = match Authority.check("IO.FileRead", p) do
+        Ok(_) -> "allowed " ++ p
+        Err(e) -> Authority.describe(e)
+      end
+      Actor.reply(reply_to, v)
+      state
+    end
+  end
+end

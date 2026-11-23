@@ -14,3 +14,13 @@ What to do: retarget a tail call between framed functions whose frames are alrea
 (the same clause on top) to the callee's `$auth` body, or make the wrapper's restore a
 continuation the callee's tail call can inherit. `test/cap_conformance/frame_reenter_noop`
 pins the self-recursive case; add a mutual one.
+
+**Dependency grants (ocap phase 6, plan decision 14).** `Auth_rt.grants` wraps a granted
+package's functions the same way (`f` enters the grant around `f$grant`). Inside the package
+the hop is free: a direct call from the body of a P function whose wrapper is kept targets the
+callee's `$grant` body, so a tail call between kept P functions is a plain tail call with no
+wrapper (as an unframed program's would be). A hop still costs a wrapper frame where the
+recursion crosses the boundary: a
+dropped P function (proven, unscoped) calling a kept one, a `$auth` body of a P function that
+also has a framed `needs` clause (its calls keep the wrapper names), and recursion that goes
+app → package → app callback → package.

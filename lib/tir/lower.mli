@@ -98,6 +98,11 @@ val fn_needs_tbl : (string, fn_needs) Hashtbl.t
     [lower_module] lowered ([Auth_rt.restricts]'s input). *)
 val restrict_sites : (string, Lower_state.restrict_site) Hashtbl.t
 
+(** Final TIR fn name -> its package's grant, for every fn the last
+    [lower_module] lowered that a granted dependency package defines
+    ([Auth_rt.grants]'s input; empty without a grants file). *)
+val fn_grant_tbl : (string, Lower_state.fn_grant) Hashtbl.t
+
 (** {1 Cross-run state}
 
     Lowering keeps module-level tables; a driver that lowers more than once in

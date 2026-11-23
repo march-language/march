@@ -1,0 +1,15 @@
+-- A dependency that checks a file path it computes: under a grant scoped to
+-- one directory, a path outside it is refused at run time by the grant (the
+-- static check sees no literal target).  It asks the authority directly, as
+-- the conformance fixtures do, so every target (JS too) can run it.
+mod Reader do
+  needs IO.FileRead
+
+  fn read_in(dir : String, name : String) : String do
+    let path = dir ++ "/" ++ name
+    match Authority.check("IO.FileRead", path) do
+    Ok(_) -> "allowed " ++ path
+    Err(e) -> Authority.describe(e)
+    end
+  end
+end

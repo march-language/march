@@ -179,6 +179,38 @@ let layer_ty (m : Tir.tir_module) : Tir.ty =
 
 let auth_ref_ty : Tir.ty = Tir.TCon ("CapAuthRef", [])
 
+(* [let l = layer() in let s = enter(l) in let r = inner in cap_restore(s);
+   r]: the frame every wrapper and grant prologue builds. *)
+let frame_around ~layer_ty ~auth_ty ~layer_name ~enter_name ~(ret_ty : Tir.ty)
+    ?(names = ("$auth_l", "$auth_saved", "$auth_result", "$auth_unit")) (inner : Tir.expr)
+  : Tir.expr =
+  let ln, sn, rn, un = names in
+  let l = var ln layer_ty in
+  let s = var sn auth_ty in
+  let r = var rn ret_ty in
+  let u = var un Tir.TUnit in
+  Tir.ELet
+    ( l, Tir.EApp (var layer_name (Tir.TFn ([], layer_ty)), []),
+      Tir.ELet
+        ( s, Tir.EApp (var enter_name (Tir.TFn ([ layer_ty ], auth_ty)), [ Tir.AVar l ]),
+          Tir.ELet
+            ( r, inner,
+              Tir.ELet
+                ( u, Tir.EApp (var "cap_restore" (Tir.TFn ([ auth_ty ], Tir.TUnit)), [ Tir.AVar s ]),
+                  Tir.EAtom (Tir.AVar r) ) ) ) )
+
+(* [f] as a wrapper that enters a frame around a call of [body_name] with
+   its own params. *)
+let wrapper_of ~layer_ty ~auth_ty ~layer_name ~enter_name ~body_name (f : Tir.fn_def) : Tir.fn_def =
+  let call =
+    Tir.EApp
+      ( var body_name
+          (Tir.TFn (List.map (fun (p : Tir.var) -> p.Tir.v_ty) f.Tir.fn_params, f.Tir.fn_ret_ty)),
+        List.map (fun p -> Tir.AVar p) f.Tir.fn_params )
+  in
+  { f with
+    Tir.fn_body = frame_around ~layer_ty ~auth_ty ~layer_name ~enter_name ~ret_ty:f.Tir.fn_ret_ty call }
+
 (** [f] as its framed wrapper, its body and its layer fn. *)
 let frame_fn ~layer_ty ~auth_ty (f : Tir.fn_def) (n : Lower_state.fn_needs) : Tir.fn_def list =
   let name = f.Tir.fn_name in
@@ -198,27 +230,8 @@ let frame_fn ~layer_ty ~auth_ty (f : Tir.fn_def) (n : Lower_state.fn_needs) : Ti
               Tir.ALit (March_ast.Ast.LitString n.Lower_state.fnn_text) ] );
       fn_kind = Tir.FnNormal }
   in
-  let l = var "$auth_l" layer_ty in
-  let s = var "$auth_saved" auth_ty in
-  let r = var "$auth_result" f.Tir.fn_ret_ty in
-  let u = var "$auth_unit" Tir.TUnit in
-  let wrapper_body =
-    Tir.ELet
-      ( l, Tir.EApp (var layer_name (Tir.TFn ([], layer_ty)), []),
-        Tir.ELet
-          ( s, Tir.EApp (var Tir_names.enter_fn_name (Tir.TFn ([ layer_ty ], auth_ty)), [ Tir.AVar l ]),
-            Tir.ELet
-              ( r,
-                Tir.EApp
-                  ( var body_name
-                      (Tir.TFn (List.map (fun (p : Tir.var) -> p.Tir.v_ty) f.Tir.fn_params,
-                                f.Tir.fn_ret_ty)),
-                    List.map (fun p -> Tir.AVar p) f.Tir.fn_params ),
-                Tir.ELet
-                  ( u, Tir.EApp (var "cap_restore" (Tir.TFn ([ auth_ty ], Tir.TUnit)), [ Tir.AVar s ]),
-                    Tir.EAtom (Tir.AVar r) ) ) ) )
-  in
-  let wrapper = { f with Tir.fn_body = wrapper_body } in
+  let wrapper =
+    wrapper_of ~layer_ty ~auth_ty ~layer_name ~enter_name:Tir_names.enter_fn_name ~body_name f in
   Provenance.record body_name ~from:name ~derived:(Provenance.Clone_of (name, "auth frame body"))
     ~pass:"auth_rt" ();
   Provenance.record layer_name ~from:name ~derived:(Provenance.Clone_of (name, "auth frame layer"))
@@ -405,6 +418,239 @@ let restricts (m : Tir.tir_module) ~(sites : (string, Lower_state.restrict_site)
             Tir.tm_fns =
               List.filter (fun (f : Tir.fn_def) -> not (SSet.mem f.Tir.fn_name gone)) fns },
           any_kept )
+    end
+  end
+
+(* ── Dependency grants (ocap phase 6, Task 4) ─────────────────────────
+
+   Every function defined in a granted package [P] runs under [P]'s grant
+   (design §10).  [Lower] tags each such fn in [Lower_state.fn_grant_tbl];
+   here each becomes
+
+   {v
+     f(args)        = let l = <P>$grant$auth_layer() in
+                      let s = Authority.enter_grant(l) in
+                      let r = f$grant(args) in
+                      cap_restore(s); r
+     f$grant(args)  = the original body, its direct calls of P fns whose
+                      wrappers are kept (not those in a lambda or local fn
+                      it makes) retargeted to their [$grant] bodies
+     <P>$grant$auth_layer() = Authority.grant_layer("<P>", "<grant text>")
+   v}
+
+   One layer fn per package: every call of it is built once per site
+   ([march_cap_layer_once], the JS memo), as a function frame's is.
+
+   Which calls enter the grant (plan decision 6): every call keeps the
+   wrapper's name, so it enters the frame (calls from the app, from other
+   packages, from stdlib code, including generic code that mono later
+   resolves to a P impl, and every value use), except a direct call in the
+   body of a P fn whose own wrapper is kept, outside any lambda: the grant
+   is certainly in force there.  A dropped caller keeps its callees'
+   wrapper names, so it never reaches a framed callee (one that spawns an
+   actor, say) without the grant.
+
+   When the frame is dropped (decision 7): a P fn keeps its wrapper unless
+   the grant carries no scope, the checker proved the fn's transitive row
+   within the grant ([fg_proven]) and the fn is in neither
+   [reaches_actor_spawn] nor [reaches_indirect_call].  A dropped fn is left
+   exactly as it was.
+
+   Module-level code (decision 9): a P module-let's zero-arg init fn is a P
+   fn like any other.  A lambda its initialiser makes captures nothing
+   ([captures]); it gets a grant prologue instead, the same frame around its
+   own body, so it runs as one of P's named functions would: under its
+   caller's authority intersected with the grant. *)
+
+(* [e] with every direct call of a fn in [targets] (a name -> body name
+   map) retargeted.  Only [e]'s own code: never inside an [ELetRec] (a
+   lambda or local fn, which may run after its maker returns), and not
+   under a local binder of the same name. *)
+let rec retarget_set (targets : (string, string) Hashtbl.t) (e : Tir.expr) : Tir.expr =
+  let go = retarget_set targets in
+  let shadowed (v : Tir.var) = Hashtbl.mem targets v.Tir.v_name in
+  match e with
+  | Tir.EApp (f, args) -> (
+    match Hashtbl.find_opt targets f.Tir.v_name with
+    | Some to_ -> Tir.EApp ({ f with Tir.v_name = to_ }, args)
+    | None -> e)
+  | Tir.ELet (v, a, b) ->
+    (* A local named like a target is not one: the rest keeps its calls. *)
+    Tir.ELet (v, go a, if shadowed v then b else go b)
+  | Tir.ESeq (a, b) -> Tir.ESeq (go a, go b)
+  | Tir.ELetRec (fns, b) ->
+    if List.exists (fun (fd : Tir.fn_def) -> Hashtbl.mem targets fd.Tir.fn_name) fns then e
+    else Tir.ELetRec (fns, go b)
+  | Tir.ECase (sc, brs, d) ->
+    Tir.ECase
+      ( sc,
+        List.map
+          (fun (br : Tir.branch) ->
+             if List.exists shadowed br.Tir.br_vars then br
+             else { br with Tir.br_body = go br.Tir.br_body })
+          brs,
+        Option.map go d )
+  | other -> other
+
+let grants (m : Tir.tir_module) ~(tbl : (string, Lower_state.fn_grant) Hashtbl.t)
+  : Tir.tir_module * bool =
+  if Hashtbl.length tbl = 0 then (m, false)
+  else begin
+    let entry =
+      Tir_names.entry_main_of_names (List.map (fun (f : Tir.fn_def) -> f.Tir.fn_name) m.Tir.tm_fns)
+    in
+    let grant_of (f : Tir.fn_def) =
+      if Some f.Tir.fn_name = entry then None else Hashtbl.find_opt tbl f.Tir.fn_name
+    in
+    let tagged = List.filter (fun f -> grant_of f <> None) m.Tir.tm_fns in
+    (* Whether [e] makes a module-initialiser lambda (anywhere in it). *)
+    let rec makes_init_lambda (e : Tir.expr) =
+      match e with
+      | Tir.ELetRec (fns, b) ->
+        List.exists
+          (fun (fd : Tir.fn_def) ->
+             Lower_state.is_module_init_lambda fd.Tir.fn_name || makes_init_lambda fd.Tir.fn_body)
+          fns
+        || makes_init_lambda b
+      | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> makes_init_lambda a || makes_init_lambda b
+      | Tir.ECase (_, brs, d) ->
+        List.exists (fun (br : Tir.branch) -> makes_init_lambda br.Tir.br_body) brs
+        || (match d with Some d -> makes_init_lambda d | None -> false)
+      | _ -> false
+    in
+    let spawners = lazy (reaches_actor_spawn m) in
+    let indirect = lazy (reaches_indirect_call m) in
+    let keeps (f : Tir.fn_def) (g : Lower_state.fn_grant) =
+      g.Lower_state.fg_scoped
+      || (not g.Lower_state.fg_proven)
+      || SSet.mem f.Tir.fn_name (Lazy.force spawners)
+      || SSet.mem f.Tir.fn_name (Lazy.force indirect)
+    in
+    let wrapped : (string, Lower_state.fn_grant) Hashtbl.t = Hashtbl.create 16 in
+    let prologued : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+    List.iter
+      (fun (f : Tir.fn_def) ->
+         let g = Option.get (grant_of f) in
+         if keeps f g then Hashtbl.replace wrapped f.Tir.fn_name g;
+         if makes_init_lambda f.Tir.fn_body then Hashtbl.replace prologued f.Tir.fn_name ())
+      tagged;
+    (* For the tests: each tagged fn, its proof bit and whether it is
+       wrapped (the proof bit is read across stages, by the checker's key). *)
+    if Sys.getenv_opt "MARCH_DUMP_GRANT_FRAMES" = Some "1" then
+      List.iter
+        (fun (f : Tir.fn_def) ->
+           let g = Option.get (grant_of f) in
+           Printf.eprintf "grant-frame %s pkg=%s proven=%b wrapped=%b\n%!" f.Tir.fn_name
+             g.Lower_state.fg_pkg g.Lower_state.fg_proven (Hashtbl.mem wrapped f.Tir.fn_name))
+        tagged;
+    if Hashtbl.length wrapped = 0 && Hashtbl.length prologued = 0 then (m, false)
+    else begin
+      let layer_ty = layer_ty m and auth_ty = auth_ref_ty in
+      (* One layer fn per package that has a frame, in first-use order. *)
+      let layers : (string * Lower_state.fn_grant) list ref = ref [] in
+      let layer_of (g : Lower_state.fn_grant) =
+        let name = Tir_names.grant_layer_fn_of g.Lower_state.fg_pkg in
+        if not (List.mem_assoc name !layers) then layers := (name, g) :: !layers;
+        name
+      in
+      let counter = ref 0 in
+      (* [e] with every module-initialiser lambda's body inside the grant
+         prologue of [g]. *)
+      let rec prologue (g : Lower_state.fn_grant) (e : Tir.expr) : Tir.expr =
+        let go = prologue g in
+        match e with
+        | Tir.ELetRec (fns, b) ->
+          let fns' =
+            List.map
+              (fun (fd : Tir.fn_def) ->
+                 let body = go fd.Tir.fn_body in
+                 if Lower_state.is_module_init_lambda fd.Tir.fn_name then begin
+                   incr counter;
+                   let k = !counter in
+                   let nm s = Printf.sprintf "$grant_%s%d" s k in
+                   { fd with
+                     Tir.fn_body =
+                       frame_around ~layer_ty ~auth_ty ~layer_name:(layer_of g)
+                         ~enter_name:Tir_names.enter_grant_name ~ret_ty:fd.Tir.fn_ret_ty
+                         ~names:(nm "l", nm "saved", nm "result", nm "unit") body }
+                 end
+                 else if body == fd.Tir.fn_body then fd
+                 else { fd with Tir.fn_body = body })
+              fns
+          in
+          Tir.ELetRec (fns', go b)
+        | Tir.ELet (v, a, b) -> Tir.ELet (v, go a, go b)
+        | Tir.ESeq (a, b) -> Tir.ESeq (go a, go b)
+        | Tir.ECase (sc, brs, d) ->
+          Tir.ECase
+            ( sc,
+              List.map (fun (br : Tir.branch) -> { br with Tir.br_body = go br.Tir.br_body }) brs,
+              Option.map go d )
+        | other -> other
+      in
+      (* The calls a kept P fn's body retargets: every kept fn of its own
+         package. *)
+      let targets_of : (string, (string, string) Hashtbl.t) Hashtbl.t = Hashtbl.create 4 in
+      let targets pkg =
+        match Hashtbl.find_opt targets_of pkg with
+        | Some t -> t
+        | None ->
+          let t = Hashtbl.create 16 in
+          Hashtbl.iter
+            (fun n (g : Lower_state.fn_grant) ->
+               if g.Lower_state.fg_pkg = pkg then
+                 Hashtbl.replace t n (n ^ Tir_names.grant_body_suffix))
+            wrapped;
+          Hashtbl.replace targets_of pkg t;
+          t
+      in
+      let fns =
+        List.concat_map
+          (fun (f : Tir.fn_def) ->
+             let name = f.Tir.fn_name in
+             match grant_of f with
+             | None -> [ f ]
+             | Some g ->
+               let body =
+                 if Hashtbl.mem prologued name then prologue g f.Tir.fn_body else f.Tir.fn_body in
+               if Hashtbl.mem wrapped name then begin
+                 let body_name = name ^ Tir_names.grant_body_suffix in
+                 let body_fn =
+                   { f with
+                     Tir.fn_name = body_name;
+                     fn_body = retarget_set (targets g.Lower_state.fg_pkg) body }
+                 in
+                 if Lower_state.is_module_init_fn name then
+                   Lower_state.note_module_init_body body_name;
+                 (* An actor handler's body keeps its declaring module. *)
+                 Option.iter (fun owner -> Handler_owner.register ~fn_name:body_name ~owner)
+                   (Handler_owner.owner_of name);
+                 Provenance.record body_name ~from:name
+                   ~derived:(Provenance.Clone_of (name, "grant frame body")) ~pass:"auth_rt" ();
+                 [ wrapper_of ~layer_ty ~auth_ty ~layer_name:(layer_of g)
+                     ~enter_name:Tir_names.enter_grant_name ~body_name f;
+                   body_fn ]
+               end
+               else if body == f.Tir.fn_body then [ f ]
+               else [ { f with Tir.fn_body = body } ])
+          m.Tir.tm_fns
+      in
+      let layer_fns =
+        List.rev_map
+          (fun (name, (g : Lower_state.fn_grant)) ->
+             { Tir.fn_name = name;
+               fn_params = [];
+               fn_ret_ty = layer_ty;
+               fn_body =
+                 Tir.EApp
+                   ( var Tir_names.grant_layer_builtin_name
+                       (Tir.TFn ([ Tir.TString; Tir.TString ], layer_ty)),
+                     [ Tir.ALit (March_ast.Ast.LitString g.Lower_state.fg_pkg);
+                       Tir.ALit (March_ast.Ast.LitString g.Lower_state.fg_text) ] );
+               fn_kind = Tir.FnNormal })
+          !layers
+      in
+      ({ m with Tir.tm_fns = fns @ layer_fns }, true)
     end
   end
 

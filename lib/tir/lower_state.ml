@@ -170,6 +170,50 @@ let note_fn_needs ~(final : string) ~(display : string) (def : Ast.fn_def) : uni
     Hashtbl.replace fn_needs_tbl final
       { fnn_name = display; fnn_text = text; fnn_scoped = scoped }
 
+(** A function of a granted dependency package (ocap phase 6), for
+    [Auth_rt.grants]: the package, its grant's canonical scope text, whether
+    that text carries a scope, and whether the type checker proved the fn's
+    transitive row within the grant ([March_caps.Dep_grants.proven]). *)
+type fn_grant = {
+  fg_pkg : string;
+  fg_text : string;
+  fg_scoped : bool;
+  fg_proven : bool;
+}
+
+(** Lowered (final TIR) fn name -> its package's grant, for every fn
+    defined in a granted package: its named fns, impl methods, module-level
+    lets (zero-arg init fns) and actor handlers and spawn glue.  Empty
+    without a grants file.  Reset per [lower_module], with [fn_needs_tbl]. *)
+let fn_grant_tbl : (string, fn_grant) Hashtbl.t = Hashtbl.create 8
+
+(** Record the TIR fn [final], defined in [file], under its package's grant
+    when [file] lies in a granted package.  [key] is the type checker's
+    capability key for it (the module path and the source name joined by
+    ["."], as [March_caps.Dep_grants.proven] is keyed); [None] for a fn the
+    checker keys no row for (actor glue), which is then never proven.
+    Without a grants file this reads nothing. *)
+let note_fn_grant ~(final : string) ~(key : string option) ~(file : string) : unit =
+  match March_caps.Dep_grants.active () with
+  | [] -> ()
+  | _ -> (
+    match March_caps.Dep_grants.package_of_file file with
+    | None -> ()
+    | Some g ->
+      Hashtbl.replace fn_grant_tbl final
+        { fg_pkg = g.March_caps.Dep_grants.g_pkg;
+          fg_text = g.March_caps.Dep_grants.g_text;
+          fg_scoped = g.March_caps.Dep_grants.g_scoped;
+          fg_proven =
+            (match key with
+             | Some k -> Hashtbl.mem March_caps.Dep_grants.proven k
+             | None -> false) })
+
+(** [Auth_rt.grants] moved a module-initialiser fn's body to [body]: the
+    body is module-initialiser code too ([is_module_init_fn]). *)
+let note_module_init_body (body : string) : unit =
+  Hashtbl.replace _module_init_fns body ()
+
 (** A [restrict] block (ocap phase 5), for [Auth_rt.restricts]: where it is
     ([<source basename>:<line>] of the [restrict] keyword, the text its
     refusals report as [ByRestrict(where)]), its canonical scope text when

@@ -813,6 +813,26 @@ let frame_layer_fn_name = "Authority.frame_layer"
 let is_auth_layer_fn (name : string) : bool =
   String.ends_with ~suffix:auth_layer_suffix name
 
+(** Dependency grants (ocap phase 6, [Auth_rt.grants]).  A fn of a granted
+    package [p] keeps its name as the wrapper that enters the grant's frame;
+    its body moves to [f ^ grant_body_suffix].  The package's layer is built
+    by the zero-arg [grant_layer_fn_of p] (an [is_auth_layer_fn], so it is
+    built once per call site like a function frame's) with
+    [Authority.grant_layer] and entered with [Authority.enter_grant]. *)
+let grant_body_suffix = "$grant"
+let enter_grant_name = "Authority.enter_grant"
+let grant_layer_builtin_name = "Authority.grant_layer"
+
+(** [<p>$grant$auth_layer], [p] with every byte outside [A-Za-z0-9_]
+    replaced by ['_'] (a forge dep name may hold ['-'], which neither an
+    LLVM nor a JS identifier takes). *)
+let grant_layer_fn_of (pkg : string) : string =
+  String.map
+    (fun c ->
+       match c with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> c | _ -> '_')
+    pkg
+  ^ grant_body_suffix ^ auth_layer_suffix
+
 (** The program entry among a module's fn names (in [tm_fns] order): a bare
     [main] if there is one, otherwise the last module-qualified [Mod.main].
     The one rule every backend applies (native, [--jit], JS) and that [Lower]

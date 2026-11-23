@@ -650,6 +650,106 @@ let test_same_type_name () =
       if has_sub out "[dep_grant_" then
         Alcotest.failf "a dep_grant diagnostic for the app's own Box:\n%s" out)
 
+(* ── Task 4: the native grant frames ([March_tir.Auth_rt.grants]) ────────
+
+   [build_in] compiles [file] as [check_in] checks it (same project
+   directory, private HOME, MARCH_LIB_PATH and grants file), natively or to
+   JS, and returns the build's exit code and output; [run_built] runs what
+   it built. *)
+
+let build_in ?(env = "") ~target ~libs d file : int * string =
+  let out = Filename.concat d "build.out" in
+  let grants = Filename.concat d "dep-grants" in
+  let flags, prog =
+    match target with
+    | `Native -> ("--compile -o ./prog", "./prog")
+    | `Js -> ("--target js -o ./prog.mjs", "./prog.mjs")
+  in
+  (try Sys.remove (Filename.concat d prog) with Sys_error _ -> ());
+  let cmd =
+    Printf.sprintf "cd %s && %s HOME=%s MARCH_LIB_PATH=%s %s %s %s %s > %s 2>&1"
+      (Filename.quote d) env (Filename.quote (Lazy.force private_home))
+      (Filename.quote (String.concat ":" libs))
+      (if Sys.file_exists grants then "MARCH_DEP_GRANTS=" ^ Filename.quote grants else "")
+      (Filename.quote (main_exe ())) flags (Filename.quote file) (Filename.quote out) in
+  let code = Sys.command cmd in
+  let ic = open_in_bin out in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  (code, s)
+
+let run_built ~target d : string =
+  let out = Filename.concat d "run.out" in
+  let cmd =
+    Printf.sprintf "cd %s && %s > %s 2>&1; echo \"exit $?\" >> %s" (Filename.quote d)
+      (match target with `Native -> "./prog" | `Js -> "node ./prog.mjs")
+      (Filename.quote out) (Filename.quote out) in
+  ignore (Sys.command cmd);
+  let ic = open_in_bin out in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  s
+
+let have_node = lazy (Sys.command "command -v node >/dev/null 2>&1" = 0)
+
+(* A scoped grant: the dependency computes a path outside it, and the
+   compiled program (native, and JS under node) gets the grant's refusal. *)
+let test_scoped_refusal_runs () =
+  with_reset (fun () ->
+      let r = dep "reader" in
+      let d = project ~grants:[ ("reader", r, "IO.FileRead(\"/srv/data\")") ] () in
+      let want =
+        "allowed /srv/data/x\n\
+         IO.FileRead(\"/etc/hosts\") refused by the grant to package reader \
+         (IO.FileRead(\"/srv/data\"))\nexit 0\n" in
+      let targets = `Native :: (if Lazy.force have_node then [ `Js ] else []) in
+      List.iter (fun target ->
+          let what = match target with `Native -> "native" | `Js -> "js" in
+          let code, out = build_in ~target ~libs:[ r ] d (app "scoped_refusal") in
+          if code <> 0 then Alcotest.failf "%s build failed (exit %d):\n%s" what code out;
+          Alcotest.(check string) what want (run_built ~target d))
+        targets)
+
+(* A granted package's actor, spawned by the app: its handler and init
+   are the package's code and are wrapped, so the handler is refused what
+   the grant refuses, while main keeps its own authority.  Native only:
+   the JS target has no actors. *)
+let test_actor_handler_under_grant () =
+  with_reset (fun () ->
+      let p = dep "prober" in
+      let d = project ~grants:[ ("prober", p, "IO.FileRead(\"/srv/data\"), IO.Spawn") ] () in
+      let code, out =
+        build_in ~env:"MARCH_DUMP_GRANT_FRAMES=1" ~target:`Native ~libs:[ p ] d
+          (app "actor_refusal") in
+      if code <> 0 then Alcotest.failf "build failed (exit %d):\n%s" code out;
+      List.iter (fun line ->
+          if not (has_sub out (line ^ "\n")) then Alcotest.failf "no %S in:\n%s" line out)
+        [ "grant-frame Worker_Probe pkg=prober proven=false wrapped=true";
+          "grant-frame Worker_spawn pkg=prober proven=false wrapped=true" ];
+      if has_sub out "grant-frame Worker_dispatch" then
+        Alcotest.failf "the dispatch glue was tagged:\n%s" out;
+      Alcotest.(check string) "native"
+        "IO.FileRead(\"/etc/hosts\") refused by the grant to package prober \
+         (IO.FileRead(\"/srv/data\"), IO.Spawn)\nmain: allowed\nexit 0\n"
+        (run_built ~target:`Native d))
+
+(* The proof bit crosses stages by the checker's key: the lowering reads
+   [Dep_grants.proven] by the fn's module path and name.  Under an unscoped
+   grant a proven fn's frame is dropped and an unproven one's kept. *)
+let test_proof_bit_read () =
+  with_reset (fun () ->
+      let m = dep "mixed" in
+      let d = project ~grants:[ ("mixed", m, "IO.Clock") ] () in
+      let code, out =
+        build_in ~env:"MARCH_DUMP_GRANT_FRAMES=1" ~target:`Native ~libs:[ m ] d (app "mixed") in
+      if code <> 0 then Alcotest.failf "build failed (exit %d):\n%s" code out;
+      List.iter (fun line ->
+          if not (has_sub out (line ^ "\n")) then
+            Alcotest.failf "no %S in:\n%s" line out)
+        [ "grant-frame Mixed.tick pkg=mixed proven=true wrapped=false";
+          "grant-frame Mixed.shout pkg=mixed proven=false wrapped=true";
+          "grant-frame Mixed.first_of pkg=mixed proven=false wrapped=true" ])
+
 let tests =
   [ ( "dep_grants",
       [ Alcotest.test_case "load_none" `Quick test_load_none;
@@ -686,4 +786,11 @@ let tests =
         Alcotest.test_case "same-named methods elsewhere" `Quick test_same_named_methods;
         Alcotest.test_case "hint as written" `Quick test_hint_as_written;
         Alcotest.test_case "import inside a granted package" `Quick test_import_inside_package;
-        Alcotest.test_case "same type name in the app" `Quick test_same_type_name ] ) ]
+        Alcotest.test_case "same type name in the app" `Quick test_same_type_name ] );
+    ( "frames",
+      [ Alcotest.test_case "a scoped grant refuses at run time, native and JS" `Quick
+          test_scoped_refusal_runs;
+        Alcotest.test_case "the proof bit is read by the checker's key" `Quick
+          test_proof_bit_read;
+        Alcotest.test_case "a dep actor's handler runs under the grant" `Quick
+          test_actor_handler_under_grant ] ) ]

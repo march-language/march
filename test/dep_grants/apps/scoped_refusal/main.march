@@ -1,0 +1,8 @@
+mod Main do
+  needs IO.Console, IO.FileRead
+
+  fn main() do
+    println(Reader.read_in("/srv/data", "x"))
+    println(Reader.read_in("/etc", "hosts"))
+  end
+end

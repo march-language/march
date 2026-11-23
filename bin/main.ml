@@ -4976,7 +4976,12 @@ let compile filename =
       March_tir.Auth_rt.restricts tir ~sites:March_tir.Lower.restrict_sites in
     let tir, frames_kept =
       March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
-    let has_frames = frames_kept || restricts_kept in
+    (* Ocap phase 6: a granted dependency package's fns run under its grant
+       ([Auth_rt.grants]); with no grants file the table is empty and this is
+       the identity. *)
+    let tir, grants_kept =
+      March_tir.Auth_rt.grants tir ~tbl:March_tir.Lower.fn_grant_tbl in
+    let has_frames = frames_kept || restricts_kept || grants_kept in
     let tir = March_tir.Auth_rt.captures tir ~has_frames ~repl:false in
     (* Ocap phase 4, Task 4b: a native binary judges capability operations
        with the C runtime's copy of the Authority policy
