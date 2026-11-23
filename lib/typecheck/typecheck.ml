@@ -11288,6 +11288,7 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
             in
             match by_alias with
             | Some k -> Some k
+            | None when m <> "" && Option.is_some (known (m ^ "." ^ w)) -> known (m ^ "." ^ w)
             | None ->
               List.find_map (fun i ->
                   match known (i ^ "." ^ w) with
@@ -11478,6 +11479,16 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
         (bodies_of owner);
       List.rev !out
     in
+    (* (method, type) of every impl outside the packages: a package impl for
+       the same method and type name is then not told apart by the short
+       type name the impl keys carry, so it is not counted (under-
+       approximation, as above). *)
+    let outside_impls : (string * string, string) Hashtbl.t = Hashtbl.create 64 in
+    List.iter (fun k ->
+        match impl_of k with
+        | Some (m, _, Some ty) -> Hashtbl.add outside_impls (m, ty) k
+        | _ -> ())
+      (Hashtbl.fold (fun k _ acc -> k :: acc) rows []);
     let short c = match String.rindex_opt c '.' with
       | Some i -> String.sub c (i + 1) (String.length c - i - 1) | None -> c in
     List.iter (fun k ->
@@ -11499,19 +11510,17 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
         in
         List.iter (fun w ->
             let resolved = resolve k w in
-            let plain_fn =
-              match resolved with
-              | Some r -> Hashtbl.mem env.fn_row_bodies r
-              | None -> false
-            in
             (* The dispatch nodes this name may call: the one it resolves to,
-               or, for a bare name that is no plain function here, every
+               or, for a bare name that resolves to nothing here, every
                package's node of that method name. *)
             let nodes =
               match resolved with
               | Some r when Hashtbl.mem dispatch_keys r ->
                 List.filter (fun (d, _) -> d = r) (Hashtbl.find_all dispatch_nodes (short r))
-              | _ when (not (String.contains w '.')) && not plain_fn ->
+              (* Only a name that resolves to nothing here: one that names
+                 the outside code's own function or method (its own
+                 dispatch node) calls that, whatever the argument type. *)
+              | None when not (String.contains w '.') ->
                 Hashtbl.find_all dispatch_nodes w
               | _ -> []
             in
@@ -11530,7 +11539,10 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
                     List.iter (fun (d, p) ->
                         List.iter (fun t ->
                             match impl_of t with
-                            | Some (_, _, Some ty) when ty = c || ty = short c ->
+                            | Some (m, _, Some ty)
+                              when (ty = c || ty = short c)
+                                   && not (List.exists (fun o -> pkg_of_key o <> Some p)
+                                             (Hashtbl.find_all outside_impls (m, ty))) ->
                               push p t sp Ref_call w
                             | _ -> ())
                           (List.filter_map (resolve d) (refs_of d)))
@@ -11538,6 +11550,88 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
                 (typed_calls k w))
           (refs_of k))
       outside_keys;
+    let seed_unknown =
+      let memo = Hashtbl.create 64 in
+      fun k ->
+        match Hashtbl.find_opt memo k with
+        | Some b -> b
+        | None ->
+          let b =
+            match Hashtbl.find_opt env.fn_row_bodies k with
+            | Some bodies -> (March_caps.Cap_rows.seed_of_bodies bodies).March_caps.Cap_rows.sd_unknown
+            | None -> false
+          in
+          Hashtbl.replace memo k b;
+          b
+    in
+    (* A key's whole reach, resolved as [resolve] resolves (imports and
+       aliases too), not as the shared rows do: the rows miss a call a
+       package makes through its own `import` (`import Shout` then
+       `log(..)`), and a package function proven on a truncated row would
+       lose its run-time frame (decision 7).  Non-stdlib keys are walked; a
+       stdlib key contributes its solved row (the stdlib calls into no
+       package).  A reference that resolves to nothing and is no builtin is
+       an unknown target: such a function is never proven.  Returns each
+       reached capability with the path to the key that holds it (the
+       start excluded), and whether the reach is unknown. *)
+    let builtin_names = Hashtbl.create 512 in
+    List.iter (fun (n, _) -> Hashtbl.replace builtin_names n ())
+      (Typecheck_builtins.builtin_bindings @ Typecheck_builtins.builtin_interface_bindings);
+    let stdlib_unknown =
+      let memo = Hashtbl.create 64 in
+      fun q ->
+        match Hashtbl.find_opt memo q with
+        | Some b -> b
+        | None ->
+          let b =
+            March_caps.Cap_rows.reaches_unknown ~scopes:env.fn_scopes ~known:rows
+              ~refs:env.fn_refs ~seed_unknown q
+          in
+          Hashtbl.replace memo q b;
+          b
+    in
+    let full_reach (start : string) : (string * string list) list * bool =
+      let caps = Hashtbl.create 8 in
+      let order = ref [] in
+      let note c path =
+        if not (Hashtbl.mem caps c) then begin
+          Hashtbl.replace caps c path;
+          order := c :: !order
+        end
+      in
+      let unknown = ref false in
+      let visited = Hashtbl.create 32 in
+      let queue = Queue.create () in
+      Queue.push (start, []) queue;
+      while not (Queue.is_empty queue) do
+        let v, path = Queue.pop queue in
+        if not (Hashtbl.mem visited v) then begin
+          Hashtbl.replace visited v ();
+          List.iter (fun c -> note c path)
+            (Option.value ~default:[] (Hashtbl.find_opt env.own_cap_closures v));
+          if seed_unknown v then unknown := true;
+          List.iter (fun w ->
+              match resolve v w with
+              | Some q when Hashtbl.mem env.stdlib_fns q ->
+                (match Hashtbl.find_opt rows q with
+                 | Some row ->
+                   List.iter (fun c -> note c (path @ [ q ])) row.March_caps.Cap_rows.caps
+                 | None -> ());
+                if stdlib_unknown q then unknown := true
+              | Some q -> if not (Hashtbl.mem visited q) then Queue.push (q, path @ [ q ]) queue
+              | None -> if not (Hashtbl.mem builtin_names w) then unknown := true)
+            (refs_of v)
+        end
+      done;
+      (List.rev_map (fun c -> (c, Hashtbl.find caps c)) !order, !unknown)
+    in
+    let full_reach =
+      let memo = Hashtbl.create 32 in
+      fun k ->
+        match Hashtbl.find_opt memo k with
+        | Some r -> r
+        | None -> let r = full_reach k in Hashtbl.replace memo k r; r
+    in
     (* ── Judge each grant ── *)
     let covered ks c = List.exists (fun b -> cap_subsumes b c) ks in
     let outside ks c = cap_subsumes "IO" c && not (covered ks c) in
@@ -11574,20 +11668,10 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
         in
         let seen = Hashtbl.create 4 in
         List.iter (fun (r, sp, caller) ->
-            match Hashtbl.find_opt rows r with
-            | None -> ()
-            | Some row ->
-              List.iter (fun c ->
+              let reached, _ = full_reach r in
+              List.iter (fun (c, path) ->
                   if outside ks c && not (Hashtbl.mem seen c) then begin
                     Hashtbl.replace seen c ();
-                    let path =
-                      match Hashtbl.find_opt env.own_cap_closures r with
-                      | Some own when List.mem c own -> []
-                      | _ -> (
-                        match cap_reach_chain env ~from:r ~cap:c with
-                        | Some p -> p
-                        | None -> [])
-                    in
                     let chain = chain_head r caller @ List.map shown path in
                     let holder =
                       subject (match List.rev path with h :: _ -> h | [] -> r) in
@@ -11596,7 +11680,7 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
                       (Printf.sprintf "`%s` is granted `%s`, but %s needs `%s` (`%s`)."
                          pkg g.G.g_text holder c (render_cap_chain chain))
                   end)
-                (List.sort_uniq String.compare row.March_caps.Cap_rows.caps))
+                (List.sort (fun (a, _) (b, _) -> String.compare a b) reached))
           roots;
         (* Literal targets under a scoped grant (Q3): every non-stdlib
            function the reach gets to, scanned once, charged to the first
@@ -11640,28 +11724,15 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
         end)
       grants;
     (* ── What the frame-drop rule may rely on (decision 7) ── *)
-    let seed_unknown =
-      let memo = Hashtbl.create 64 in
-      fun k ->
-        match Hashtbl.find_opt memo k with
-        | Some b -> b
-        | None ->
-          let b =
-            match Hashtbl.find_opt env.fn_row_bodies k with
-            | Some bodies -> (March_caps.Cap_rows.seed_of_bodies bodies).March_caps.Cap_rows.sd_unknown
-            | None -> false
-          in
-          Hashtbl.replace memo k b;
-          b
-    in
     Hashtbl.iter (fun k (row : March_caps.Cap_rows.row) ->
         match pkg_of_key k with
         | None -> ()
         | Some p ->
           let ks = Option.value ~default:[] (Hashtbl.find_opt kinds p) in
+          let reached, unknown = full_reach k in
           if not (List.exists (outside ks) row.March_caps.Cap_rows.caps)
-             && not (March_caps.Cap_rows.reaches_unknown ~scopes:env.fn_scopes ~known:rows
-                       ~refs:env.fn_refs ~seed_unknown k)
+             && not (List.exists (fun (c, _) -> outside ks c) reached)
+             && not unknown
           then Hashtbl.replace G.proven k ())
       rows;
     (* For the tests (and Task 4's reader): the proven keys, one per line. *)

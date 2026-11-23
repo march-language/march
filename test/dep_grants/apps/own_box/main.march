@@ -1,0 +1,18 @@
+mod Main do
+  -- The same type name as the dependency's `Loud.Box`, and an interface
+  -- method of the same name as its `Announce.announce`.
+  type Box = MyBox(Int)
+
+  interface Speak(a) do
+    fn announce : a -> String
+  end
+
+  impl Speak(Box) do
+    fn announce(_b) do "mine" end
+  end
+
+  fn main() do
+    let _ = announce(MyBox(1))
+    ()
+  end
+end

@@ -1,0 +1,17 @@
+-- Reaches an ungranted package's printing function through its own import.
+mod Wrapper do
+  needs IO.Console
+  import Shout
+  type Bag = Bag(Int)
+  interface Say(a) do
+    fn say : a -> Int
+  end
+  impl Say(Bag) do
+    fn say(_b) do
+      log("say")
+      1
+    end
+  end
+  fn go() do log("go") end
+  fn bag() do Bag(1) end
+end

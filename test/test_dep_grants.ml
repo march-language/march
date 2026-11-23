@@ -618,6 +618,38 @@ let test_proven () =
       if proven "Mixed.shout" then Alcotest.failf "Mixed.shout (IO.Console) proven:\n%s" out;
       if proven "Mixed.first_of" then Alcotest.failf "Mixed.first_of (unknown) proven:\n%s" out)
 
+(* Fix round 3: a granted package that reaches another package's function
+   through its own `import` is judged on that reach, and none of its
+   functions on the way is proven. *)
+let test_import_inside_package () =
+  with_reset (fun () ->
+      let w = dep "wrapper" and s = dep "shout" in
+      let d = project ~grants:[ ("wrapper", w, "()") ] () in
+      let code, out =
+        check_in ~env:"MARCH_DUMP_DEP_PROVEN=1" ~libs:[ w; s ] d (app "wrapper") in
+      expect_fail "Wrapper calls Shout.log through `import Shout`" ~code:"dep_grant_exceeded"
+        ~mentions:[ "`Shout.log` needs `IO.Console`";
+                    "Main.main \xe2\x86\x92 Wrapper.go \xe2\x86\x92 Shout.log" ]
+        (code, out);
+      let proven k = has_sub out ("dep-proven " ^ k ^ "\n") in
+      List.iter (fun k ->
+          if proven k then Alcotest.failf "%s is proven on a truncated row:\n%s" k out)
+        [ "Wrapper.go"; "Wrapper.Say$Bag.say" ];
+      if not (proven "Wrapper.bag") then
+        Alcotest.failf "Wrapper.bag (pure) not proven:\n%s" out)
+
+(* The app's own type named like the package's, with an impl of a method
+   named like the package's: the package impl is not counted. (The module
+   ceiling misreports this program independently of grants:
+   specs/todos/2026-11-22-cap-ceiling-same-type-name-impl-overattribution.md.) *)
+let test_same_type_name () =
+  with_reset (fun () ->
+      let l = dep "loud" in
+      let d = project ~grants:[ ("loud", l, "()") ] () in
+      let _, out = check_in ~libs:[ l ] d (app "own_box") in
+      if has_sub out "[dep_grant_" then
+        Alcotest.failf "a dep_grant diagnostic for the app's own Box:\n%s" out)
+
 let tests =
   [ ( "dep_grants",
       [ Alcotest.test_case "load_none" `Quick test_load_none;
@@ -652,4 +684,6 @@ let tests =
         Alcotest.test_case "impls of a dep type" `Quick test_impl_of_dep_type;
         Alcotest.test_case "proven" `Quick test_proven;
         Alcotest.test_case "same-named methods elsewhere" `Quick test_same_named_methods;
-        Alcotest.test_case "hint as written" `Quick test_hint_as_written ] ) ]
+        Alcotest.test_case "hint as written" `Quick test_hint_as_written;
+        Alcotest.test_case "import inside a granted package" `Quick test_import_inside_package;
+        Alcotest.test_case "same type name in the app" `Quick test_same_type_name ] ) ]
