@@ -26,3 +26,5 @@ end
 ```
 
 The parity test skips `ceiling_value` under `march_check` until this is fixed.
+
+Update 2026-11-22 (`40f901bab`): still reproduces on the current `ceiling_value` fixture text (`--check` exits 0, `march check` exits 1 with ``Unknown module `Inner` ``). The reported site is now the `apply1` call inside `Inner.go` (9:27), not `Inner.go()` in `main`.
