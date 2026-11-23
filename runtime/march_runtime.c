@@ -12477,9 +12477,6 @@ static void *mk_err(void *msg_str) {
 static void *mk_err_cstr(const char *msg) {
     return mk_err(march_string_lit(msg, (int64_t)strlen(msg)));
 }
-static void *mk_err_errno(void) {
-    return mk_err_cstr(strerror(errno));
-}
 
 /* FileError tags (must match stdlib/file.march ptype declaration order):
    NotFound=0, Permission=1, IsDirectory=2, NotEmpty=3, IoError=4, Closed=5,
@@ -13808,16 +13805,42 @@ static void **csv_parse_row_fields(FILE *f, char delim, int rfc4180,
     return fields;
 }
 
+/* Csv.CsvError = FileError(String) | CsvParseError(String) (stdlib/csv.march
+ * ptype declaration order: FileError = tag 0).  csv_open is typed
+ * Result(Int, CsvError), so its Err payload must be a real CsvError cell, not
+ * a bare string: an earlier Err(strerror(errno)) here made compiled
+ * `Csv.read_all` return Err(<strerror>), which printed without the
+ * constructor and never matched a `Csv.FileError(m)` arm.  The header is
+ * stamped with Csv.CsvError's type id so compiled `to_string` renders the
+ * constructor name (see file_error_type_id above). */
+#define CSVERR_FILE_ERROR 0
+static int32_t csv_error_type_id(void) {
+    static int32_t id = 0;
+    return march_type_id_memo(&id, "Csv.CsvError");
+}
+/* Err(FileError("<path>: <strerror>")): the interpreter's csv_open_impl
+   (lib/eval/eval_net.ml) wraps OCaml's Sys_error message, which open_in
+   formats as "<path>: <reason>". */
+static void *mk_err_csv_file_error(const char *path) {
+    char buf[1024];
+    snprintf(buf, sizeof(buf), "%s: %s", path, strerror(errno));
+    void *cell = march_alloc(24); /* header(16) + 1 field(8) */
+    MARCH_SET_TAG(cell, CSVERR_FILE_ERROR);
+    ((march_hdr *)cell)->pad = csv_error_type_id();
+    MARCH_FIELD(cell, 0) = (int64_t)march_string_lit(buf, (int64_t)strlen(buf));
+    return mk_err(cell);
+}
+
 void *march_csv_open(void *path_ptr, void *delim_ptr, void *mode_ptr) {
     (void)mode_ptr; /* mode stored but we always use rfc4180 for now */
     march_string *ps = (march_string *)path_ptr;
     march_string *ds = (march_string *)delim_ptr;
     FILE *f = fopen(ps->data, "rb");
-    if (!f) return mk_err_errno();
+    if (!f) return mk_err_csv_file_error(ps->data);
     char delim = (ds->len > 0) ? ds->data[0] : ',';
     /* A table handle (see fh_open): FILE*, delimiter, rfc4180 mode. */
     int64_t h = fh_open(f, delim, 1);
-    if (h == 0) { fclose(f); errno = EMFILE; return mk_err_errno(); }
+    if (h == 0) { fclose(f); errno = EMFILE; return mk_err_csv_file_error(ps->data); }
     return mk_ok((void *)(intptr_t)h);
 }
 
