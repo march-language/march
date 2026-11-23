@@ -14,3 +14,10 @@ describes the real behaviour and points to `String.to_codepoints`
 Decide: keep byte splitting (documented hazard), split into codepoints or graphemes
 (probably what a reader expects), or return `[s]` as the old doc claimed. Any change
 is user-visible: CHANGELOG `### Changed`, and update the `split` doctest.
+
+## Decision (2026-11-23, owner)
+
+Split into code points: one string per UTF-8 code point, and an invalid byte is a piece of its
+own. C and OCaml step by sequence length, JS uses `Array.from(s)`, and the WASM stub changes too.
+First migrate `Msgpack.str_to_bytes` (`stdlib/msgpack.march`, about line 98) to `string_byte_at`:
+it relies on today's byte split.

@@ -12,3 +12,14 @@ reaches `map`, so `println` inherits `IO.FileRead`. The same keying also feeds p
 What to do: key capability rows by module-qualified name for Prelude/stdlib fns (as other
 modules' fns already are), and pin it with a `test_restrict_reach` case and a `needs`-bound
 case using a user fn named `map`.
+
+## To check when fixing (added 2026-11-23)
+
+A reading of `record_body_caps` (lib/typecheck/typecheck_caps.ml, about line 1085) suggests the
+shared key is also added to `env.stdlib_fns` when the Prelude function's span is seen, which
+would make a user function of the same name transparent to the `--check` ceiling
+(`check_stdlib_mediated_ceiling`), not only merge the rows. This is not confirmed: a user
+`fn map` that calls `println` in a module with no `needs` line is still reported (`cap_needs`,
+tried on a build of `4744a0830`). The ceiling path through a nested module was not tried. The
+same bare-name match exists in lib/driver/cap_static.ml (`prelude_fns`); fix the three places
+together.

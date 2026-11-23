@@ -12,3 +12,10 @@ Actual (interpreted / compiled): by source reading only (needs a WebSocket peer)
 Source: `select`, stdlib/websocket.march; `march_ws_recv`, `march_ws_select`, runtime/march_http.c.
 
 Found by the 2026-10-18 doc sweep; re-verified 2026-11-11 on a7110f95f.
+
+## Decision (2026-11-23, owner)
+
+Remove `ActorMsg` from `SelectResult`. It is breaking, so it ships with the handle and server
+API reshape (unit U6 in `specs/plans/2026-11-23-pre-1.0-bug-first-plan.md`); renumber the tags
+`march_ws_select` hard-codes in the same change. Reassembly of fragmented messages does not depend
+on this and can land first.

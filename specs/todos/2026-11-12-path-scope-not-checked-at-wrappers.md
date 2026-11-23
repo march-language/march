@@ -1,4 +1,4 @@
-# A path-scoped `needs IO.FileRead(...)` is not enforced at the stdlib wrappers (2026-11-12)
+# A nested module's path-scoped `needs IO.FileRead(...)` is not enforced at run time (2026-11-12)
 
 Found in review of ocap phase 2b, Task 10. The path scope is checked only where a program
 calls a file builtin DIRECTLY with a literal path (`path_arg_builtins` /
@@ -39,3 +39,20 @@ maps each path builtin's stdlib entry points (`File.read`, `File.open`,
 a `cap_scope_violation` at `"/etc/hosts"`. Still open here: whether the run-time
 `Authority.check` judges the path against the module's scope, and the reject
 fixture.
+
+## Update (2026-11-22, re-checked on `40f901bab`)
+
+What is left is one case. Closed since the last update:
+
+- The reject fixture exists: `test/test_cap_mode_parity.ml` runs `path_scope` through
+  `File.read` and expects `cap_scope_violation`.
+- The entry module's scope is enforced at run time. The repro with a computed path
+  (`"/etc/" ++ "hosts"`) passes `--check` and is refused when run:
+  `IO.FileRead("/etc/hosts") refused by the launch grant (IO.Console, IO.FileRead("/srv/data"))`.
+
+Still open: a scoped `needs` on a module that is not the entry module is not judged at run
+time. A nested `Lib` with `needs IO.FileRead("/srv/data")` under an unscoped parent, called as
+`Lib.rd("/etc/" ++ "hosts")`, passes `--check` and reads the file. The design (§4) says a
+module's scoped `needs` is checked at run time where the target is computed;
+`specs/lang/capabilities.md` documents the gap. The literal-path case in a nested module is
+`2026-11-10-nested-path-scope-unchecked.md`.

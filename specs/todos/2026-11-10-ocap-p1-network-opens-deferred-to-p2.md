@@ -1,64 +1,30 @@
-# Network opens not yet returning Result(T, CapError): deferred to ocap phase 2
+# ocap: `HttpTransport` / `HttpClient` / `Tls.https_get` still fold a refusal into their own error type
 
-Logged 2026-11-10 by ocap phase 1 (specs/plans/2026-11-10-ocap-p1-result-plan.md,
-Task 10). Phase 1 made `Socket.connect`, `Socket.connect_timeout`,
-`Socket.with_connection` and `Dns.resolve`/`resolve_one` check their target and
-return `Result(Result(_, E), CapError)`. These still do neither:
+Logged 2026-11-10 by ocap phase 1 and again 2026-11-17 by ocap phase 4 (specs/plans/2026-11-15-ocap-p4-runtime-plan.md, decision 7).
 
-- ~~`Udp.open_with` (and `open`, `open_sharded`)~~ (done at the phase 2b merge,
-  2026-11-11: specs/progress/2026-11-11-ocap-p2b-merge-p1-wrapping.md),
-  ~~`Udp.resolve`~~ (done in ocap phase 4, 2026-11-19:
-  specs/progress/2026-11-19-ocap-p4-network-opens-checked.md);
-  ~~`Udp.connect`, `Udp.send_batch`, `Udp.send_batch_connected`, `Udp.send_many`~~
-  (not operations since ocap phase 2b Task 10, 2026-11-12: they act on a
-  `Udp.UdpSocket` the caller holds, so their builtins left `builtin_cap_table`;
-  specs/progress/2026-11-10-ocap-p2b-gate-raw-builtins.md);
-- ~~`Tls.client_ctx`, `Tls.server_ctx`~~ (done at the phase 2b merge), `Tls.https_get`
-  (its target is checked since the phase 2b final review, 2026-11-13: it dials
-  through `Socket.connect`, so `IO.NetConnect` on `host:port` is checked like
-  every other connect, and a refusal is folded into `TlsHandshakeFailed`; it
-  still returns its single Result until re-typed;
-  specs/progress/2026-11-13-tls-https-get-checked-dial.md);
-- `HttpTransport.connect`, `request`, `simple_get` (they now dial through the checked
-  `Socket.connect`; a refusal is folded into `Refused(reason)` until they are re-typed) (and the private
-  `request_plain`, `request_https_with_context` that dial), so `HttpClient.*`;
-- ~~`HttpServer.listen`, `spawn_n`, `bind_host`, `plain_listener`~~ (done in ocap
-  phase 4, 2026-11-19: they check `IO.NetListen` and return
-  `Result(T, CapError)`; `plain_listener` only records a port, which `listen` and
-  `spawn_n` check; specs/progress/2026-11-19-ocap-p4-network-opens-checked.md).
+`HttpTransport.connect` / `request` / `simple_get` and the `HttpClient` functions over them
+already dial through the checked `Socket.connect`, so the run-time authority refuses an
+out-of-scope host. But they return their pre-phase-1 types, and a refusal arrives as
+`HttpTransport.Refused(reason)` (`stdlib/http_transport.march`), not as
+`Err(CapError(...))`: a caller cannot tell a refusal from a network failure by type, and
+`Authority.describe` cannot render it.
 
-Why deferred: every one of them opens a handle (a UDP socket, a TLS context, an
-HTTP connection, a listener) that ocap phase 2 re-types as an opaque handle, and
-the HTTP stack sits on those. Re-typing them here and again in phase 2 doubles
-the churn for users of `HttpClient` (about 200 call sites).
+What to do: re-type them to `Result(Result(T, E), CapError)` like the other capability
+operations, with the `cap_result_unhandled` fix migrating callers (about 200 call sites).
+`Tls.https_get` is in the same state: it dials through the checked `Socket.connect`
+(`specs/progress/2026-11-13-tls-https-get-checked-dial.md`), returns its single Result and folds
+a refusal into `TlsHandshakeFailed`. Re-type it with the others.
 
-Status after ocap phase 2b (2026-11-13): phase 2 did not re-type these, and
-they do not move in a 2c. They go with ocap phase 4 (run-time authority), when
-`Authority.check` becomes the authority rather than the test hook. Until then
-each is still charged statically (`udp_resolve` IO.NetConnect, the
-`http_server_*` opens IO.NetListen; `test/test_cap_check_coverage.ml` lists
-them with this file as the reason), and the dials (`HttpTransport.*`,
-`Tls.https_get`) already go through the checked `Socket.connect`.
-`HttpServer.listen`/`spawn_n`/`bind_host`/`plain_listener` and `Udp.resolve`
-have no `Authority.check` yet.
+With the re-typing, `HttpError` loses `OutOfScope`, `MethodRefused` and `PathRefused`, which
+move to the outer `CapError` (`ByModNeeds`), by the owner's strict rule of 2026-11-10.
 
-What remains (phase 4): each of these checks its target with
-`Authority.check` (IO.NetConnect / IO.NetListen / IO.NetConnect.TLS) and
-returns `Result(Result(Handle, E), CapError)` by the owner's strict rule
-(2026-11-10); `HttpError` loses `OutOfScope`, `MethodRefused` and
-`PathRefused`, which move to the outer `CapError` (`ByModNeeds`).
-test/test_cap_check_coverage.ml lists them with this file as the reason; its
-allowlist rows go when they are done.
+Functions to re-type: `HttpTransport.connect`, `request`, `simple_get` (and the private
+`request_plain` and `request_https_with_context`, which dial), every `HttpClient` function over
+them, and `Tls.https_get`.
 
-Status after ocap phase 4 (2026-11-19): the `HttpServer` opens and
-`Udp.resolve` are checked operations returning `Result(T, CapError)`
-(nested, `Result(Result(UdpAddr, UdpError), CapError)`, only for
-`Udp.resolve`: the `HttpServer` opens had no inner error type), and their
-allowlist rows are gone (specs/progress/2026-11-19-ocap-p4-network-opens-checked.md).
-What stays open here is only the re-typing of the dials that already check:
-`HttpTransport.connect`/`request`/`simple_get` (so `HttpClient.*`, about 200
-call sites) and `Tls.https_get` still return their single Result and fold a
-refusal into `Refused(reason)` / `TlsHandshakeFailed`; re-typing them to
-`Result(Result(_, E), CapError)` (and moving `HttpError`'s `OutOfScope`,
-`MethodRefused`, `PathRefused` to the outer `CapError`) is deferred past
-phase 4 (decision 7 of specs/plans/2026-11-15-ocap-p4-runtime-plan.md).
+This file was trimmed on 2026-11-22 to what is still open, and absorbed
+`2026-11-17-ocap-http-transport-retype.md` (the same item, logged again by phase 4). The file
+name is historical: `stdlib/http_transport.march` and `stdlib/tls.march` cite it. Every other
+open it once listed is done (`Udp.*` and the `Tls` contexts at the phase 2b merge,
+`HttpServer.*` and `Udp.resolve` in phase 4,
+`specs/progress/2026-11-19-ocap-p4-network-opens-checked.md`); the history is in git.

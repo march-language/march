@@ -35,3 +35,11 @@ interpreter's shape-guessing accepts programs compiled code rejects. Decide
 which is the language rule (specs/2026-07-31-json-from-json-dispatch-design.md)
 and make the other backend match; the test file should then state its target
 types.
+
+## Decision (2026-11-23, owner)
+
+The compiled rule is the language rule: `from_json` dispatches on its inferred result type,
+and a later use that fixes that type counts. When inference leaves the target unresolved, or the
+target is a primitive type, it is a type error. Delete the interpreter's guess from the JSON
+shape. Update `specs/lang` (regenerate `docs/`), move `t142` to the reject corpus if it no longer
+typechecks, and state the target types in `test/stdlib/test_derive_json_multi.march`.

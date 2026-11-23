@@ -10880,6 +10880,66 @@ let test_compiled_file_open_err_is_real_fileerror () =
       "compiled output matches the interpreter's FileError rendering"
       interp_out compiled_out
 
+(* Regression (todo 2026-11-11-csv-open-error-shape-compiled): march_csv_open's
+   Err path returned mk_err_errno(), i.e. Err(<bare strerror string>), while
+   csv_open is typed Result(Int, CsvError) and the interpreter returns
+   Err(FileError("<path>: <reason>")).  Compiled Csv.read_all / each_row /
+   each_row_with_header printed the bare reason and a `Csv.FileError(m)` arm
+   never matched.  Guard: every Csv entry point on a missing path, rendered
+   and matched, byte-identical between interpreter and compiled binary, and
+   pinned to the documented interpreter text. *)
+let test_compiled_csv_open_err_is_fileerror () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_csvopenerr" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let missing = "/nonexistent/march_csvopenerr_test_xyz/no_such_file.csv" in
+  let src = Filename.concat tmp "csvopenerr.march" in
+  let oc = open_out src in
+  Printf.fprintf oc
+    "mod CsvOpenErrRegress do\n\
+    \  needs IO.Console\n\
+    \  needs IO.FileRead\n\
+    \  fn report(label, r) do\n\
+    \    println(label ++ \": \" ++ to_string(r))\n\
+    \    match r do\n\
+    \    Ok(Err(Csv.FileError(m))) -> println(\"FileError: \" ++ m)\n\
+    \    Ok(Err(_)) -> println(\"other CsvError\")\n\
+    \    Ok(Ok(_)) -> println(\"ok?\")\n\
+    \    Err(_) -> println(\"cap error\")\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_c : Cap(IO.Console), _f : Cap(IO.FileRead)) do\n\
+    \    let p = \"%s\"\n\
+    \    report(\"read_all\", Csv.read_all(p, \",\", :rfc4180))\n\
+    \    report(\"read_all simple\", Csv.read_all(p, \"\\t\", :simple))\n\
+    \    report(\"each_row\", Csv.each_row(p, \",\", :rfc4180, fn _ -> ()))\n\
+    \    report(\"each_row_with_header\", Csv.each_row_with_header(p, \",\", :rfc4180, fn (_, _) -> ()))\n\
+    \    report(\"read_csv\", Csv.read_csv(p))\n\
+    \  end\n\
+     end\n" missing;
+  close_out oc;
+  let (interp_rc, interp_out) =
+    run_capture_rc (Printf.sprintf "%s %s" (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check int) "interpreter runs the Csv missing-file program cleanly" 0 interp_rc;
+  let line label =
+    Printf.sprintf "%s: Ok(Err(FileError(\"%s: No such file or directory\")))\n\
+                    FileError: %s: No such file or directory" label missing missing in
+  let expected =
+    String.concat "\n"
+      (List.map line ["read_all"; "read_all simple"; "each_row";
+                      "each_row_with_header"; "read_csv"]) in
+  Alcotest.(check string) "interpreter returns the documented Err(FileError(path: reason))"
+    expected interp_out;
+  let bin = Filename.concat tmp "csvopenerrbin" in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let (run_rc, compiled_out) = run_capture_rc (Filename.quote bin) in
+    Alcotest.(check int) "compiled Csv missing-file program exits 0" 0 run_rc;
+    Alcotest.(check string)
+      "compiled Csv open error is Err(FileError(path: reason)), matching the interpreter"
+      interp_out compiled_out
+
 (* Regression (todo 2026-08-08-file-dir-builtins-bare-string-errno-fileerror):
    the sibling follow-up to test_compiled_file_open_err_is_real_fileerror
    above.  Twelve more file_*/dir_* runtime builtins are typed
@@ -15729,6 +15789,8 @@ let stdlib_suites =
           test_compiled_dual_position_owned_borrowed;
         Alcotest.test_case "file_open on missing path: Err carries a real FileError NotFound ctor cell (compiled)" `Slow
           test_compiled_file_open_err_is_real_fileerror;
+        Alcotest.test_case "Csv open on missing path: Err(FileError(path: reason)), parity (compiled)" `Slow
+          test_compiled_csv_open_err_is_fileerror;
         Alcotest.test_case "file_*/dir_* Err payloads are real FileError cells with the right tag, parity (compiled)" `Slow
           test_compiled_file_dir_err_are_real_fileerrors;
         Alcotest.test_case "FBIP same_arity: dead 1-field cell NOT reused for 5-field ctor, parity (compiled)" `Slow

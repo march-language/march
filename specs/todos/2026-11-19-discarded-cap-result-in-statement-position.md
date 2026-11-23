@@ -28,3 +28,8 @@ block expression, `let _ = ...`, or `main`'s result) as a warning with the
 rules `cap_result_unhandled` already uses. Decide whether `let _ = op` (an explicit
 discard) stays silent. Check the stdlib and corpus for statement-position checked
 operations before turning it on, and add `test/errors` cases.
+
+## Decision (2026-11-23, owner)
+
+`let _ = <Result(_, CapError)>` stays silent for now. Warn only on a bare non-final statement
+and on `main`'s result. Revisit after 1.0.

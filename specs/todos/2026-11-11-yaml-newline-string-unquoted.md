@@ -28,3 +28,5 @@ Expected: `k: "a\nb"` and `Ok(YMap([("k", YStr("a\nb"))]))`
 Actual (interpreted / compiled): `Ok(YMap([("k", YStr("a")), ("b", YNull)]))` / same
 
 Source: `needs_quoting` in stdlib/yaml.march.
+
+Update 2026-11-22 (`40f901bab`): still reproduces for `v` and `v3` above (`"line1\nline2"` merges with the next key; `"a\nb"` comes back as `k: a` plus a key `b` with `YNull`). `v2` (`"a\nb: 2"`) now round-trips, because the `: ` already forces quoting; a newline with no other special character is still written raw.

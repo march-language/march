@@ -11089,6 +11089,129 @@ let test_cancel_token_rc_compiled () =
       "perl -e 'alarm 30; exec @ARGV' %s 2>&1" (Filename.quote bin)) in
     Alcotest.(check string) "compiled matches the interpreter" expected run_out
 
+(* ── A task spawned with an already-cancelled token completes (2026-11-19
+   todo, P2) ──────────────────────────────────────────────────────────────
+   Compiled, the scheduler's cancel_trampoline returned without running
+   march_thunk_trampoline when the token was already cancelled, so the Task
+   was never marked done: task_await hung forever and the closure leaked.
+   The interpreter answers Err("cancelled") (stdlib/task.march documents the
+   same text).  A token cancelled AFTER the spawn races the task's start
+   compiled (the interpreter runs the task eagerly, so Ok); either answer is
+   fine, hanging is not. *)
+let precancelled_spawn_src = {|mod PreCancel do
+  needs IO.Console
+  needs IO.Spawn
+
+  fn late(r) do
+    match r do
+      Ok(5) -> "late ok"
+      Err("cancelled") -> "late ok"
+      other -> "late WRONG " ++ to_string(other)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let tok = task_cancel_token_new()
+    task_cancel(tok)
+    let t = Authority.must(Task.async_cancellable(fn () -> 7, tok))
+    println(to_string(task_await(t)))
+    let s = "captured"
+    let tok2 = task_cancel_token_new()
+    task_cancel(tok2)
+    let t2 = Authority.must(Task.async_cancellable(fn () -> s ++ "!", tok2))
+    println(to_string(task_await(t2)))
+    println(to_string(task_poll(t2)))
+    println(to_string(task_await(t2)))
+    let tok3 = task_cancel_token_new()
+    let t3 = Authority.must(Task.async_cancellable(fn () -> 5, tok3))
+    task_cancel(tok3)
+    println(late(task_await(t3)))
+    println(s)
+  end
+end
+|}
+
+let test_precancelled_spawn_await_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"precancel" precancelled_spawn_src in
+  let expected =
+    "Err(cancelled)\nErr(cancelled)\nSome(Err(cancelled))\n\
+     Err(cancelled)\nlate ok\ncaptured" in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreted" expected interp_out;
+  let bin = Filename.concat tmp "precancel_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    (* Bounded: with the bug task_await never returned. *)
+    let run_out = read_cmd_output (Printf.sprintf
+      "perl -e 'alarm 30; exec @ARGV' %s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string) "compiled matches the interpreter" expected run_out
+
+(* The skipped task still owns its closure (and, through it, the captures):
+   it must release them.  Spawn many pre-cancelled tasks whose closure
+   captures a heap string and require the live-object gauge not to grow with
+   the count.  A small slack absorbs Tasks whose trampoline has signalled
+   done but not yet dropped its own hold at the moment of the reading. *)
+let test_precancelled_spawn_releases_closure_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"precancel_gauge"
+    {|mod PreCancelGauge do
+  needs IO.Console
+  needs IO.Spawn
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  pfn spin(i : Int, n : Int, s : String, acc : Int) : Int do
+    if i >= n do acc
+    else
+      let tok = task_cancel_token_new()
+      task_cancel(tok)
+      let piece = s ++ int_to_string(i)
+      let t = Authority.must(Task.async_cancellable(fn () -> piece ++ "!", tok))
+      let r = task_await(t)
+      let one = match r do
+        Err(_) -> 1
+        Ok(_) -> 0
+      end
+      spin(i + 1, n, s, acc + one)
+    end
+  end
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _f : Cap(IO.Foreign)) do
+    let warm = spin(0, 50, "w", 0)
+    let base = live_allocs()
+    let n = spin(0, 2000, "x", 0)
+    let grew = live_allocs() - base
+    let verdict = if warm + n == 2050 && grew < 50 do "BOUNDED"
+      else "cancelled " ++ int_to_string(warm + n) ++ " GREW " ++ int_to_string(grew) end
+    println(verdict)
+  end
+end
+|}
+  in
+  let bin = Filename.concat tmp "precancel_gauge_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf
+      "perl -e 'alarm 60; exec @ARGV' %s 2>&1" (Filename.quote bin)) in
+    if run_out <> "BOUNDED" then
+      (* The traced rebuild runs unbounded: only worth it when the program
+         finished (a leak), never after a hang. *)
+      let report =
+        if String.length run_out >= 10 && String.sub run_out 0 10 = "cancelled "
+        then rc_trace_report ~project_root ~main_exe ~src ~tmp
+        else "(not collected: the program did not finish)" in
+      Alcotest.failf
+        "a task spawned with an already-cancelled token must complete and \
+         release its closure; expected BOUNDED, got %S\n\n\
+         --- RC trace report (--rc-trace + MARCH_TRACE_GC=1) ---\n%s"
+        run_out report
+
 (* ── HTTP request-line / header injection (2026-11-09 todo, P1) ──────────
    `http_serialize_request` used to copy the method, host, path, query and
    headers into the request verbatim, so a CR/LF/space in any of them
@@ -22228,6 +22351,10 @@ let codegen_suites =
       ( "cancel_token_codegen", [
           Alcotest.test_case "compiled CancelToken is a real RC'd cell" `Quick
             test_cancel_token_rc_compiled;
+          Alcotest.test_case "pre-cancelled spawn: await completes, interp = compiled" `Quick
+            test_precancelled_spawn_await_compiled;
+          Alcotest.test_case "pre-cancelled spawn releases its closure (gauge)" `Quick
+            test_precancelled_spawn_releases_closure_compiled;
         ] );
       ( "check_diagnostic_determinism", [
           Alcotest.test_case "repeated --check has byte-identical diagnostics" `Quick

@@ -12,8 +12,17 @@ Found 2026-11-05 surveying test failure output (test-failure reports print with 
   `Some((3, :x))` print the atom. An atom reaching `to_string` through an erased type
   variable (a generic lambda) still prints as its hash, which is
   `2026-10-11-to-string-erased-newtype.md`'s territory.
-- Interpreted, a user constructor holding a non-ASCII string escapes it byte by byte
-  (`W("\195\169")`); compiled prints `W("é")`.
+- ~~Interpreted, a user constructor holding a non-ASCII string escapes it byte by byte
+  (`W("\195\169")`).~~ Fixed as of 2026-11-22 (re-checked on `40f901bab`): both backends
+  print `W("é")`.
 
 Quoting strings in containers changes `println` output everywhere, so it is a language-level
 decision (and a CHANGELOG `Changed` entry), not a test-runner fix.
+
+## Decision (2026-11-23, owner)
+
+Quote them. `to_string` of a List, Option, Result or tuple renders a String element quoted and
+escaped (`["a"]`, `Some("a")`); a top-level `to_string("a")` stays `a`. One change across the
+prelude `Show` impls, the interpreter's `show_dispatch`, the compiled renderer and the JS runtime,
+with a CHANGELOG `Changed` entry; stdlib doctests and `test/test_reports/` goldens move once, in
+this PR.

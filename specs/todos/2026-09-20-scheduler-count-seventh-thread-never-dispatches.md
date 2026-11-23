@@ -66,3 +66,8 @@ The failure now prints one line per scheduler, of this form (values illustrative
 
 Until one of those lines exists this is not actionable. Do not raise `SEEN_WAIT_S` again;
 120 s already exceeds anything a late thread explains.
+
+## Decision (2026-11-23, owner)
+
+Closing rule for a flake that cannot be reproduced: it closes after 10 clean CI runs of the
+test on the leg that saw it, with evidence capture on. Record the run ids in the progress file.

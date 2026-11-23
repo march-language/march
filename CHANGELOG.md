@@ -1349,6 +1349,18 @@ git log is authoritative for exact commits.
   helper` at the top of a module loaded from `MARCH_LIB_PATH` (or of a nested module, naming a
   parent's function) referred to an undefined `@helper` when compiled; the interpreter was
   right.
+- **Awaiting a task whose cancel token was already cancelled no longer hangs, compiled.**
+  `Task.async_cancellable(f, tok)` with `tok` cancelled before the task first ran (before the
+  spawn, or between the spawn and the task starting) skipped `f` without ever completing the
+  task, so a compiled `task_await` on it waited forever and the closure leaked. The task now
+  completes as cancelled and releases its closure and captures unapplied. The compiled answer
+  for any cancelled task (`task_await`, `task_poll`) is now `Err("cancelled")`, the text the
+  interpreter and `stdlib/task.march` already used, instead of `Err("task cancelled")`.
+- **A compiled `Csv` open failure is `Err(FileError("<path>: <reason>"))`, as documented.**
+  When the file could not be opened, `Csv.read_all`, `read_csv`, `each_row` and
+  `each_row_with_header` returned the bare reason in a compiled binary (`Ok(Err(No such file or
+  directory))`), so a `Csv.FileError(m)` arm never matched; the interpreter was right. The
+  compiled error is now the same `FileError` value, path included.
 - **A function named like a stdlib loop no longer leaks its capabilities into the stdlib.**
   A local `fn go(...)` (or any local `fn`) was not in scope for the rest of its block in the
   compiler's capability bookkeeping, so the stdlib's local `fn go` loops were recorded as calls

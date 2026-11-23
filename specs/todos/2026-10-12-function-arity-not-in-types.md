@@ -28,3 +28,13 @@ compiled): a fn returned by another fn (`pfn pick() do add end`, then
 `ap2(pick(), 1, 2)`), and a fn taken out of a list (`[add]`, `Cons(f, _)`,
 `f(1)`). Both need arity to flow through types or values; no syntactic
 extension reaches them soundly.
+
+## Decision (2026-11-23, owner)
+
+Arity goes in the function type (the first option above: a separate n-ary arrow, with surface
+syntax), not the call-adapting closure ABI. A design note comes first; it covers the typechecker,
+builtin signatures, TIR `convert_ty`, refinements and the LSP.
+
+Until it lands, one interim fix is worth its own PR: a compiled call through a function value
+whose arity does not match traps with the interpreter's message instead of jumping through a
+mismatched pointer.

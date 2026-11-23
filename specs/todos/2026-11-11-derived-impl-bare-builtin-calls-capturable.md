@@ -33,3 +33,10 @@ the derive already depends on (`Json.` for the decode; `Hash` has no module).
 
 Also seen, not investigated: a first-class `let f = show` (or `Show.show`) fails to link compiled
 (`use of undefined value '@show'`), with no user fn involved.
+
+## Decision (2026-11-23, owner)
+
+Generated `Hash` and `Json` bodies call builtins through spellings that the typechecker binds
+and user code cannot declare (for example `$int_wrapping_add`, `$int_wrapping_mul`,
+`$float_to_int`), with one alias row per engine's builtin table. Not stdlib helpers, and not
+Prelude helpers (already rejected, `prelude_collision`).
