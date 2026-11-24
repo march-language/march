@@ -270,7 +270,13 @@ let pp_flag ~(set : svar -> string) (ty : ty) (t : t) : string * bool =
       any := true;
       body ^ " needs " ^ txt
   in
-  let rec go ?(parens = false) (ty : ty) (t : t) : string =
+  (* An element of a comma-separated list is parenthesised when its own set
+     would otherwise read as more elements of the list. *)
+  let rec item ~(multi : bool) (ty : ty) (t : t) : string =
+    let t' = match t with Hole { h_ty = Some x; _ } -> x | x -> x in
+    let top = match t' with Arrow (_, _, s) | Con (_, _, Some s) -> set s | _ -> "" in
+    if top <> "" && (multi || String.contains top ',') then go ~parens:true ty t else go ty t
+  and go ?(parens = false) (ty : ty) (t : t) : string =
     let t = match t with Hole { h_ty = Some t'; _ } -> t' | t -> t in
     match repr ty, t with
     | _, (Plain | Opaque | Hole _) -> pp_ty ~parens ty
@@ -284,7 +290,7 @@ let pp_flag ~(set : svar -> string) (ty : ty) (t : t) : string * bool =
       let ps =
         match params with
         | [ (a, pa) ] -> go ~parens:true a pa
-        | _ -> "(" ^ String.concat ", " (List.map (fun (a, pa) -> go a pa) params) ^ ")"
+        | _ -> "(" ^ String.concat ", " (List.map (fun (a, pa) -> item ~multi:true a pa) params) ^ ")"
       in
       let res =
         let r = go ~parens:true rty rt in
@@ -303,18 +309,22 @@ let pp_flag ~(set : svar -> string) (ty : ty) (t : t) : string * bool =
     | TCon (n, args), Con (_, targs, so) when List.length args = List.length targs ->
       let head =
         if args = [] then n
-        else n ^ "(" ^ String.concat ", " (List.map2 (fun a ta -> go a ta) args targs) ^ ")"
+        else
+          n ^ "("
+          ^ String.concat ", " (List.map2 (fun a ta -> item ~multi:(List.length args > 1) a ta) args targs)
+          ^ ")"
       in
       (match so with
        | Some s when set s <> "" -> if parens then "(" ^ needs s head ^ ")" else needs s head
        | _ -> head)
     | TTuple ts, Tuple tts when List.length ts = List.length tts ->
-      "(" ^ String.concat ", " (List.map2 (fun a ta -> go a ta) ts tts) ^ ")"
+      "(" ^ String.concat ", " (List.map2 (fun a ta -> item ~multi:true a ta) ts tts) ^ ")"
     | TRecord fs, Record tfs when List.length fs = List.length tfs ->
       "{ "
       ^ String.concat ", "
           (List.map
-             (fun (n, a) -> n ^ " : " ^ go a (Option.value ~default:Plain (List.assoc_opt n tfs)))
+             (fun (n, a) ->
+                n ^ " : " ^ item ~multi:(List.length fs > 1) a (Option.value ~default:Plain (List.assoc_opt n tfs)))
              fs)
       ^ " }"
     | (TLin (_, inner) | TRefine (inner, _, _)), _ -> go ~parens inner t

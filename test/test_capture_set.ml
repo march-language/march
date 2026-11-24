@@ -55,6 +55,8 @@ let test_narrow () =
   str "unscoped under a scoped ancestor takes its scope" "IO.FileRead(\"/srv\")"
     (S.to_string (S.narrow (set [ sc "IO.FileRead" ]) ~by:(set [ sc ~arg:"/srv" "IO.FileSystem" ])));
   str "unrelated is dropped" "" (S.to_string (S.narrow (set [ sc "IO.Console" ]) ~by:(set [ sc "IO.FileRead" ])));
+  str "a scoped element that covers the bound takes the bound" "IO.FileRead(\"./data/in/\")"
+    (S.to_string (S.narrow (set [ read_data ]) ~by:(set [ read_in ])));
   str "two scoped lists of one kind: kept whole" "IO.FileRead(\"./other/\")"
     (S.to_string (S.narrow (set [ read_other ]) ~by:(set [ read_data ])));
   str "by full" "IO.Console" (S.to_string (S.narrow (set [ sc "IO.Console" ]) ~by:S.full));

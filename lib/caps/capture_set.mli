@@ -39,7 +39,8 @@ val narrow : t -> by:t -> t
     covers the other.  An element [by] covers is kept; an unscoped element is
     replaced by the entries of [by] beneath or above its kind (taking their
     scope); an element with no related entry in [by] is dropped; a scoped
-    element [by] relates to but does not cover is kept whole.  [unknown] is
+    element that covers every related entry of [by] is replaced by them;
+    any other scoped element [by] relates to is kept whole.  [unknown] is
     never narrowed, and narrowing by [unknown] or [full] changes nothing. *)
 
 val scope_to_string : scope -> string

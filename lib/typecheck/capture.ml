@@ -164,7 +164,9 @@ type st = {
   mutable frames : frame list;
   top : frame;
   hv : (int, svar) Hashtbl.t;
+  known : (string, unit) Hashtbl.t;  (** every function key: recorded, referenced as a dispatch node, or with a body *)
   let_keys : (string, unit) Hashtbl.t;
+  clauses : (string, S.t) Hashtbl.t;  (** a function's `needs` clause, scopes included *)
   actors : (string, actor_info) Hashtbl.t;
   handler_keys : (string, unit) Hashtbl.t;
   mutable sites : raw_site list;
@@ -267,6 +269,8 @@ let scan_decls (s : st) (decls : Ast.decl list) : unit =
           match b.Ast.bind_pat with
           | Ast.PatVar n -> Hashtbl.replace s.let_keys (qual prefix n.Ast.txt) ()
           | _ -> ())
+        | Ast.DFn ({ Ast.fn_needs = Some (entries, _); fn_name; _ }, _) ->
+          Hashtbl.replace s.clauses (qual prefix fn_name.Ast.txt) (S.of_entries entries)
         | Ast.DActor (_, n, a, _) ->
           let q = qual prefix n.Ast.txt in
           let handlers =
@@ -283,12 +287,15 @@ let scan_decls (s : st) (decls : Ast.decl list) : unit =
   go "" decls
 
 let resolve (s : st) (owner : string) (name : string) : string option =
-  March_caps.Cap_rows.resolve_ref ~scopes:s.env.fn_scopes s.env.own_cap_closures owner name
+  March_caps.Cap_rows.resolve_ref ~scopes:s.env.fn_scopes s.known owner name
 
 let bodies_of (s : st) (key : string) : (string list * Ast.expr) list =
   Option.value ~default:[] (Hashtbl.find_opt s.env.fn_row_bodies key)
 
 let clause_of (s : st) (key : string) : S.t option =
+  match Hashtbl.find_opt s.clauses key with
+  | Some c -> Some c
+  | None ->
   match Hashtbl.find_opt s.env.fn_bound_points key with
   | Some { fb_origin = Fn_decl; fb_caps; _ } ->
     Some (S.of_scopes (List.map (fun kind -> { S.kind; arg = None }) fb_caps))
@@ -1283,11 +1290,14 @@ let analyse ?unsound ?(all = false) (env : env) (decls : Ast.decl list) : result
   let top = { f_depth = 0; f_root = 0; f_vars = []; f_members = [] } in
   let s =
     { env; d = T.decls_of env; store = new_store (); states = Hashtbl.create 256; frames = []; top;
-      hv = Hashtbl.create 64; let_keys = Hashtbl.create 64; actors = Hashtbl.create 16;
+      hv = Hashtbl.create 64; known = Hashtbl.create 1024; let_keys = Hashtbl.create 64; clauses = Hashtbl.create 16; actors = Hashtbl.create 16;
       handler_keys = Hashtbl.create 32; sites = []; annot = Hashtbl.create 256; binders = Hashtbl.create 256; fn_iface = Hashtbl.create 256;
       unsound }
   in
   scan_decls s decls;
+  Hashtbl.iter (fun k _ -> Hashtbl.replace s.known k ()) env.own_cap_closures;
+  Hashtbl.iter (fun k _ -> Hashtbl.replace s.known k ()) env.fn_refs;
+  Hashtbl.iter (fun k _ -> Hashtbl.replace s.known k ()) env.fn_row_bodies;
   let keys =
     List.sort compare
       (Hashtbl.fold

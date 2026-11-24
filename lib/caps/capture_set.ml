@@ -124,6 +124,7 @@ let narrow e ~by =
                         if Cap_lattice.cap_subsumes x.kind b.kind then b
                         else { kind = x.kind; arg = b.arg })
                      rel
+                 else if List.for_all (fun b -> scope_covers x b) rel then rel
                  else [ x ])
             xs))
 
