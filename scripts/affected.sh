@@ -91,7 +91,7 @@ owner_of_test_module() {
     march_test_stdlib_suite) echo stdlib ;;
     march_test_snapshots|run_snapshots) echo @test/runtest-run_snapshots ;;
     march_test_helpers) echo FULL ;;
-    run_compiler|run_eval|run_codegen|run_stdlib|run_errors|run_test_reports|run_cap_conformance|run_authority|run_dep_grants|test_stdlib_march|test_jit|test_refinecheck)
+    run_compiler|run_eval|run_codegen|run_stdlib|run_errors|run_test_reports|run_cap_conformance|run_authority|run_dep_grants|run_captures|test_stdlib_march|test_jit|test_refinecheck)
       echo "${stanza#run_}" ;;
     "") ;;
     *) echo "@test/runtest-$stanza" ;;
@@ -164,8 +164,9 @@ classify() {
       add CHECKS specs/lang/refine/check_refine.sh
       reason "$f" "refinecheck, compiler, errors; must-reject corpus; refine oracle" ;;
     lib/caps/*)
-      # dep_grants.ml (ocap phase 6) has its own runner.
-      add SUITES compiler codegen dep_grants; reason "$f" "compiler, codegen, dep_grants" ;;
+      # dep_grants.ml (ocap phase 6) and capture_set.ml (phase 8a) have their
+      # own runners.
+      add SUITES compiler codegen dep_grants captures; reason "$f" "compiler, codegen, dep_grants, captures" ;;
     lib/ctxesc/*|lib/effects/*|lib/cas/*|lib/driver/*)
       add SUITES compiler codegen; reason "$f" "compiler, codegen" ;;
     lib/search/*|lib/query/*)
@@ -195,6 +196,7 @@ classify() {
     test/stdlib/*) add SUITES stdlib_march; reason "$f" "stdlib_march" ;;
     test/errors/*) add SUITES errors; reason "$f" "errors" ;;
     test/dep_grants/*) add SUITES dep_grants; reason "$f" "dep_grants" ;;
+    test/captures/*) add SUITES captures; reason "$f" "captures" ;;
     test/test_reports/*) add SUITES test_reports; reason "$f" "test_reports" ;;
     test/cap_conformance/*) add SUITES cap_conformance; reason "$f" "cap_conformance" ;;
     test/two_node/*)

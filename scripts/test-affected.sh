@@ -91,6 +91,10 @@ expect suites "dep_grants" -- lib/typecheck/scoped_literal_check.ml
 expect suites "dep_grants" -- test/dep_grants/apps/kind/main.march
 expect suites "dep_grants" -- forge/lib/cmd_build.ml
 expect suites "dep_grants" -- test/dep_grants/forge_e2e/forge.toml
+expect suites "captures" -- lib/caps/capture_set.ml
+expect suites "captures" -- test/test_capture_set.ml
+expect suites "captures" -- test/run_captures.ml
+expect suites "captures" -- test/captures/lambda_basic.march
 
 # The FULL fallback: no rule, shared helpers, test wiring, the language corpus.
 expect suites "ALL" -- lib/some_new_library/x.ml
