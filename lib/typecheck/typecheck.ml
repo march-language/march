@@ -14126,3 +14126,7 @@ let check_letstar_repl (env : env) (p : Ast.pattern) (e : Ast.expr) : env =
   match bindings_opt with
   | Some bindings -> bind_vars bindings env
   | None -> env
+
+(* Capture sets (ocap phase 8a): the pass lives in [Capture]; re-exported
+   here because [env] is only nameable through this module's interface. *)
+let capture_analyse = Capture.analyse

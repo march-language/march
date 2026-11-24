@@ -15,6 +15,9 @@ let dump_tir       = ref false
 (* --dump-role-authority: the per-role effective-authority report; a
    typecheck-only mode like --check (bin/main.ml sets do_check from it). *)
 let dump_role_authority = ref false
+(* --dump-captures: every function value's inferred capture set (ocap phase
+   8a); a typecheck-only mode like --check. *)
+let dump_captures = ref false
 let dump_phases    = ref false
 let do_timings     = ref false
 let emit_llvm      = ref false
