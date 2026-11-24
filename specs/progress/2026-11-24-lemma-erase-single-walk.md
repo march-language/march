@@ -19,3 +19,9 @@ module, an impl method or an actor handler is kept; an unmentioned one is droppe
 Design: `specs/2026-11-24-stdlib-compile-floor-design.md` Part 1. Part 2 (a reachability
 prune before mono) follows as its own PR, per
 `specs/plans/2026-11-24-stdlib-compile-floor-plan.md`.
+
+Measured (2026-11-24, arm64, warm hello world, `--compile --opt 2 --timings`, merge base
+`11cdf717a` vs this change, 10 alternating runs each, private HOME per binary): the
+typecheck→lower gap fell from 0.627 s to 0.370 s (ranges 0.606–0.654 and 0.359–0.395, no
+overlap), and the `cas-hash` stamp from 1.94 s to 1.64 s. `scripts/oracle-base.sh ir types`:
+IR identical across 528 programs; core AST and diagnostics identical across 1094 fixtures.
