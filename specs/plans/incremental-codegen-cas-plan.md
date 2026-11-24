@@ -1,8 +1,27 @@
 # Compiler Observability and Incremental Compilation — Plan
 
-**Date:** 2026-10-04
-**Status:** Proposed. Part A and B1 recommended regardless. B3–B5: B0 **passes** go criterion 1
-(2026-10-07, `incremental-codegen-cas-baseline-2.md`); they now wait on criteria 2 and 3 (§3). Every section has been source-checked once by an independent read; see §19.
+**Date:** 2026-10-04 (status review 2026-11-24, §19)
+**Status:** Part A, B0, B1 and B7 have landed except for the open items in the table below. B2
+and B3–B5 are **not started**. Go criteria 1 and 3 for B3–B5 are met (§3). Criterion 2 (does
+anyone sit in an edit-compile loop?) is unmet: nobody has made the case. Nothing has moved on
+Part B since 2026-10-07. Every section was source-checked once by an independent read on
+2026-10-04 (§19). Line-number anchors in §§6–12 date from then and have drifted; the anchors in
+§§15–16 (unbuilt work) were re-checked 2026-11-24.
+
+| Item | State | Open |
+|---|---|---|
+| A1 TIR verifier | checks 1–5 landed; on by default in `test_oracle` (CI `@oracle` lane) and the snapshot harness | check 5's post-escape contract; a check-4 rule for payload binders on an `Atom` scrutinee (`specs/todos/2026-10-08-verifier-a4-followups.md`) |
+| A2 provenance | table, `--debug-info`, `!march.provenance` | `.march_build` manifest sidecar |
+| A3 RC tracing | `--rc-trace`, `scripts/gc-trace-report.py` (`specs/progress/2026-10-06-rc-trace-site-ids.md`) | a shared site table across hot patches (belongs with B3) |
+| A4 bisect / reduce | `--disable-pass`, `--bisect-pass`, `--reduce`, `scripts/bisect-ir.sh`, `scripts/bisect-output.sh` | `test_oracle` hook; expression-level reduction |
+| A5 determinism oracle | `scripts/determinism-oracle.sh`, CI job `determinism` | none |
+| A6 metrics, Opt convergence | `tir_metrics.ml` on `--timings`; `opt_convergence` test (`specs/progress/2026-10-07-bisect-wrappers-and-pass-metrics.md`) | none |
+| A7 `march query` | `fn origin callers callees repr verify key why-miss` | `owners` (no longer blocked), `bisect`/`reduce`, `key --unit` (B3/B4) |
+| B0 measurement | baselines 1–3; criterion 1 passes, re-checked 2026-11-24 | |
+| B1 structural names | landed (`specs/progress/2026-10-07-b1-structural-names.md`) | none |
+| B7.1–B7.4 | all landed (§17) | none |
+| B2, B3a, B3b / B3-lite, B4, B5 | **not started** | waits on criterion 2 |
+| B6 / memo layer | deferred | |
 
 ---
 
@@ -31,8 +50,9 @@ that reproduces only with a particular edit history. So:
   a coarse query *layer* with recorded dependencies (§12) is what B6 should be built on. §12 also
   records why a full query-based rewrite is not.
 
-Part A items are independent of each other and can start now. Part B's critical path is
-B0 ∥ B1 ∥ B3a → B2 → B3b → B4 → B5.
+Part A items are independent of each other. Part B's critical path was
+B0 ∥ B1 ∥ B3a → B2 → B3b → B4 → B5. B0 and B1 are done, so it is now B3a → B2 → B3b (or
+B3-lite) → B4 → B5.
 
 ---
 
@@ -42,8 +62,8 @@ The CAS speeds up a compile only when nothing changed. Three caches exist today:
 
 | Layer | Where | Key | A hit skips |
 |---|---|---|---|
-| Source-level | `bin/main.ml` (~1988–2092, `source_cas_state`) | MD5 of entry file + stdlib hash + every `.march` under the entry's directory and each `MARCH_LIB_PATH` dir | everything (copies the binary, `exit 0`), **before parsing** |
-| Post-TIR | `bin/main.ml` (~3310–3395) | concatenation of every SCC's Merkle `impl_hash` from `Pipeline.hash_module`, through `build_cas_key` | `llvm-emit` + clang only |
+| Source-level | `bin/main.ml` (`source_cas_state`) | since B7.2, a depend-mode key: entry bytes + stdlib digest + path and bytes of each file the previous build loaded, falling back to the directory walk (every `.march` under the entry's directory and each `MARCH_LIB_PATH` dir) when that record is unusable; since 2026-11-09 also the entry path as written | everything (copies the binary, `exit 0`), **before parsing** |
+| Post-TIR | `bin/main.ml` | concatenation of every SCC's Merkle `impl_hash` from `Pipeline.hash_module`, through `build_cas_key` | `llvm-emit` + clang only |
 | Runtime objects | `lib/cas/runtime_archive.ml` | runtime `*.{c,h}` digest + compiler identity + `cc --version` + exact cflags | recompiling the ~20-file C runtime |
 
 Any real edit misses both whole-program keys and pays the full pipeline: parse → desugar →
@@ -75,7 +95,9 @@ of it clang" on the C runtime) was already fixed by the runtime object cache. Wh
 unmeasured.
 
 **Evidence on cost.** Two active contributors (482 + 173 commits since July); review bandwidth
-is the scarce resource. B3a is a refactor of an 1 809-line emitter that must be byte-identical.
+is the scarce resource. B3a is a refactor of an emitter that must stay byte-identical; it was
+1 809 lines when this was written and is 2 518 on 2026-11-24 (`lib/tir/llvm_toplevel.ml`), so
+the cut gets larger the longer B3a waits.
 The two bug classes B3–B4 add surface to (codegen, cache staleness) are the two the project
 already fights most, and a stale unit object is a silent miscompile in a language that advertises
 capability-by-absence and a checked runtime. The first review of this plan found four blockers
@@ -87,8 +109,8 @@ from reading alone.
 |---|---|---|---|
 | Part A | low: additive, test-time or opt-in, no codegen change | no: pays on bugs already happening | **do** |
 | B1 structural names, B7 quick wins | moderate; every change is a rename checked by `ir-oracle` | no: fixes the open HCR P2 and a live cache-key gap | **do** |
-| B3–B5 unit split, object cache, ThinLTO | **high** | **entirely** | criterion 1 **met** (B0, 2026-10-07); waits on criteria 2 and 3; start with **B3-lite** |
-| Memo layer / B6 | high, speculative | yes, and only if the front end dominates | **defer** until B0 and a quarter of Part A in use |
+| B3–B5 unit split, object cache, ThinLTO | **high** | **entirely** | criteria 1 and 3 **met**; waits on criterion 2; start with **B3-lite** |
+| Memo layer / B6 | high, speculative | yes, and only if the front end dominates | **defer**. Part A has now been in use for about seven weeks, so the "B0 plus a quarter of Part A" condition comes due around early January 2027 |
 
 **Go criteria for B3–B5, all three required:**
 1. B0 shows a warm leaf-edit compile of `examples/topology_app` at `--opt 2` over ~10 s with the
@@ -103,7 +125,26 @@ wall, and `llvm-emit` + `clang` is 11.1 s of it, 76%. clang at `-O2` over the wh
 (~8.2 s) is the largest single cost. B3–B5 now wait on criteria 2 and 3 only. When they are
 met, the baseline recommends **B3-lite** (the two-object seam below and in §16) before the full
 N-unit split. Small programs show a ~2.4 s whole-program floor per edit, mostly TIR work over the
-stdlib with only ~0.4 s of back end, and per-function units would not remove it.
+stdlib with only ~0.4 s of back end, and per-function units would not remove it. **Still met on
+2026-11-24** (`incremental-codegen-cas-baseline-3.md`): the leaf edit is 15.7 s wall, back end
+11.2 s (71%).
+
+**Criterion 3: met** (checked 2026-11-24). A5 is CI job `determinism` (small corpus on PRs, full
+corpus in two shards on `main`, plus `--self-test`). A1 is on by default in `test/test_oracle.ml`
+(`MARCH_VERIFY_TIR=1` unless set to `0`; a finding is an internal-compiler-error exit), which
+runs in the `@oracle` CI lane, and the snapshot harness runs it at every stage. `main`'s CI was
+green on 2026-11-24.
+
+**Criterion 2: not met, and it is the open decision.** No todo or progress entry from October
+or November asks for faster edit-compile turnaround. The one compile-cost item filed since
+(`specs/todos/2026-11-19-ocap-authority-mono-compile-cost.md`: every compile monomorphizes ~100
+`Authority` functions and then drops them) is whole-program TIR work, which B3–B5 would not
+touch. Criterion 2 is a call for the maintainers to make, not something to measure. Ways to
+settle it:
+- **Go:** someone names the loop (`forge watch` on an app, `forge test` on a module) and its
+  current latency, and says what latency would change how they work. B3-lite then starts.
+- **No-go:** record it here, keep Part A and B7, and close Part B until the next B0 re-run says
+  otherwise.
 
 **If B0 is borderline: the two-object seam (B3-lite).** Split at exactly one stable boundary,
 stdlib specialisations vs user code, into two objects. The stdlib object is keyed on the set of
@@ -238,6 +279,15 @@ Check 5 (Defun's contracts) landed 2026-10-11 and check 4 (representation invari
 `specs/progress/2026-10-12-verifier-check4-repr.md`). Check 5's post-escape contract is open
 (`specs/todos/2026-10-08-verifier-a4-followups.md`).
 
+**Status (2026-11-24):** the `MARCH_VERIFY_TIR_LEAKS=1` sweep ran 2026-10-12
+(`specs/progress/2026-10-12-verifier-leak-sweep.md`). It removed ~257 stdlib false positives per
+program and fixed three Perceus bugs. A false positive remains (`$clo_wrap`-borrowed erased
+params, which the verifier can't see), along with a list of untriaged leaks-on findings. One
+verifier miss reached codegen as an ICE and wants a check-4 rule. All of it is in the follow-ups
+todo. `MARCH_VERIFY_TIR_LEAKS` is not in the CAS key, so a leaks-on run after a leaks-off one is
+a cache hit that checks nothing. That doesn't matter for B2, but it is the B2 failure shape in
+miniature.
+
 **Prove it red.** Each check lands with a test feeding it hand-broken TIR (for check 3: the
 pre-fix Perceus output of a fixed September leak, reconstructed) and asserting the error.
 
@@ -250,7 +300,8 @@ pre-fix Perceus output of a fixed September leak, reconstructed) and asserting t
 (function-level `!dbg`, plus a per-call location the verifier forces) and
 `!march.provenance` landed; see `specs/progress/2026-10-06-provenance-table-debug-info.md`
 for the two deviations (reset at the start of lowering, not of the pipeline; `!dbg` on every
-call). Manifest sidecar still open.
+call). Manifest sidecar still open (2026-11-24: nothing writes a `.march_build`). B4's verify
+mode and `why-miss` over units both read it, so it lands before B4, not after.
 
 **Problem.** TIR `fn_def` has no span (`tir.ml:158–164`); `lib/tir`, `lib/jit` and `bin` emit no
 `DILocation`/`!dbg`/`DISubprogram` at all. A compiled crash, ASan report or `perf` profile names
@@ -310,6 +361,14 @@ origin = {
 
 ## 8. A3 — RC tracing: site ids on top of `MARCH_TRACE_GC`
 
+**Status (2026-10-06): landed** (`specs/progress/2026-10-06-rc-trace-site-ids.md`). It differs
+from the design below in three ways. Site ids come from a post-emission text pass
+(`lib/tir/llvm_rc_trace.ml`), not from the emitter. They bracket **every** runtime call, not
+only RC calls, so a string allocated inside `march_string_concat` is attributed to its caller.
+The flush signal is `SIGUSR2` (`SIGUSR1` is the scheduler's). The open item is a single site
+table across hot patches, which belongs in B3's shared unit. The text below is the original
+design.
+
 **What exists (and the first draft missed).** `MARCH_TRACE_GC=1` (`march_runtime.c:80–125`)
 already writes JSONL `alloc`/`inc_ref`/`dec_ref`/`free` events with address, rc, tag and
 timestamp to `trace/gc/gc.jsonl`, from `march_alloc` (`:458`), `march_incrc` (`:484`),
@@ -351,7 +410,12 @@ declaration- and line-level `--reduce` landed
 (`specs/progress/2026-10-07-verify-rc-types-and-pass-bisect.md`). The disabled set is a
 module-level `Pass_switch`, not parameters. Bisection reports a 1-minimal set rather than the
 first pass. The `test_oracle` hook and expression-level reduction are open
-(`specs/todos/2026-10-08-verifier-a4-followups.md`). The facts below predate it.
+(`specs/todos/2026-10-08-verifier-a4-followups.md`). The facts below predate it. Also landed,
+2026-10-07: `scripts/bisect-ir.sh` and `scripts/bisect-output.sh`
+(`specs/progress/2026-10-07-bisect-wrappers-and-pass-metrics.md`). Still open on 2026-11-24:
+`test_oracle` doesn't call `--bisect-pass` on a mismatch. The leak sweep suggests why that
+matters less than expected. Every finding was at `tir-perceus`, a mandatory pass, where bisection
+has nothing to say and `march query fn NAME --at tir-perceus` was the tool that helped.
 
 **Facts.** The optional-pass switches that exist are `MARCH_NO_HOF_SPEC` and `MARCH_NO_UNBOX`
 (`contract_pipeline.ml:32–44`), `MARCH_NO_INLINE_RC` (`llvm_rc_inline.ml:52`) and the CLI
@@ -381,6 +445,13 @@ generator and no shrinker.
 **Effort.** `--disable-pass` + bisect: 1 session. Reducer: 2–3 sessions.
 
 ## 10. A5 — Determinism oracle; A6 — metrics and idempotence
+
+**Status:** both landed. A5 on 2026-10-06 (`specs/progress/2026-10-06-determinism-oracle.md`;
+CI job `determinism`); a red run was recorded before green. A6 on 2026-10-07
+(`specs/progress/2026-10-07-bisect-wrappers-and-pass-metrics.md`): `lib/tir/tir_metrics.ml`
+counts on the `--timings` stamps, pinned in `test/snapshots/metrics/`, and an `opt_convergence`
+test over the 28-program snapshot corpus. That is convergence, not idempotence, as designed
+below.
 
 **A5.** `scripts/ir-oracle.sh` already hashes `--emit-llvm` over ~240 programs and its header
 (`:4–13`) states and relies on byte-identical output across runs and renamed copies;
@@ -448,14 +519,17 @@ questions answered by hand with `MARCH_DEBUG_CASFLAGS`.
 **Status (2026-10-07):** landed as `march query` with `fn`, `origin`, `callers`,
 `callees`, `repr`, `verify`, `key` and `why-miss`
 (`specs/progress/2026-10-07-a7-query-interface.md`). `owners`, `bisect`/`reduce`
-and `key --unit` wait on A1 check 3, A4 and B3/B4.
+and `key --unit` wait on A1 check 3, A4 and B3/B4. **2026-11-24:** A1 check 3 and A4 have
+landed, so `owners` and `bisect`/`reduce` are unblocked and not started. `key --unit` still
+waits on B3/B4.
 
 ### Feasibility of a query-*based* architecture
 Salsa/rustc-style: every fact a pure function of recorded inputs, dependencies recorded as read,
 re-run recomputes only what changed. Assessment:
 
 **Against a full rewrite.**
-- `typecheck.ml` is 9 346 lines of whole-module inference. The module-level refs the second draft
+- `typecheck.ml` is 9 346 lines of whole-module inference (14 128 on 2026-11-24; the line
+  anchors in this list are from 2026-10-04 and have moved). The module-level refs the second draft
   named are mostly benign: `deferred_pending` (`:543`) and `wildcard_sink` (`:613`) are
   dynamically scoped with `Fun.protect`; `last_with_env_final` (`:9021`) is a return channel;
   `Typecheck_env.ctor_index_cache` (`typecheck_env.ml:1276`) is a content-keyed memo.
@@ -503,6 +577,14 @@ A5 comparing memoised vs fresh across the corpus.
 
 ## 13. B0 — Measure before building
 
+**Status: landed.** The harness `scripts/compile-time-bench.sh` (2026-10-05) and two dated
+baselines: `incremental-codegen-cas-baseline.md` (2026-10-05) and
+`incremental-codegen-cas-baseline-2.md` (2026-10-07, after #807's quadratic-scan fix; criterion
+1 passes). Re-checked 2026-11-24 in `incremental-codegen-cas-baseline-3.md` (topology, `--opt 2`):
+the leaf edit is 15.7 s with the back end at 11.2 s, 71%. The back end is unchanged and the
+extra second is front-end and TIR work. Since 2026-10-07 the back-end bucket is `llvm-emit` + `clang` only, cut at the
+`cas-hash` stamp. Re-runs go in a new dated file, never edited in place.
+
 `--timings` exists (`stamp` in `bin/main.ml`; finer `mono`/`fusion`/`defun`/`perceus`/`drop`/
 `escape`/`opt` stamps in `contract_pipeline.ml:88–249`); A6 adds counts to the same lines.
 
@@ -520,6 +602,13 @@ bucket. Part A, B1, B2 and B3a proceed either way (B3a only if someone wants the
 refactor for its own sake; otherwise it waits too).
 
 ## 14. B1 — Deterministic symbols (every counter that reaches a name)
+
+**Status (2026-10-07): landed** (`specs/progress/2026-10-07-b1-structural-names.md`; follow-up
+fd5bb875b keeps minted names module-less, `$lam<k>_<host>`). Acceptance as written below:
+the determinism oracle is green with a recorded red run, `ir-oracle` shows renames only (423 of
+431 programs, all identical after name mapping), snapshots were regenerated, and
+`hr_slot_hashes`'s `counter_re` is retired. Open question §18.1 is settled by what landed. The
+design text below is kept as the record.
 
 The driver's HCR hashing comment (`bin/main.ml:947–951`) lists the problem: symbols like
 `$lam39788$apply$4781` carry two global counters. Inventory (verified):
@@ -607,6 +696,17 @@ Per-unit dedup tables (`emitted_eq_fns`, `emitted_dispatch_fns`, `emitted_wraps`
 per-unit after the split and not in the digest. Constructor descriptors are declaration-ordered
 and already per-unit (`llvm_ctor_desc.ml:80–96`; runtime interns by content).
 
+**Drift since this list was written (checked 2026-11-24). Redo the field-by-field audit when B2
+starts; don't trust the list above.** `Llvm_emit.emit_module` (`llvm_emit.ml:2784`) now also
+takes `hr_sig_hashes` (read per function, `llvm_toplevel.ml:1673, 2201`) and `cap_manifest`
+(`:2453`), and both belong in the digest. The emitter now reads these module-level refs:
+`Llvm_builtins.rc_checks` (`llvm_builtins.ml:2281`, set from the sanitize predicate, so the
+`sanitize=` CAS tag already covers it); `Llvm_toplevel.debug_info` and its `dbg_*` tables (A2;
+the `dbginfo` tag covers the flag); and `fn_table_wanted` (`llvm_toplevel.ml:1553`, see §16). The
+ocap work (October–November) added capability and grant metadata that reaches the emitter
+through `cap_attrib`/`cap_decls`/`cap_manifest`. Check whether any of it is now read from a
+global instead.
+
 **A1 runs before hashing.** `unit_keys` refuses (hard error under `--incremental`) if the
 verifier reports anything on the post-opt TIR.
 
@@ -619,7 +719,8 @@ transitive users only; `fast_math` → every `unit_key`; mutual-recursion group 
 ## 16. B3 — Split LLVM emission into units
 
 ### B3a — refactor, `--codegen-units=1` byte-identical (no dependency on B1)
-`Llvm_emit.emit_module` → `Llvm_toplevel.emit_module ~emit_expr` (`llvm_toplevel.ml:976`) builds
+`Llvm_emit.emit_module` → `Llvm_toplevel.emit_module ~emit_expr` (`llvm_toplevel.ml:1555` on
+2026-11-24; `:976` when written) builds
 one ctx (`buf`, `preamble`, `extra_fns`), runs a pre-pass (`top_fns`, `top_fn_*`,
 `native_vec_params`, `unqualified_fns`, mutual-TCO groups via `Llvm_tco.find_mutual_tco_groups`,
 `llvm_tco.ml:409`), emits every function, finalises program-wide pieces. Split into:
@@ -646,16 +747,29 @@ What must stay together or be made link-safe (verified):
   `$clo_wrap` trampolines (`llvm_calls.ml:465–483`, `emitted_wraps`), structural equality
   `__eq$…` (`llvm_eq.ml:126, 186, 345, 546`), interface dispatch `__march_ifdispatch$…`
   (`llvm_dispatch.ml:60`). Under `N>1` every helper in `extra_fns` is **`linkonce_odr`**; under
-  `N=1` unchanged.
+  `N=1` unchanged. Precedent since 2026-11-18: the native REPL already emits its session wraps
+  `linkonce_odr` for the same reason (`llvm_ctx.ml:1217–1222`).
 - **`internal` helpers** (`Llvm_rc_inline` twins, `@.str*`/`@.strcell*`): duplicated per unit.
 - **Aliases** `__migrate_<Actor>`/`__migrate_msg_<Actor>` (`llvm_toplevel.ml:1222–1280`) in the
   aliasee's unit.
 - **Atom show-table**: `atom_names` fills during emission (`llvm_emit.ml:371`,
   `llvm_case.ml:945`) and `@march_atom_to_string`/`@march_atom_name_or_null` are **`internal`**
-  (`llvm_toplevel.ml:573, 596`); split naively, `show(:x)` silently renders `:<atom>` across
-  units. The shared unit scans all `fn_def`s for atom literals and defines the table externally;
-  units `declare` it; the `buffer_contains … "define internal ptr @march_atom_to_string"` check
-  (`:541`) goes.
+  (`llvm_toplevel.ml:773, 799` on 2026-11-24; `:573, 596` when written); split naively,
+  `show(:x)` silently renders `:<atom>` across units. The shared unit scans all `fn_def`s for
+  atom literals and defines the table externally; units `declare` it; the
+  `buffer_contains … "define internal ptr @march_atom_to_string"` check (`:741`) goes.
+- **Function table (added 2026-10-14, 2c2461ce6; not in the reviewed draft).** Compiled panics
+  name their March function through `@march_fn_table`. It is a **`private`** constant listing
+  every non-inline function, in definition order, plus a `@march_text_end` marker function
+  defined after them all (`fn_table_block`, `llvm_toplevel.ml:~1500–1550`). `main`'s setup
+  registers it (`:2315`, setting `fn_table_wanted` mid-emission), and the finaliser emits it
+  (`:2501`). The runtime sorts the entries by address and treats `march_text_end` as the upper
+  bound (`march_runtime.c:2454–2499`). If the end marker isn't above every entry, it **silently
+  drops the whole table** (`:2490`), and panics lose their location instead of failing loudly. With
+  several objects, link order doesn't put a marker in the shared unit after every unit's code.
+  This is the same class as the atom table: it must come from the pre-pass (the entry list) and
+  needs a per-unit end bound or a linker-provided section end. Add a guard: a compiled panic at
+  `N=8` still names its function.
 - **Partition**: by **source module** of the base function from provenance (mono specialisations
   with their generic's module; `$lam`/apply/fused helpers with their host); a module over ~400
   fns splits into `BLAKE3(base_name) mod k` buckets; unit ids are stable strings. **B3-lite**
@@ -669,8 +783,9 @@ What must stay together or be made link-safe (verified):
   at `N=8` (the duplicate/undefined-symbol catcher); program output `N=1` vs `N=8` at `--opt 0`;
   full suite.
 
-**Effort.** B3a 1–2 weeks (`llvm_toplevel.ml` is 1 809 lines; the boundary cuts the finaliser);
-B3b ~1 week; B3-lite ~3 days on top of B3a.
+**Effort.** B3a 1–2 weeks when written (`llvm_toplevel.ml` was 1 809 lines; the boundary cuts
+the finaliser). It is 2 518 lines on 2026-11-24, so read that as 2–3 weeks. B3b ~1 week; B3-lite
+~3 days on top of B3a.
 
 ## 17. B4 — Object store, parallel compile, link; B5; B6; B7
 
@@ -724,6 +839,13 @@ A stale typecheck result is a soundness hole; own plan, own oracle (`types-oracl
 `Memo`'s strict mode).
 
 ### B7 — independent quick wins, each its own todo → progress entry
+**Status: all four landed.** B7.4 on 2026-10-04 (`specs/progress/2026-10-04-cas-key-ignores-no-unbox.md`).
+B7.1–B7.3 on 2026-10-07 (`specs/progress/2026-10-07-cas-replay-diagnostics-on-hit.md`,
+`specs/progress/2026-10-07-cas-depend-mode-source-key.md`,
+`specs/progress/2026-10-07-cas-global-write-through.md`). Related key fixes since:
+`specs/progress/2026-11-07-cas-key-omits-entry-path.md`, and the libprobe and debug-flag tags in
+`codegen_cas_tags`.
+
 1. **Replay stored diagnostics on a cache hit.** `Errors.diagnostic` is structured
    (`errors.ml:21–29`, `render_diagnostic` `:185`, `render_diagnostic_json` `:308`), but JSON is
    one-way and rendering re-reads source; store the **rendered text** as a sidecar via
@@ -757,6 +879,7 @@ A stale typecheck result is a soundness hole; own plan, own oracle (`types-oracl
 | `Opt` fixed-point assertion | A6 | non-converging / order-dependent opt passes |
 | `ir-oracle` zero-diff at `N=1` | B3a | emitter refactor changing output |
 | Per-unit `llvm-as` + `N=8` link of bench + `test/native` | B3b | missing `declare`s, duplicate helpers, alias placement |
+| A compiled panic at `N=8` names its March function | B3b | the function table silently disabled by a misplaced end marker (§16) |
 | `MARCH_INCREMENTAL_VERIFY=1` (byte-compare + A1) in CI | B4 | a key that under-approximates a dependency |
 | Edit-sequence differential test, with A3/A4 on failure | B4 | everything above, end to end, with a minimal repro |
 | Benchmark gate ≤ 3% | B5 | perf loss from splitting |
@@ -774,17 +897,25 @@ A stale typecheck result is a soundness hole; own plan, own oracle (`types-oracl
 | `!dbg` text breaks `Llvm_rc_inline`'s regex rewrite | medium | test first; `--debug-info` is a separate CAS tag |
 | `-O2` perf loss | medium | ThinLTO; 3% gate; else dev-builds only |
 | `tm_fns` order unstable | low | sort at registration; A5 detects |
-| B0 shows no compile-time problem worth B3–B5 | **plausible** | §3: B3–B5 don't start; Part A, B1, B7 still pay |
+| B0 shows no compile-time problem worth B3–B5 | did not happen (criterion 1 passed) | §3 |
+| No one is in an edit-compile loop, so B3–B5 buy nothing anyone feels (criterion 2) | **the live risk on 2026-11-24** | §3: record the go/no-go; Part A, B1 and B7 already paid |
+| A program-wide table emitted mid-emission that assumes one object (atom table, function table, the next one added) | medium, recurring: the function table was added after the review | B3a's pre-pass lists every finaliser input; `N=1` vs `N=8` behaviour tests, not only link tests |
+| The emitter grows while B3 waits (1 809 → 2 518 lines in seven weeks) | high | decide on criterion 2; if it's a go, B3a first while the cut is smallest |
 
 **Open questions.**
-1. Structural-naming schemes for `Fusion`/`Hof_spec`/`Mono` helpers with a collision argument
-   each (two fusions of the same callees in one host → ordinal; two `hspec`s of `g` on the same
-   argument symbol → one function; dedupe).
-2. Is `tm_fns` order already deterministic given deterministic input? A5 answers.
+1. ~~Structural-naming schemes for `Fusion`/`Hof_spec`/`Mono` helpers with a collision argument
+   each.~~ Settled by B1 (`specs/progress/2026-10-07-b1-structural-names.md`).
+2. ~~Is `tm_fns` order already deterministic given deterministic input?~~ Yes, across the
+   determinism oracle's conditions (cold/warm `HOME` × two cwds, byte-identical `.ll`). Whether it
+   is stable across **edits** (an unrelated edit reordering `tm_fns` would move `globals_digest`
+   and miss every unit) is a different question. B2's tests must cover it.
 3. ThinLTO availability on every CI image and macOS developer setup.
 4. `.ll` publication under `N>1`: concatenate (assumed) or update the ~20 `test/dune` rules.
 5. A1 check 3: is the exemption list complete? Each false positive found while running it over
    the snapshot corpus is either a new exemption or a real bug; the PR must say which for each.
+   **2026-11-24:** complete for the leaks-off sweep (0 findings over 586 programs). With leaks
+   on, one known false positive (`$clo_wrap`-borrowed params) and an untriaged list remain
+   (`specs/todos/2026-10-08-verifier-a4-followups.md`). B2 only needs the leaks-off checks.
 6. A2 `DILocation` granularity: function-level first; is per-instruction worth span plumbing
    through mono/defun/fusion?
 7. A2 provenance as a module-level table vs. threading through pass signatures: the plan picks
@@ -837,6 +968,26 @@ hand counts marked or removed per CLAUDE.md. **Not yet reviewed independently:**
 framing and the B3-lite design, A3's out-of-band site-id mechanism, and B7.2's depend-mode
 fallback rule.
 
+### Status review, 2026-11-24
+I checked every section's state against `specs/progress/`, `specs/todos/`, CI and the source, and
+recorded it in the header table and a status line per section. The findings that change the
+plan:
+- **Part A and B7 are done**, apart from the small open items in the header table. Part A's
+  original justification (it pays on today's bugs) held: the leak sweep fixed real Perceus
+  bugs.
+- **Criterion 1 still holds** (baseline 3: the leaf edit is 15.7 s, back end 11.2 s, 71%; the back
+  end hasn't moved since October).
+- **Criterion 3 is met; criterion 2 is the only gate left**, and no evidence for it has appeared.
+  §3 now says what settles it either way.
+- **New B3b hazard: the function table** (2c2461ce6, 2026-10-14) is a second program-wide
+  `private` table emitted mid-emission, with an end-marker check that fails silently. It joins
+  the atom table under §16, with its own guard in §18.
+- **`globals_digest` has drifted:** two new `emit_module` arguments and new module-level refs.
+  B2 must redo its audit (§15).
+- **The emitter grew 39%** (1 809 → 2 518 lines) and `typecheck.ml` grew 51% (9 346 → 14 128),
+  so the B3a and B6 estimates are low.
+- Open questions 1 and 2 are settled, and 5 is settled for the leaks-off checks B2 needs.
+
 ### Still unverified
-Everything about *time* (no build was possible in the authoring environment; B0 exists for
-this); ThinLTO on CI images; `tm_fns` order stability; A1 check 3's exemption list completeness.
+ThinLTO on CI images; `tm_fns` order stability across edits (§18.2); whether the 2026-10-04 line
+anchors in §§6–12 still point where they say.

@@ -16,3 +16,38 @@ mid-size program, with a private HOME so the CAS does not answer.
 What to do: measure it as above; if it matters, make the March policy
 unreachable on native when `Auth_native.applicable` holds (so mono never sees
 it), and check with `scripts/ir-oracle.sh` that emitted IR does not move.
+
+## Measured 2026-11-24: about 70 ms per compile, roughly 3% of a small program's compile
+
+I built compilers from `git archive` of `bad07beec^` and `bad07beec` and timed them alternately
+(before, after, before, …) to cancel machine load. Each arm had its own private `HOME` and cwd,
+with one warm-up compile per program. Every timed compile appended a different unreachable
+`pfn probe_<n>()`, so the source-level cache missed. The command was `--compile --opt 2
+--timings`. The measure is the `cas-hash` stamp, which covers the front end and the
+whole-program TIR passes, the work this todo is about. Five rounds per cell; medians:
+
+| program | `bad07beec^` | `bad07beec` | delta | typecheck delta |
+|---|---|---|---|---|
+| hello world (`needs IO.Console`) | 2.209 s | 2.281 s | **+72 ms (+3.3%)** | +41 ms |
+| `bench/tree_transform.march` | 2.219 s | 2.289 s | **+70 ms (+3.2%)** | +35 ms |
+
+The spread within each cell was 20–40 ms, apart from one outlier per "before" column. Function
+counts are the same on both programs: +94–96 at `lower`, about +100 at `mono` and `defun`, and
++46 that survive to `perceus` (hello: 5 → 51) before `opt` removes them. A mid-size program
+pays the same absolute cost, since the policy doesn't depend on the program. On topology's
+15.7 s leaf edit (`specs/plans/incremental-codegen-cas-baseline-3.md`) that's under 0.5%. A third
+program, `bench/dataframe_bench.march`, dropped out because its trailing `end -- mod …` defeated
+the probe injection.
+
+**Caveats.** `authority.march` was 1 117 lines at `bad07beec` and is 1 345 on `main` (p5 and p6),
+so today's cost is probably somewhat higher. I didn't measure it, because `main` has no switch
+that removes the policy. The load average was high (~20 on 14 cores), but alternating the arms
+and the tight spreads make the delta credible. Absolute times are inflated.
+
+**Verdict.** The fix above is still cheap and correct, but the payoff is small. The larger cost
+it sits inside is that every program carries the whole stdlib through lowering, mono, fusion and
+defun (~6 200 functions at `lower`, ~7 100 at `mono`) and prunes it only at Perceus. On hello
+world that is about 1.1 s of the 2.2 s. A smaller cost: `typecheck` alone is ~1.15 s on hello
+world at `bad07beec^`, against a ~0.39 s front end for the small corpus in baseline 2
+(2026-10-07). Part of that is load, but the growth predates `bad07beec`. Both are bigger targets
+than this item.
