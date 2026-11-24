@@ -1,0 +1,13 @@
+exit: 1
+-- CAPABILITY ---------------------- deps/cpid/cpid.march
+
+`cpid` is granted `IO.Console`, but `Cpid.getpid` needs `IO.Foreign` (`peek in impl Peek(Tok) → Cpid.getpid`), and a granted package reaches C code only under a grant that names it. [dep_grant_exceeded]
+
+20 |       getpid()
+           ^^^^^^^^
+
+    granted at forge.toml:3
+    hint: widen the grant in forge.toml to name `IO.Foreign`: an `extern` that a granted package can reach needs it even where the program does not call it
+    run `march --explain dep_grant_exceeded`
+
+

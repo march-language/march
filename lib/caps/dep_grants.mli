@@ -65,6 +65,15 @@ val package_of_file : string -> grant option
     always [None] when no grants are active, without touching the file
     system.  Memoised per file name. *)
 
+val impl_method_file : impl_file:string -> March_ast.Ast.span -> string
+(** The file that decides an impl method's package: the method name's own
+    file when it has a real one, else the impl's ([impl_file]).  A method
+    written in the impl has its name in the impl's file; an interface
+    default body the impl inherits ([Desugar.inject_defaults]) has the
+    interface's method name, so it belongs to the package that declares the
+    interface, not to the impl's; a derived method's name is synthetic
+    ("<none>"), so it takes the impl's. *)
+
 type conflict = {
   c_file : string;  (** the file as the loader named it *)
   c_real : string;  (** its real path *)
@@ -98,3 +107,17 @@ val root_problem : grant -> string option
 (** [Some why] when the grant's library root is neither one of the
     [MARCH_LIB_PATH] directories nor a parent of one (plan decision 2):
     such a grant would govern no code the build loads as a dependency. *)
+
+(** What `march repl FILE` does with its entry under grants, from the exit
+    status and the output of the `march --check FILE` child it runs first. *)
+type preload_verdict = Load | Refuse of string
+
+val preload_check_verdict : Unix.process_status -> string -> preload_verdict
+(** [Refuse] when the output reports a grant diagnostic ([[dep_grant_...]]
+    or [[dep_module_conflict]]), whatever the status.  Otherwise [Load] when
+    the child exited 0, or exited 1 having printed at least one rendered
+    diagnostic (an ordinary error in the entry, which the REPL reports
+    itself when it loads the file).  Anything else fails closed: a child
+    that crashed (an uncaught exception exits 2), was killed or stopped by a
+    signal, or exited non-zero with no diagnostic it can recognise, never
+    finished the grant checks, so the entry is not loaded unchecked. *)

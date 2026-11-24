@@ -1,0 +1,16 @@
+-- A granted package (granted `IO.Console`, no `IO.Foreign`) that reaches
+-- `Pidlib`'s extern only through a generic call of `peek`, and calls back
+-- whatever it is handed.
+mod Pidshow do
+  fn go(x) do
+    peek(x)
+  end
+
+  fn run() : String do
+    go(Pidlib.tok())
+  end
+
+  fn call(f) do
+    f(1)
+  end
+end

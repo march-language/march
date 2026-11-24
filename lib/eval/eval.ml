@@ -641,6 +641,15 @@ let grant_tag = "$grant"
     carries instead of an authority. *)
 let init_grant : value option ref = ref None
 
+(** [Authority.foreign_guard], once a grant frame has been built
+    ([grant_frame_of]): applied before every extern call ([VForeign]), so C
+    code reached under a grant that does not admit [IO.Foreign] is refused
+    (the compiled twin is the guard [Auth_rt.grants] puts in front of each
+    extern call).  [None] while no grant frame exists, which is always the
+    case without a grants file: no grant layer can be in force then, so an
+    extern call costs nothing new. *)
+let foreign_guard_fn : value option ref = ref None
+
 (** Whether [layer] (physically: [grant_frame_of] builds one per package) is
     in the current slot.  Then entering it again changes nothing (the March
     [Authority.enter_grant] would return the slot as it is), so the call
@@ -2170,6 +2179,9 @@ and apply_inner (fn_val : value) (args : value list) : value =
     f args
 
   | VForeign (lib, sym, ef_raises, param_tys, ret_ty) ->
+    (match !foreign_guard_fn with
+     | Some g -> ignore (apply g [])
+     | None -> ());
     (* 1. Static OCaml stub (libm/libc math etc.). Keyed by both the C symbol
           and the bare extern name so `= "sym"` and default bindings both hit. *)
     (match Hashtbl.find_opt foreign_stubs (lib, sym) with
@@ -4006,6 +4018,8 @@ let grant_frame_of (g : March_caps.Dep_grants.grant) (env : env) : value =
       apply (lookup "Authority.grant_layer" env) [ VString g.g_pkg; VString g.g_text ] in
     let f = VCon (grant_tag, [ layer; lookup "Authority.enter_grant" env ]) in
     Hashtbl.replace grant_frames key f;
+    if Option.is_none !foreign_guard_fn then
+      foreign_guard_fn := Some (lookup "Authority.foreign_guard" env);
     f
 
 (** The grant frame of the package [file] belongs to, if it is granted.
@@ -4434,14 +4448,20 @@ let rec eval_decl (env : env) (d : decl) : env =
       String.length idef.impl_iface.txt >= 4
       && String.sub idef.impl_iface.txt 0 4 = "Json"
     in
-    (* ocap phase 6: an impl written in a granted package runs under the
-       grant, as its compiled methods are wrapped ([Auth_rt.grants] tags
-       impl methods by the impl's file).  The plain closures below carry the
-       grant frame in place of an authority; a method that goes through
-       [DFn] gets [granted_call] there.  [None] (no grant) keeps them as
-       they were. *)
-    let impl_grant = grant_frame_of_file sp.file env in
-    List.fold_left (fun env (mname, fn_def) ->
+    (* ocap phase 6: an impl method written in a granted package runs under
+       the grant, as its compiled twin is wrapped ([Auth_rt.grants] tags an
+       impl method by the file its code is written in,
+       [Dep_grants.impl_method_file]: the impl's, or for an interface default
+       body the impl inherits, the interface's).  The plain closures below
+       carry the grant frame in place of an authority; a method that goes
+       through [DFn] gets [granted_call] there.  [None] (no grant) keeps
+       them as they were. *)
+    List.fold_left (fun env ((mname : name), fn_def) ->
+        let method_file =
+          March_caps.Dep_grants.impl_method_file ~impl_file:sp.file mname.span in
+        let impl_grant = grant_frame_of_file method_file env in
+        (* The span [DFn] decides the package by ([fn_file]). *)
+        let method_sp = if String.equal method_file sp.file then sp else mname.span in
         (* Type-dispatched methods (show/eq/compare/hash) use a
            non-self-referential closure so recursive calls inside the body go
            through the builtin dispatch (impl_tbl), not back to this impl. *)
@@ -4499,7 +4519,7 @@ let rec eval_decl (env : env) (d : decl) : env =
                 (* A default method's body is evaluated now, at load: it is
                    the package's module-level code, so it runs inside the
                    grant frame, and the lambda it yields carries the frame. *)
-                with_module_grant sp.file env (fun () ->
+                with_module_grant method_file env (fun () ->
                     in_module_init (fun () -> eval_expr env fc_body))
             in
             (mname.txt, v) :: env
@@ -4517,7 +4537,7 @@ let rec eval_decl (env : env) (d : decl) : env =
             let clo = VClosure (env_for_body, params, clause.fc_body, effective_module_prefix (), impl_grant) in
             (mname.txt, clo) :: env
           | _ ->
-            eval_decl env (DFn (fn_def, sp))
+            eval_decl env (DFn (fn_def, method_sp))
         in
         (* Phase 6b: register in impl_tbl for own() resolution, and also
            register under "InterfaceName.MethodName" in module_registry so
@@ -4808,6 +4828,7 @@ let eval_module_env ?launch (m : module_) : env =
   Hashtbl.clear actor_defs_tbl;
   actor_grants := [];
   Hashtbl.clear grant_frames;
+  foreign_guard_fn := None;
   init_grant := None;
   Hashtbl.clear actor_registry;
   Hashtbl.clear named_registry;

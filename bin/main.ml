@@ -8079,18 +8079,18 @@ let () =
        in
        let ic = Unix.open_process_in cmd in
        let out = In_channel.input_all ic in
-       ignore (Unix.close_process_in ic);
-       let has sub =
-         let n = String.length out and k = String.length sub in
-         let rec go i = i + k <= n && (String.sub out i k = sub || go (i + 1)) in
-         go 0
-       in
-       if has "[dep_grant_" || has "[dep_module_conflict]" then begin
-         prerr_string out;
-         Printf.eprintf
-           "march repl: not loading %s: it breaks its dependency grants (see above)\n%!" f;
-         exit 1
-       end
+       let status = Unix.close_process_in ic in
+       (* Fail closed: a child that crashed, was killed, or failed with no
+          diagnostic never finished the grant checks.  An entry with
+          ordinary errors (exit 1 with rendered diagnostics) still loads:
+          the REPL reports those itself, as it does without grants. *)
+       (match March_caps.Dep_grants.preload_check_verdict status out with
+        | March_caps.Dep_grants.Load -> ()
+        | March_caps.Dep_grants.Refuse why ->
+          prerr_string out;
+          Printf.eprintf "march repl: not loading %s: %s%s\n%!" f why
+            (if out = "" then "" else " (see above)");
+          exit 1)
      | _ -> ());
     setup_interpreter_ffi ();
     let runtime_so = ensure_runtime_so () in

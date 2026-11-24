@@ -1,0 +1,15 @@
+-- An app impl that inherits a granted dependency's interface default body
+-- runs the dependency's code: the default is charged to its package.
+-- DEP: loudy deps/dep_grant_exceeded_5/loudy ()
+mod Main do
+  needs IO.Console
+
+  type Mine = Mine(Int)
+
+  impl Greet(Mine) do
+  end
+
+  fn main() do
+    println(greet(Mine(1)))
+  end
+end

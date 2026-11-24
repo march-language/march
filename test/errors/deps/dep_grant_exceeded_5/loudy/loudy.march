@@ -1,0 +1,15 @@
+-- An interface whose default body prints: an app impl that inherits it runs
+-- the package's code, so the grant to `loudy` limits it.
+mod Loudy do
+  needs IO.Console
+
+  interface Greet(a) do
+    fn greet : a -> String do
+      fn _x ->
+        match println("loudy's default greet printed") do
+        Ok(_) -> "greeted"
+        Err(e) -> Authority.describe(e)
+        end
+    end
+  end
+end

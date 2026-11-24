@@ -132,6 +132,10 @@ let repl_unsupported : (string * string) list = [
   ("grant_actor_restricted_for_life", "actors: the REPL mode runs the fixtures that use no actors");
   ("grant_wider_launch_error",
    "the REPL requests the full authority (design §21), so no grant is wider than its request");
+  ("grant_default_method",
+   "the REPL's preload does not see an interface declared in a library module, so the \
+    fixture's impl of it is `unknown_interface` there \
+    (specs/todos/2026-11-23-repl-preload-lib-interface-impl.md)");
 ]
 
 let have_node = lazy (Sys.command "command -v node >/dev/null 2>&1" = 0)

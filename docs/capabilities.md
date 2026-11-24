@@ -1177,7 +1177,7 @@ its own `needs` and by its caller's authority. It gets no frame and costs nothin
 **Only reached code counts.** The compiler checks, by kind, everything the program reaches
 in a granted package: every package function called from outside it (directly, as a value,
 or through an interface method on one of the package's types), everything those reach, and
-the package's module-level code. A function the program never reaches may need anything.
+the package's module-level code. A function the program never reaches may need anything, except C code (see `extern` below).
 A reached violation is a build error that names the dependency, the `forge.toml` line, the
 capability and the call chain:
 
@@ -1204,8 +1204,40 @@ A target computed at run time is checked when it runs. A refusal is a value like
 `Authority.describe` renders as
 `IO.FileRead("/etc/hosts") refused by the grant to package reader (IO.FileRead("/srv/data"))`.
 
-**`extern`.** C called from a granted package counts as `IO.Foreign`, so the grant must name
-`IO.Foreign` for the package to reach an `extern` (the error above).
+**What the reach cannot see.** The compiler follows an interface method called from outside
+the package into the package's impl only when it knows the type of the call's first
+argument. A call left generic (a function of yours that takes `x` and calls `peek(x)`, a
+method passed as a value, generic stdlib code calling `compare` or `hash` on the package's
+type) counts no impl, so ordinary generic code can reach package code the build did not
+check (`specs/todos/2026-11-23-grant-dispatch-type-first-arg-only.md`). That code still runs
+under the grant: the run-time frame refuses whatever capability operation it attempts
+beyond the grant, for every capability, `IO.Foreign` included (below).
+
+**`extern`.** C called from a granted package counts as `IO.Foreign`, and unlike the other
+kinds it is checked package-wide: when any function of a granted package can reach an
+`extern` (one it declares, another package's, or a stdlib module built on one), the grant must
+name `IO.Foreign`, whether or not the program calls that function:
+
+```
+`cpid` is granted `IO.Console`, but `Cpid.getpid` needs `IO.Foreign` (`peek in impl Peek(Tok) → Cpid.getpid`), and a granted package reaches C code only under a grant that names it. [dep_grant_exceeded]
+```
+
+C reached at run time while a grant that does not admit `IO.Foreign` is in force (an
+ungranted package's impl, say, that a granted package reaches through generic code) is
+refused before it runs, on every backend: the program panics with
+`capability refused: IO.Foreign refused by the grant to package pidshow (IO.Console)`, which
+`__try_call_val` can catch. An `extern` returns a plain value, so this refusal cannot be an
+`Err`. Only a grant refuses C this way: code outside every grant frame, including a callback
+the app hands a granted package, calls its externs as before.
+
+**Interface default bodies.** A default method body is the code of the package that declares
+the interface. An impl that inherits it runs it under that package's grant, wherever the
+impl is written, and the compiler charges it to that package: an app's empty
+`impl Greet(Mine)` of a granted package's `Greet` whose default prints is a
+`dep_grant_exceeded` under a grant without `IO.Console`. A method the impl writes itself is
+the impl's own package's code. The methods of a `derive`d impl written in a granted package
+get no grant frame yet; they are pure today
+(`specs/todos/2026-11-22-grant-untagged-package-code.md`).
 
 **Transitive dependencies.** A package that a granted dependency calls directly runs under
 that dependency's grant while it is called from there, whether or not it has a grant of its
@@ -1263,8 +1295,10 @@ library root must be one of the `MARCH_LIB_PATH` directories or a parent of some
 A relative root, a root that does not exist or is off the library path, a field with a tab
 in it, a duplicate package or a malformed scope is `dep_grant_invalid`, at the manifest
 line. `march repl FILE` runs the same grant checks on its entry file and refuses to load a
-file that breaks them; a file `:load`ed later in the session is not checked statically, but
-the run-time frames still refuse what its grants do not allow.
+file that breaks them, or when the check does not finish (it crashed or was killed); a file
+with ordinary errors still loads, and the REPL reports them. A file `:load`ed later in the
+session is not checked statically, but the run-time frames still refuse what its grants do
+not allow.
 
 **When the frame is kept.** Calls from inside a package to its own functions go straight to
 their bodies, so only a call that crosses into the package pays for the frame, about 16 ns

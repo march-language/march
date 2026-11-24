@@ -334,6 +334,10 @@ let package_of_file (file : string) : grant option =
       Hashtbl.replace membership file r;
       r)
 
+let impl_method_file ~(impl_file : string) (name_span : Ast.span) : string =
+  let f = name_span.Ast.file in
+  if f = "" || f = Ast.dummy_span.Ast.file then impl_file else f
+
 let conflicts () =
   Hashtbl.fold (fun _ c acc -> c :: acc) conflict_tbl []
   |> List.sort (fun a b -> compare a.c_file b.c_file)
@@ -355,3 +359,32 @@ let root_problem (g : grant) : string option =
           nor a parent of a directory on it, so the grant governs no code \
           the build loads"
          g.g_root g.g_pkg)
+
+(* ── The REPL's preload check (bin/main.ml) ─────────────────────────────── *)
+
+type preload_verdict = Load | Refuse of string
+
+let contains_sub (s : string) (sub : string) : bool =
+  let n = String.length s and k = String.length sub in
+  let rec go i = i + k <= n && (String.sub s i k = sub || go (i + 1)) in
+  go 0
+
+(* A rendered diagnostic's header line: `-- TYPE MISMATCH ------ file`. *)
+let is_diag_header (l : string) : bool =
+  String.length l > 4 && String.sub l 0 3 = "-- " && l.[3] >= 'A' && l.[3] <= 'Z'
+  && contains_sub l " --"
+
+let preload_check_verdict (st : Unix.process_status) (out : string) : preload_verdict =
+  if contains_sub out "[dep_grant_" || contains_sub out "[dep_module_conflict]" then
+    Refuse "it breaks its dependency grants"
+  else
+    match st with
+    | Unix.WEXITED 0 -> Load
+    | Unix.WEXITED 1 when List.exists is_diag_header (String.split_on_char '\n' out) -> Load
+    | Unix.WEXITED n ->
+      Refuse (Printf.sprintf "its grant check (`march --check`) failed with exit status %d \
+                              and no diagnostic" n)
+    | Unix.WSIGNALED n ->
+      Refuse (Printf.sprintf "its grant check (`march --check`) was killed by signal %d" n)
+    | Unix.WSTOPPED n ->
+      Refuse (Printf.sprintf "its grant check (`march --check`) was stopped by signal %d" n)

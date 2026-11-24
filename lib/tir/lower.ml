@@ -788,11 +788,14 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                   else fn in
                   Provenance.rename ~old:fn.fn_name ~new_:mangled;
                   (* Keyed as the checker keys an impl method:
-                     [<Mod>.<Iface>$<Ty>.<method>]. *)
+                     [<Mod>.<Iface>$<Ty>.<method>].  Its package is where its
+                     code is written: an interface default body the impl
+                     inherits is the interface's package's code. *)
                   Lower_state.note_fn_grant ~final:mangled
                     ~key:(Some (Printf.sprintf "%s%s$%s.%s" mod_prefix idef.impl_iface.txt
                                   type_name mname.txt))
-                    ~file:impl_sp.Ast.file;
+                    ~file:(March_caps.Dep_grants.impl_method_file
+                             ~impl_file:impl_sp.Ast.file mname.Ast.span);
                   fns := { fn with fn_name = mangled } :: !fns
                 end;
                 (* Provenance for mono's return-position fallback

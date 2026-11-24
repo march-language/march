@@ -86,7 +86,9 @@ git log is authoritative for exact commits.
   `refused by the grant to package reader (IO.FileRead("/srv/data"))` (`ByGrant`). Callbacks
   the app passes in keep the app's authority; closures, tasks and actors the dependency hands
   back keep its narrowed one; a dependency it calls runs under its grant too; its module-level
-  code runs under the grant; an `extern` needs `IO.Foreign` in the grant. Every runtime
+  code runs under the grant, as do the interface default bodies it declares, whichever impl
+  inherits them. An `extern` the package can reach needs `IO.Foreign` in the grant, reached or
+  not, and C reached under a grant without it at run time is refused (a panic). Every runtime
   (interpreter, `--jit`, the REPL, compiled, `--target js`) behaves the same. A call into a
   package under a scoped grant costs about 16 ns; under an unscoped grant the compiler drops
   the frame where its proof suffices, and calls inside the package cost nothing

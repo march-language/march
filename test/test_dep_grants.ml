@@ -1275,6 +1275,97 @@ let test_forge_bad_grant_at_manifest_line () =
             [ "[dep_grant_invalid]"; "forge.toml:11" ])
         [ "check"; "build" ])
 
+(* Final review C1, static half: an `extern` in a granted package needs
+   `IO.Foreign` in the grant whether or not the static reach sees the call.
+   Here the app reaches the package's extern only through generic code
+   (`gopeek(x)`, whose first argument has no solved type), which the reach
+   does not follow into the impl. *)
+let test_extern_needs_foreign_package_wide () =
+  with_reset (fun () ->
+      let c = dep "cpid_iface" in
+      let d = project ~grants:[ ("cpid", c, "IO.Console") ] () in
+      expect_fail "an extern reached only through generic code" ~code:"dep_grant_exceeded"
+        ~mentions:[ "`cpid` is granted `IO.Console`"; "IO.Foreign"; "getpid" ]
+        (check_in ~libs:[ c ] d (app "extern_dispatch"));
+      let d = project ~grants:[ ("cpid", c, "IO.Console, IO.Foreign") ] () in
+      expect_pass "the same under a grant naming IO.Foreign"
+        (check_in ~libs:[ c ] d (app "extern_dispatch")))
+
+(* Final review C1, run-time half: an ungranted package's extern reached
+   from inside a granted package by a route the static reach does not follow
+   (generic `show` into the ungranted package's impl) is refused at run time
+   by the grant, interpreted and native (the JIT and JS cannot run a C
+   extern at all; the static half is backend-independent).  Called from the
+   app, and from an app callback the granted package calls, it runs: only a
+   grant layer refuses an extern. *)
+let test_extern_refused_under_grant_at_run_time () =
+  with_reset (fun () ->
+      let l = dep "pidlib" and s = dep "pidshow" in
+      let d = project ~grants:[ ("pidshow", s, "IO.Console") ] () in
+      expect_pass "the static reach does not see the extern"
+        (check_in ~libs:[ l; s ] d (app "extern_backstop"));
+      let want =
+        "direct: ran getpid\ncallback: ran getpid\nthrough pidshow: refused\nexit 0\n" in
+      Alcotest.(check string) "interp" want (run_interp ~libs:[ l; s ] d (app "extern_backstop"));
+      let code, out = build_in ~target:`Native ~libs:[ l; s ] d (app "extern_backstop") in
+      if code <> 0 then Alcotest.failf "native build failed (exit %d):\n%s" code out;
+      Alcotest.(check string) "native" want (run_built ~target:`Native d);
+      (* Granted IO.Foreign: nothing is refused. *)
+      let d = project ~grants:[ ("pidshow", s, "IO.Console, IO.Foreign") ] () in
+      let want_ok =
+        "direct: ran getpid\ncallback: ran getpid\nthrough pidshow: ran getpid\nexit 0\n" in
+      Alcotest.(check string) "interp, IO.Foreign granted" want_ok
+        (run_interp ~libs:[ l; s ] d (app "extern_backstop"));
+      let code, out = build_in ~target:`Native ~libs:[ l; s ] d (app "extern_backstop") in
+      if code <> 0 then Alcotest.failf "native build failed (exit %d):\n%s" code out;
+      Alcotest.(check string) "native, IO.Foreign granted" want_ok (run_built ~target:`Native d))
+
+(* Final review I2: an app impl that inherits a granted package's interface
+   default body runs the package's code, so the static reach charges it to
+   the package. *)
+let test_inherited_default_charged_to_package () =
+  with_reset (fun () ->
+      let y = dep "loudy" in
+      let d = project ~grants:[ ("loudy", y, "()") ] () in
+      expect_fail "an inherited default that prints" ~code:"dep_grant_exceeded"
+        ~mentions:[ "`loudy` is granted `()`"; "IO.Console" ]
+        (check_in ~libs:[ y ] d (app "default_method"));
+      let d = project ~grants:[ ("loudy", y, "IO.Console") ] () in
+      expect_pass "the same under a grant naming IO.Console"
+        (check_in ~libs:[ y ] d (app "default_method")))
+
+(* Final review M4: `march repl FILE` loads the entry only when its
+   `--check` child came back clean, or failed with ordinary diagnostics the
+   REPL reports itself.  A child that crashed, was killed, or exited
+   non-zero with no diagnostic it can recognise is refused (fail closed),
+   as is one that reported a grant diagnostic. *)
+let test_repl_preload_verdict () =
+  let module G = March_caps.Dep_grants in
+  let load what st out =
+    match G.preload_check_verdict st out with
+    | G.Load -> ()
+    | G.Refuse why -> Alcotest.failf "%s: refused (%s)" what why
+  in
+  let refuse what st out =
+    match G.preload_check_verdict st out with
+    | G.Load -> Alcotest.failf "%s: loaded" what
+    | G.Refuse _ -> ()
+  in
+  let diag slug =
+    Printf.sprintf "-- CAPABILITY --------- main.march\n\nsomething. [%s]\n\n1 | x\n" slug in
+  load "a clean check" (Unix.WEXITED 0) "";
+  load "a clean check with warnings" (Unix.WEXITED 0) (diag "unused_needs");
+  load "an ordinary type error (the REPL reports it)" (Unix.WEXITED 1) (diag "type_mismatch");
+  refuse "a grant diagnostic" (Unix.WEXITED 1) (diag "dep_grant_exceeded");
+  refuse "a module conflict" (Unix.WEXITED 1) (diag "dep_module_conflict");
+  refuse "a grant diagnostic even on exit 0" (Unix.WEXITED 0) (diag "dep_grant_invalid");
+  refuse "an uncaught exception" (Unix.WEXITED 2)
+    "Fatal error: exception Not_found\nRaised at ...\n";
+  refuse "exit 1 with no diagnostic" (Unix.WEXITED 1) "";
+  refuse "killed by a signal" (Unix.WSIGNALED Sys.sigkill) "";
+  refuse "killed after printing a diagnostic" (Unix.WSIGNALED Sys.sigsegv) (diag "type_mismatch");
+  refuse "stopped" (Unix.WSTOPPED Sys.sigstop) ""
+
 let tests =
   [ ( "dep_grants",
       [ Alcotest.test_case "load_none" `Quick test_load_none;
@@ -1315,7 +1406,11 @@ let tests =
         Alcotest.test_case "same-named methods elsewhere" `Quick test_same_named_methods;
         Alcotest.test_case "hint as written" `Quick test_hint_as_written;
         Alcotest.test_case "import inside a granted package" `Quick test_import_inside_package;
-        Alcotest.test_case "same type name in the app" `Quick test_same_type_name ] );
+        Alcotest.test_case "same type name in the app" `Quick test_same_type_name;
+        Alcotest.test_case "an extern in a granted package needs IO.Foreign, reached or not"
+          `Quick test_extern_needs_foreign_package_wide;
+        Alcotest.test_case "an inherited interface default is the package's" `Quick
+          test_inherited_default_charged_to_package ] );
     ( "frames",
       [ Alcotest.test_case "a scoped grant refuses at run time, native, JS, interp and --jit" `Quick
           test_scoped_refusal_runs;
@@ -1336,7 +1431,9 @@ let tests =
         Alcotest.test_case "an interface default body runs under the grant at load" `Quick
           test_eager_default_under_grant;
         Alcotest.test_case "an app actor named like a dep actor keeps the app's authority"
-          `Quick test_actor_name_clash ] );
+          `Quick test_actor_name_clash;
+        Alcotest.test_case "an extern under a grant without IO.Foreign is refused at run time"
+          `Quick test_extern_refused_under_grant_at_run_time ] );
     ( "forge",
       [ Alcotest.test_case "the compile key tracks the grants" `Quick
           test_compile_key_tracks_grants;
@@ -1347,4 +1444,6 @@ let tests =
         Alcotest.test_case "a symlink out of a granted root is refused" `Quick
           test_forge_symlink_escape;
         Alcotest.test_case "the REPL refuses an entry that breaks its grants" `Quick
-          test_repl_refuses_bad_grants ] ) ]
+          test_repl_refuses_bad_grants;
+        Alcotest.test_case "the REPL's preload check fails closed" `Quick
+          test_repl_preload_verdict ] ) ]

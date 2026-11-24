@@ -11276,6 +11276,34 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
       in
       up (if pre = "" then "" else String.sub pre 0 (String.length pre - 1))
     in
+    (* An impl method's code belongs to the package of the file it is
+       written in, as [Dep_grants.impl_method_file] decides it for the
+       lowering and the interpreter: an interface default body that an impl
+       outside the package inherits (keyed under the impl's module, with the
+       interface's body) is the interface's package's code. *)
+    let prefix_pkg_of_key = pkg_of_key in
+    let body_pkg k =
+      if not (String.contains k '$') then None
+      else
+        match Hashtbl.find_opt env.fn_row_bodies k with
+        | None | Some [] -> None
+        | Some bodies -> (
+          match
+            List.sort_uniq String.compare
+              (List.map (fun (_, e) -> (span_of_expr e).Ast.file) bodies)
+          with
+          | [ f ] when f <> "" && f <> Ast.dummy_span.Ast.file ->
+            Option.map (fun (g : G.grant) -> g.G.g_pkg) (G.package_of_file f)
+          | _ -> None)
+    in
+    let pkg_of_key k =
+      match body_pkg k with Some p -> Some p | None -> prefix_pkg_of_key k
+    in
+    (* An impl method keyed outside the package whose code it is: an
+       inherited interface default. *)
+    let inherited_default k =
+      match body_pkg k with Some p -> prefix_pkg_of_key k <> Some p | None -> false
+    in
     (* A reference as the owner's module spells it: the owner's prefix and
        the raw name first ([Cap_rows.resolve_ref], as the rows resolve it),
        then through the `import`s and `alias`es of the owner's module and its
@@ -11379,6 +11407,8 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
     (* In a chain (inside one pair of backticks). *)
     let shown k =
       match impl_of k with
+      | Some (m, iface, Some ty) when inherited_default k ->
+        Printf.sprintf "the default %s of interface %s in impl %s(%s)" m iface iface ty
       | Some (m, iface, Some ty) -> Printf.sprintf "%s in impl %s(%s)" m iface ty
       | Some (m, iface, None) -> Printf.sprintf "the default %s of interface %s" m iface
       | None -> shown_plain k
@@ -11386,6 +11416,9 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
     (* As the subject of a sentence, with its own backticks. *)
     let subject k =
       match impl_of k with
+      | Some (m, iface, Some ty) when inherited_default k ->
+        Printf.sprintf "the default `%s` of interface `%s`, inherited by `impl %s(%s)`,"
+          m iface iface ty
       | Some (m, iface, Some ty) -> Printf.sprintf "`%s` in `impl %s(%s)`" m iface ty
       | Some (m, iface, None) -> Printf.sprintf "the default `%s` of interface `%s`" m iface
       | None -> Printf.sprintf "`%s`" (shown_plain k)
@@ -11730,6 +11763,46 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
                   end)
                 (List.sort (fun (a, _) (b, _) -> String.compare a b) reached))
           roots;
+        (* C code, package-wide (final review C1): every function of the
+           package that reaches an `extern` (its own, or another package's
+           or the stdlib's) needs `IO.Foreign` in the grant whether or not
+           the reach above sees it.  The reach under-approximates interface
+           dispatch (specs/todos/2026-11-23-grant-dispatch-type-first-arg-
+           only.md), and an extern refused at run time
+           ([Authority.foreign_guard]) is a panic, not a value, so what the
+           package itself can reach is settled here; the run-time guard is
+           the backstop for C reached through other code (an ungranted
+           package's impl) that no static route shows.  Once per (package,
+           capability), unless the reach already reported it; at the
+           reaching function, first in source order. *)
+        let foreign_outside c = cap_subsumes "IO.Foreign" c && outside ks c in
+        if not (List.exists (fun c -> foreign_outside c && Hashtbl.mem seen c)
+                  [ "IO.Foreign"; "IO.Foreign.Blocking" ]) then begin
+          let pkg_keys =
+            Hashtbl.fold (fun k _ acc -> if pkg_of_key k = Some pkg then k :: acc else acc) rows []
+            |> List.filter_map (fun k -> Option.map (fun sp -> (k, sp)) (site_of k))
+            |> List.sort (fun (a, sa) (b, sb) ->
+                match source_order sa sb with 0 -> String.compare a b | c -> c)
+          in
+          List.iter (fun (k, sp) ->
+              let reached, _ = full_reach k in
+              List.iter (fun (c, path) ->
+                  if foreign_outside c && not (Hashtbl.mem seen c) then begin
+                    Hashtbl.replace seen c ();
+                    let holder = subject (match List.rev path with h :: _ -> h | [] -> k) in
+                    report ~code:Err.Code.dep_grant_exceeded ~span:sp
+                      ~notes:[ "granted at " ^ at g;
+                               "hint: widen the grant in forge.toml to name `IO.Foreign`: an \
+                                `extern` that a granted package can reach needs it even where \
+                                the program does not call it" ]
+                      (Printf.sprintf
+                         "`%s` is granted `%s`, but %s needs `%s` (`%s`), and a granted \
+                          package reaches C code only under a grant that names it."
+                         pkg g.G.g_text holder c (render_cap_chain (shown k :: List.map shown path)))
+                  end)
+                (List.sort (fun (a, _) (b, _) -> String.compare a b) reached))
+            pkg_keys
+        end;
         (* Literal targets under a scoped grant (Q3): every non-stdlib
            function the reach gets to, scanned once, charged to the first
            root (in source order) that reaches it. *)

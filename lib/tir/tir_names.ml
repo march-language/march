@@ -823,6 +823,13 @@ let grant_body_suffix = "$grant"
 let enter_grant_name = "Authority.enter_grant"
 let grant_layer_builtin_name = "Authority.grant_layer"
 
+(** Under grants, every call (and value use) of an [extern] [e] goes through
+    [e ^ foreign_guard_suffix], which calls [foreign_guard_name] (refused by
+    a grant layer that does not admit [IO.Foreign]) and then [e]
+    ([Auth_rt.grants]). *)
+let foreign_guard_suffix = "$foreign"
+let foreign_guard_name = "Authority.foreign_guard"
+
 (** [<p>$grant$auth_layer], [p] with every byte outside [A-Za-z0-9]
     (['_'] included) written [_xx], its hex code: a forge dep name may hold
     ['-'], which neither an LLVM nor a JS identifier takes, and the encoding

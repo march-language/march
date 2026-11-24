@@ -439,7 +439,7 @@ let reaches_authority (m : Tir.tir_module) : SSet.t =
       if not !hit then
         iter_calls
           (fun n ->
-             if n = authority_check
+             if n = authority_check || n = Tir_names.foreign_guard_name
              || (not (Hashtbl.mem defined n) && (is_op_builtin n || List.mem n spawn_builtins))
              then hit := true)
           f.Tir.fn_body;
@@ -552,6 +552,170 @@ let rec retarget_set (targets : (string, string) Hashtbl.t) (e : Tir.expr) : Tir
           brs,
         Option.map go d )
   | other -> other
+
+(* ── C code under a grant (ocap p6 final review C1) ──────────────────
+
+   Nothing else refuses an [extern] at run time, and the checker's static
+   reach under-approximates interface dispatch, so C reached under a grant
+   that does not admit [IO.Foreign] (an ungranted package's impl that a
+   granted package reaches through generic code) would run.  When [grants]
+   builds any frame, every reference to an extern [e] (a call or a value
+   use, in any fn) is retargeted to
+
+   {v
+     e$foreign(ps) = let _ = Authority.foreign_guard() in e(ps)
+   v}
+
+   [Authority.foreign_guard] panics when a grant layer in force does not
+   admit [IO.Foreign]; a [needs] frame, a [restrict] and the launch grant
+   never refuse there, so code outside every grant frame runs exactly as
+   before.  It reaches the authority ([reaches_authority]), so a function
+   value that calls C keeps the authority it was made under ([captures]): an
+   app callback a granted package calls still runs C.  Without a frame no
+   grant layer can be in force, and nothing is retargeted. *)
+
+(* [e] with every reference to a name in [tbl] (an extern) that is not
+   locally bound renamed to its guard wrapper. *)
+let rec guard_refs (tbl : (string, string) Hashtbl.t) (bound : SSet.t) (e : Tir.expr) : Tir.expr =
+  let ren (v : Tir.var) =
+    if SSet.mem v.Tir.v_name bound then v
+    else match Hashtbl.find_opt tbl v.Tir.v_name with
+      | Some n -> { v with Tir.v_name = n }
+      | None -> v
+  in
+  let a (x : Tir.atom) = match x with Tir.AVar v -> Tir.AVar (ren v) | _ -> x in
+  let atoms = List.map a in
+  let go = guard_refs tbl bound in
+  let add (v : Tir.var) b = SSet.add v.Tir.v_name b in
+  match e with
+  | Tir.EAtom x -> Tir.EAtom (a x)
+  | Tir.EApp (f, args) -> Tir.EApp (ren f, atoms args)
+  | Tir.ECallPtr (f, args) -> Tir.ECallPtr (a f, atoms args)
+  | Tir.ELet (v, e1, e2) -> Tir.ELet (v, go e1, guard_refs tbl (add v bound) e2)
+  | Tir.ELetRec (fns, b) ->
+    let bound' =
+      List.fold_left (fun bd (fd : Tir.fn_def) -> SSet.add fd.Tir.fn_name bd) bound fns in
+    Tir.ELetRec
+      ( List.map
+          (fun (fd : Tir.fn_def) ->
+             { fd with
+               Tir.fn_body =
+                 guard_refs tbl (List.fold_right add fd.Tir.fn_params bound') fd.Tir.fn_body })
+          fns,
+        guard_refs tbl bound' b )
+  | Tir.ECase (sc, brs, d) ->
+    Tir.ECase
+      ( a sc,
+        List.map
+          (fun (br : Tir.branch) ->
+             { br with Tir.br_body = guard_refs tbl (List.fold_right add br.Tir.br_vars bound) br.Tir.br_body })
+          brs,
+        Option.map go d )
+  | Tir.ETuple xs -> Tir.ETuple (atoms xs)
+  | Tir.ERecord fs -> Tir.ERecord (List.map (fun (k, x) -> (k, a x)) fs)
+  | Tir.EField (x, f) -> Tir.EField (a x, f)
+  | Tir.EUpdate (x, fs) -> Tir.EUpdate (a x, List.map (fun (k, y) -> (k, a y)) fs)
+  | Tir.EAlloc (t, xs) -> Tir.EAlloc (t, atoms xs)
+  | Tir.EStackAlloc (t, xs) -> Tir.EStackAlloc (t, atoms xs)
+  | Tir.EFree x -> Tir.EFree (a x)
+  | Tir.EIncRC x -> Tir.EIncRC (a x)
+  | Tir.EDecRC x -> Tir.EDecRC (a x)
+  | Tir.EAtomicIncRC x -> Tir.EAtomicIncRC (a x)
+  | Tir.EAtomicDecRC x -> Tir.EAtomicDecRC (a x)
+  | Tir.EReuse (x, t, xs) -> Tir.EReuse (a x, t, atoms xs)
+  | Tir.ESeq (e1, e2) -> Tir.ESeq (go e1, go e2)
+  | Tir.EAllocHole (o, t, xs, i) -> Tir.EAllocHole (Option.map a o, t, atoms xs, i)
+  | Tir.ESetField (x, i, y) -> Tir.ESetField (a x, i, a y)
+
+(* [fns] with every extern reference retargeted to its guard wrapper, plus
+   the wrappers of the externs some fn now references.  [fns] itself when no
+   fn references an extern. *)
+let guard_externs (externs : Tir.extern_decl list) (fns : Tir.fn_def list) : Tir.fn_def list =
+  if externs = [] then fns
+  else begin
+    let tbl : (string, string) Hashtbl.t = Hashtbl.create 8 in
+    List.iter
+      (fun (ed : Tir.extern_decl) ->
+         Hashtbl.replace tbl ed.Tir.ed_march_name
+           (ed.Tir.ed_march_name ^ Tir_names.foreign_guard_suffix))
+      externs;
+    (* The wrappers referenced, by name. *)
+    let used : (string, unit) Hashtbl.t = Hashtbl.create 8 in
+    let fns' =
+      List.map
+        (fun (f : Tir.fn_def) ->
+           let bound =
+             List.fold_left (fun b (p : Tir.var) -> SSet.add p.Tir.v_name b) SSet.empty
+               f.Tir.fn_params in
+           let body = guard_refs tbl bound f.Tir.fn_body in
+           (* Which wrappers [body] names: a second walk only when the body
+              mentions a wrapper at all (rare: only fns that use C). *)
+           let hit = ref false in
+           let rec scan (e : Tir.expr) =
+             let atom (x : Tir.atom) = match x with
+               | Tir.AVar v -> note v.Tir.v_name
+               | _ -> () in
+             match e with
+             | Tir.EAtom x | Tir.EField (x, _) | Tir.EFree x | Tir.EIncRC x | Tir.EDecRC x
+             | Tir.EAtomicIncRC x | Tir.EAtomicDecRC x -> atom x
+             | Tir.EApp (fv, xs) -> note fv.Tir.v_name; List.iter atom xs
+             | Tir.ECallPtr (fv, xs) -> atom fv; List.iter atom xs
+             | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) -> scan e1; scan e2
+             | Tir.ELetRec (fds, b) ->
+               List.iter (fun (fd : Tir.fn_def) -> scan fd.Tir.fn_body) fds; scan b
+             | Tir.ECase (sc, brs, d) ->
+               atom sc; List.iter (fun (br : Tir.branch) -> scan br.Tir.br_body) brs;
+               Option.iter scan d
+             | Tir.ETuple xs | Tir.EAlloc (_, xs) | Tir.EStackAlloc (_, xs) -> List.iter atom xs
+             | Tir.ERecord fs -> List.iter (fun (_, x) -> atom x) fs
+             | Tir.EUpdate (x, fs) -> atom x; List.iter (fun (_, y) -> atom y) fs
+             | Tir.EReuse (x, _, xs) -> atom x; List.iter atom xs
+             | Tir.EAllocHole (o, _, xs, _) -> Option.iter atom o; List.iter atom xs
+             | Tir.ESetField (x, _, y) -> atom x; atom y
+           and note n =
+             if String.ends_with ~suffix:Tir_names.foreign_guard_suffix n then begin
+               let e = String.sub n 0 (String.length n - String.length Tir_names.foreign_guard_suffix) in
+               if Hashtbl.find_opt tbl e = Some n then begin
+                 hit := true;
+                 Hashtbl.replace used n ()
+               end
+             end
+           in
+           scan body;
+           if !hit then { f with Tir.fn_body = body } else f)
+        fns
+    in
+    if Hashtbl.length used = 0 then fns
+    else begin
+      let wrappers =
+        List.filter_map
+          (fun (ed : Tir.extern_decl) ->
+             let name = ed.Tir.ed_march_name ^ Tir_names.foreign_guard_suffix in
+             if not (Hashtbl.mem used name) then None
+             else begin
+               let params =
+                 List.mapi (fun i t -> var (Printf.sprintf "$foreign_p%d" i) t) ed.Tir.ed_params in
+               Provenance.record name ~from:ed.Tir.ed_march_name
+                 ~derived:(Provenance.Clone_of (ed.Tir.ed_march_name, "extern guard"))
+                 ~pass:"auth_rt" ();
+               Some
+                 { Tir.fn_name = name;
+                   fn_params = params;
+                   fn_ret_ty = ed.Tir.ed_ret;
+                   fn_body =
+                     Tir.ELet
+                       ( var "$foreign_unit" Tir.TUnit,
+                         Tir.EApp (var Tir_names.foreign_guard_name (Tir.TFn ([], Tir.TUnit)), []),
+                         Tir.EApp
+                           ( var ed.Tir.ed_march_name (Tir.TFn (ed.Tir.ed_params, ed.Tir.ed_ret)),
+                             List.map (fun p -> Tir.AVar p) params ) );
+                   fn_kind = Tir.FnNormal }
+             end)
+          externs
+      in
+      fns' @ wrappers
+    end
+  end
 
 let grants (m : Tir.tir_module) ~(tbl : (string, Lower_state.fn_grant) Hashtbl.t)
   : Tir.tir_module * bool =
@@ -835,7 +999,7 @@ let grants (m : Tir.tir_module) ~(tbl : (string, Lower_state.fn_grant) Hashtbl.t
                fn_kind = Tir.FnNormal })
           !layers
       in
-      ({ m with Tir.tm_fns = fns @ layer_fns }, true)
+      ({ m with Tir.tm_fns = guard_externs m.Tir.tm_externs fns @ layer_fns }, true)
     end
   end
 

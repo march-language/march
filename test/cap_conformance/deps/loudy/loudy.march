@@ -1,0 +1,16 @@
+-- An interface whose default body asks for the console: an impl in the app
+-- that inherits it runs the package's code, so it runs under the grant to
+-- `loudy` (ocap phase 6, final review I2), not under the app's authority.
+mod Loudy do
+  needs IO.Console
+
+  interface Greet(a) do
+    fn greet : a -> String do
+      fn _x ->
+        match Authority.check("IO.Console", "stdout") do
+        Ok(_) -> "default greet: allowed"
+        Err(e) -> "default greet: " ++ Authority.describe(e)
+        end
+    end
+  end
+end

@@ -1,0 +1,25 @@
+-- A granted package whose only `extern` call sits in an impl the app reaches
+-- through generic code (`gopeek(x)`: no solved first-argument type, so the
+-- static reach counts no impl).  An extern in a granted package needs
+-- `IO.Foreign` in the grant whether or not the reach sees it.
+mod Cpid do
+  needs IO.Foreign
+
+  extern "c" : Cap(IO.Foreign) do
+    fn getpid() : Int = "getpid"
+  end
+
+  type Tok = Tok(Int)
+
+  interface Peek(a) do
+    fn peek : a -> Int
+  end
+
+  impl Peek(Tok) do
+    fn peek(_t) do
+      getpid()
+    end
+  end
+
+  fn tok() : Tok do Tok(1) end
+end

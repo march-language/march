@@ -1,0 +1,12 @@
+-- An `extern` in a granted dependency needs `IO.Foreign` in the grant even
+-- where the app reaches it only through generic code the reach cannot follow.
+-- DEP: cpid deps/dep_grant_exceeded_4/cpid IO.Console
+mod Main do
+  needs IO.Console, IO.Foreign
+
+  fn gopeek(x) do peek(x) end
+
+  fn main() do
+    println(if gopeek(Cpid.tok()) > 0 do "ran getpid" else "ran getpid" end)
+  end
+end

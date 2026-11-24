@@ -1310,4 +1310,36 @@ mod Authority do
     end
   end
 
+  doc """
+  Refuses a call of C code (an `extern`) made under a dependency grant
+  that does not admit `IO.Foreign`: panics with `describe` of the refusal
+  (an extern returns a plain value, so its refusal cannot be an `Err`).
+  Only a grant's layer refuses: a function's `needs`, a `restrict` and the
+  launch grant leave externs to the static checks, as before. The compiler
+  puts a call of this in front of every extern call of a program built under
+  grants (lib/tir/auth_rt.ml, `grants`); the interpreter calls it before an
+  extern once a grant frame exists.
+  """
+  @[stdlib_internal]
+  fn foreign_guard() : () do
+    if cap_check_raw("IO.Foreign", "") == 0 do ()
+    else
+      match grant_refusal(cap_layers()) do
+      None -> ()
+      Some(e) -> panic("capability refused: " ++ describe(e))
+      end
+    end
+  end
+
+  -- The innermost grant layer that does not admit `IO.Foreign`.
+  pfn grant_refusal(layers : List(Layer)) : Option(CapError) do
+    match layers do
+    Nil -> None
+    Cons(Layer(ByGrant(p), text, scopes), rest) ->
+      if admits(scopes, "IO.Foreign", "", "/") do grant_refusal(rest)
+      else Some(CapError("IO.Foreign", "", ByGrant(p), text)) end
+    Cons(_, rest) -> grant_refusal(rest)
+    end
+  end
+
 end

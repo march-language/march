@@ -109,6 +109,14 @@ grants compiles to the same IR as before.
 - Task 6: a package's own `Authority.check` takes its kind at run time and has an empty row, so
   it was "proven"; it is now never proven.
 - Task 7: a symlink under a granted root escaped the package (membership is now symlink-proof).
+- Final review: an `extern` reached through dispatch the static reach misses ran under a grant
+  without `IO.Foreign`, since nothing checked externs at run time (C1: now package-wide
+  statically, plus `Authority.foreign_guard` before every extern call under a grant frame,
+  compiled and interpreted); an interface default body inherited by an app impl ran ungranted
+  and passed `--check` (I2: an impl method belongs to the file its code is written in,
+  `Dep_grants.impl_method_file`); `march repl FILE`'s preload check failed open on a crashed
+  child (M4: `Dep_grants.preload_check_verdict` fails closed). Filed: the stdlib-initialiser
+  slot (M5), the REPL's library interfaces.
 
 ## IR identity with no grants
 
