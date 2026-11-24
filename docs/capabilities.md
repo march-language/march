@@ -1671,6 +1671,64 @@ All five declarations can coexist in the same module. Each is checked by its own
 
 ---
 
+## Capture sets: what a function value can reach
+
+Since object capabilities, a function value runs under the authority it captured where it was
+made, not its caller's (see "Function values keep the authority they were made under" above). So passing a closure
+around passes authority around, and the plain type `String -> ()` does not say how much. The
+compiler now infers that for every function value and for every value that holds one. It is
+called the value's **capture set**: an upper bound on what the value can do when it is called.
+
+The sets are inferred. Nothing is written in source yet and nothing is rejected because of
+them: this is the first step of capture checking (design:
+`specs/2026-11-11-ocap-capture-checking-design.md`). You can read them in two places.
+
+**In the editor.** Hover shows a value's type with its set after `needs`:
+
+```march
+let say = fn s -> println(s)       -- say : a -> Result((), CapError) needs IO.Console
+let weather = Weather.new()        -- weather : Client needs IO.NetConnect("api.weather.com/v1/")
+```
+
+`march-lsp query type` and `query hover` print the same text. A value that holds no function
+value prints exactly as before.
+
+**From the command line.** `march --dump-captures FILE` checks the file and lists every place a
+function value is made, with its set and the reason for each element:
+
+```text
+8:11   lambda in `new`  needs IO.NetConnect("api.weather.com/v1/")
+         IO.NetConnect("api.weather.com/v1/")  calls `HttpClient.get` (9:12)
+17:13  let fetch : String -> Result(String, String) needs c1
+26:8   let weather : Weather.Client needs IO.NetConnect("api.weather.com/v1/")
+fn new : () -> (Weather.Client needs IO.NetConnect("api.weather.com/v1/"))
+fn print : (Weather.Client needs c1) -> Result((), CapError) needs IO.Console, c1
+1 function value, 0 not tracked
+```
+
+How to read it:
+
+- **A scope** such as `IO.Console` or `IO.FileRead("/srv/data/")` means the value can perform
+  operations inside that scope. A literal target gives a scoped element; a computed one gives
+  the whole kind.
+- **A variable** such as `c1` stands for whatever a parameter carries. `print` above calls a
+  function it was handed inside the `Client`, so calling `print` may do whatever that client
+  can: `needs IO.Console, c1`.
+- **Data holds what its fields hold.** A `Client` built around a closure has that closure's
+  set: `Client needs IO.NetConnect(...)`. A type argument carries its own set:
+  `List((String -> () needs IO.Console))`.
+- **A set is what the value can do, not what it may try.** A closure created inside a literal
+  `restrict` is narrowed by it, as is one created in a function with a `needs` clause. A value
+  that a call returns, or that was made outside and brought in, keeps the set it had: it runs
+  under its own authority.
+- **`not tracked`** (printed `?`, and `IO` in a hover) marks a value the inference does not
+  follow, for example a function value read from a table opened by name. It is treated as able
+  to do anything. It is never a smaller set than the truth.
+
+A function value made by module-level code captures nothing at run time and runs under its
+caller's authority, so its set is everything it can reach and a module-level `restrict` does
+not narrow it.
+
 ## Capability inference hints
 
 If you call a function that requires a `needs X` declaration but your module does not have one, the compiler emits a **hint** (not an error) pointing to the call site:

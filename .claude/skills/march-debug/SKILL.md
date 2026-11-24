@@ -66,6 +66,23 @@ the last stage that had it, and `--no-opt` keeps it. `why-miss` says which layer
 will hit (source-level, post-TIR, neither) and names each changed input; it needs
 one successful build of FILE in this project first.
 
+## What can this function value reach?
+
+**First command:**
+```bash
+./_build/default/bin/main.exe --dump-captures FILE
+```
+One line per function value in FILE (a lambda, a local fn, a named function read
+as a value) with its inferred capture set and the reason for each element, then
+the bindings that hold a set and each function's capture type. `needs ?` is a
+value the inference does not follow; the line under it says why. It is
+inference only (ocap phase 8a): it changes no verdict and no generated code.
+`MARCH_CAPTURE_DEBUG=1` adds every untracked spot, the stdlib's included, on
+stderr. To test the sets against a real run, `MARCH_CAPTURE_ORACLE=1 march FILE`
+(interpreter) reports any admitted operation outside the set of a function value
+that was running (`[capture-oracle] MISS ...`); `scripts/run-tests.sh captures`
+runs that over the corpus.
+
 ## Which TIR stage went wrong?
 
 **First command:**

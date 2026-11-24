@@ -25,6 +25,9 @@ module T = Capture_ty
 
 type svar = T.svar
 
+(* MARCH_CAPTURE_DEBUG=1: every untracked spot, with its cause, on stderr. *)
+let debug = Sys.getenv_opt "MARCH_CAPTURE_DEBUG" <> None
+
 (* ── the constraint store ───────────────────────────────────────────────── *)
 
 type reason = { why : string; rspan : Ast.span }
@@ -70,7 +73,7 @@ let add_unknown (st : store) (v : svar) ~(cause : string) (sp : Ast.span) : unit
   Hashtbl.replace st.unknown_causes cause
     (1 + Option.value ~default:0 (Hashtbl.find_opt st.unknown_causes cause));
   st.unknown_at <- (cause, sp) :: st.unknown_at;
-  if Sys.getenv_opt "MARCH_CAPTURE_DEBUG" <> None then
+  if debug then
     Printf.eprintf "[capture] not tracked: %s at %s:%d:%d\n" cause sp.Ast.file sp.Ast.start_line sp.Ast.start_col;
   add_const st v S.unknown ~why:{ why = "not tracked: " ^ cause; rspan = sp }
 
@@ -224,7 +227,7 @@ let of_span (s : st) (sp : Ast.span) : T.t =
   match ty_at s sp with
   | Some ty -> of_ty s ty
   | None ->
-    if Sys.getenv_opt "MARCH_CAPTURE_DEBUG" <> None then
+    if debug then
       Printf.eprintf "[capture] no recorded type at %s:%d:%d\n" sp.Ast.file sp.Ast.start_line sp.Ast.start_col;
     T.Opaque
 
@@ -677,9 +680,6 @@ let rec bind_pat (s : st) (c : ctx) (p : Ast.pattern) (t : T.t) : ctx =
     (match ps with first :: _ -> bind_pat s c first t | [] -> c)
   | _ -> all_opaque c
 
-let callee_name (f : Ast.expr) : string option =
-  match f with Ast.EVar n -> Some n.Ast.txt | _ -> None
-
 let rec walk (s : st) (c : ctx) (e : Ast.expr) : T.t =
   let sp = span_of_expr e in
   let t = walk_inner s c e in
@@ -705,7 +705,7 @@ and walk_inner (s : st) (c : ctx) (e : Ast.expr) : T.t =
     | _ -> walk_app s c r [ l ] sp)
   | Ast.ELam (ps, body, sp) ->
     let names = List.map (fun (p : Ast.param) -> p.Ast.param_name) ps in
-    let t, set = walk_fn_value s c ~self:None ~params:names ~body in
+    let t, set = walk_fn_value s c ~params:names ~body in
     s.sites <-
       { rs_span = sp; rs_key = span_of_expr body; rs_kind = Lambda; rs_owner = c.owner; rs_set = set; rs_ty = t }
       :: s.sites;
@@ -872,9 +872,7 @@ and walk_block (s : st) (c : ctx) (es : Ast.expr list) : T.t =
     walk_block s c rest
 
 (* A lambda or a local fn: its annotated type and its set. *)
-and walk_fn_value (s : st) (c : ctx) ~(self : (Ast.name * T.t) option) ~(params : Ast.name list)
-    ~(body : Ast.expr) : T.t * svar =
-  ignore self;
+and walk_fn_value (s : st) (c : ctx) ~(params : Ast.name list) ~(body : Ast.expr) : T.t * svar =
   let set = fresh s and own = fresh s and valv = fresh s in
   let holes = List.map (fun (n : Ast.name) -> (n, T.new_hole ())) params in
   let depth = c.depth + 1 in
@@ -906,7 +904,7 @@ and walk_let_fn (s : st) (c : ctx) (name : Ast.name) (ps : Ast.param list) (body
   let self = T.new_hole () in
   let c_self = { c with scope = (name.Ast.txt, Bound (self, c.depth)) :: c.scope } in
   let names = List.map (fun (p : Ast.param) -> p.Ast.param_name) ps in
-  let t, set = walk_fn_value s c_self ~self:None ~params:names ~body in
+  let t, set = walk_fn_value s c_self ~params:names ~body in
   (match self with T.Hole h -> fill_hole s h t | _ -> ());
   s.sites <-
     { rs_span = name.Ast.span; rs_key = span_of_expr body; rs_kind = Local_fn name.Ast.txt; rs_owner = c.owner;
@@ -1137,7 +1135,6 @@ and call_named (s : st) (c : ctx) (n : Ast.name) (key : string) (args : Ast.expr
   let nargs = List.length ats in
   let result_ty = ty_at s sp in
   let join = if plain_at s sp then T.Plain else of_span s sp in
-  let extra_args params = if nargs > List.length params then List.filteri (fun k _ -> k >= List.length params) ats else [] in
   let finish (r : T.t) (params_len : int) : unit =
     (* More arguments than parameters: the rest are applied to the result. *)
     let r =
@@ -1147,7 +1144,6 @@ and call_named (s : st) (c : ctx) (n : Ast.name) (key : string) (args : Ast.expr
     in
     flow s r join
   in
-  ignore extra_args;
   (match state_of s key with
    | Done [] | Active ([], _) ->
      (* A dispatch node (an interface method), an extern, or a function
@@ -1245,7 +1241,7 @@ and builtin_flows ?(name = "") (s : st) (c : ctx) (ats : T.t list) (sp : Ast.spa
   List.iter (fun v -> add_edge s.store v c.valv) (List.concat_map callable ats);
   let rvars = T.svars join in
   List.iter (fun u -> List.iter (fun v -> add_edge s.store u v) rvars) arg_vars;
-  if Sys.getenv_opt "MARCH_CAPTURE_DEBUG" <> None && arg_vars = [] && T.svars join <> [] then
+  if debug && arg_vars = [] && T.svars join <> [] then
     Printf.eprintf "[capture] builtin with a set-carrying result and no set-carrying argument: %s\n" name;
   if arg_vars = [] && not (List.mem name fresh_result_builtins) then begin
     let rec conjured (t : T.t) =
@@ -1616,7 +1612,6 @@ let analyse ?unsound ?(all = false) (env : env) (decls : Ast.decl list) : result
            List.iter
              (fun v -> if S.is_empty (get local v) then Hashtbl.replace symbolic v ())
              (List.concat_map (inputs ~neg:true) sc.sc_params);
-           let _ = symbolic in
            let show (ty : ty option) (t : T.t) : string =
              match ty with Some ty -> T.pp ~set ty t | None -> "_"
            in

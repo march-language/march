@@ -13,13 +13,13 @@
 #          reached or not (the upper bound; nothing would run this per build)
 #
 # Wall time is the median of N interleaved runs (default 11) under a private
-# HOME with a warm stdlib cache, from a fresh working directory per run so no
-# check artifact is reused.  The `pass` column is the pass's own time from
+# HOME with a warm stdlib cache, from a fresh working directory and an empty
+# artifact store per run so no check artifact is reused.  The `pass` column is the pass's own time from
 # `--timings` (the `captures` stamp minus the `typecheck` stamp), which is
 # the number to trust: wall-time ratios this close to 1 are inside the noise.
 #
 # Usage: scripts/capture-cost.sh [-n RUNS] [FILE...]
-# Defaults: a hello program (the stdlib's fixed cost), every bench/*.march,
+# Defaults: a hello program (the stdlib's fixed cost), five bench programs,
 # examples/http_requests.march and examples/lab_app's entry file.
 set -euo pipefail
 
@@ -36,7 +36,11 @@ mkdir -p "$HOME"
 
 if [[ $# -eq 0 ]]; then
   printf 'mod Hello do\n  needs IO.Console\n  fn main() do println("hello") end\nend\n' > "$WORK/hello.march"
-  FILES=("$WORK/hello.march" "$ROOT"/bench/*.march "$ROOT/examples/http_requests.march")
+  FILES=("$WORK/hello.march")
+  for b in list_ops tree_transform binary_trees json_stream actor_ping; do
+    [[ -f "$ROOT/bench/$b.march" ]] && FILES+=("$ROOT/bench/$b.march")
+  done
+  FILES+=("$ROOT/examples/http_requests.march")
   LAB="$(ls "$ROOT"/examples/lab_app/src/*.march 2>/dev/null | head -1 || true)"
   [[ -n "$LAB" ]] && FILES+=("$LAB")
 else
@@ -48,6 +52,9 @@ one() {
   local mode="$1" file="$2" d out
   d="$(mktemp -d "$WORK/run.XXXXXX")"
   out="$d/out"
+  # A check artifact in the global store would end the run before the pass:
+  # keep the stdlib typecheck cache (~/.cache/march), drop the artifact store.
+  rm -rf "$HOME/.march"
   local t0 t1
   t0=$(python3 -c 'import time; print(time.time())')
   ( cd "$d" && case "$mode" in
