@@ -1,0 +1,45 @@
+-- TEST
+-- A vault mock (ocap phase 7): inside `mock IO.Mut("sessions")` the table
+-- of that name is a private one that starts empty, an actor spawned inside
+-- writes to the same private table, and after the block the real table is
+-- untouched. A name the mock does not cover is the real table.
+mod MockVault do
+  needs IO.Console
+  needs IO.Mut
+
+  actor Writer do
+    state { n : Int }
+    init  { n: 0 }
+    on Put(v : Int) do
+      let t = Authority.must(Vault.open("sessions"))
+      Vault.set(t, "from_actor", v)
+      { state with n: state.n + 1 }
+    end
+  end
+
+  fn show_get(t, k : String) : String do
+    match Vault.get(t, k) do
+    Some(v) -> int_to_string(v)
+    None -> "none"
+    end
+  end
+
+  fn main() do
+    let real = Authority.must(Vault.open("sessions"))
+    Vault.set(real, "user", 1)
+    let other = Authority.must(Vault.open("other"))
+    Vault.set(other, "k", 9)
+    mock IO.Mut("sessions") with { open: None } do
+      let t = Authority.must(Vault.open("sessions"))
+      println("inside, before: " ++ show_get(t, "user"))
+      Vault.set(t, "user", 2)
+      let w = spawn(Writer)
+      send(w, Put(3))
+      run_until_idle()
+      println("inside, actor wrote: " ++ show_get(t, "from_actor"))
+      println("inside, other: " ++ show_get(Authority.must(Vault.open("other")), "k"))
+    end
+    println("after, real user: " ++ show_get(real, "user"))
+    println("after, real from_actor: " ++ show_get(real, "from_actor"))
+  end
+end

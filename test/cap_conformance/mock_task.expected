@@ -1,0 +1,3 @@
+task: mocked
+main after: real
+exit 0

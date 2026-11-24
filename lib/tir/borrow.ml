@@ -772,7 +772,7 @@ let extern_owned_builtins : string list = [
     "native_u8_arr_set"; "native_u8_arr_sort";
     "tcp_connect"; "tcp_connect_timeout"; "http_serialize_request"; "http_parse_response";
     "csv_open"; "csv_next_row"; "csv_close"; "own"; "cap_narrow"; "mint_cap";
-    "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps";
+    "cap_impl"; "cap_dict";
     "register_resource";
     "register_actor_on_stop";
     (* Observe plan R4: registration reads two static closures; the inspect

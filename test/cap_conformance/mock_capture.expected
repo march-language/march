@@ -1,0 +1,5 @@
+direct: mocked
+outside value called inside: real
+inside value called after: mocked
+after: real
+exit 0

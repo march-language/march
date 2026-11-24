@@ -6467,6 +6467,7 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   | A.EPipe (a, b, _) -> go a; go b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _) -> go e
   | A.ERestrict (es, b, _) -> List.iter go es; go b
+  | A.EMock (es, h, b, _) -> List.iter go es; go h; go b
   (* Calculations retain per-step hint checking and report labels. *)
   | A.EProof (A.PCalc (e0, steps), sp) ->
     List.iter (fun (st : A.calc_step) -> if st.A.cs_hint <> [] then go (A.EBlock (st.A.cs_hint, sp))) steps;
@@ -7261,6 +7262,7 @@ let rec warn_predicate_expr_tys (errctx : Err.ctx) (e : A.expr) : unit =
   | A.EField (e, _, _) -> ge e
   | A.EIf (c, t, e, _) -> ge c; ge t; ge e
   | A.ERestrict (es, b, _) -> List.iter ge es; ge b
+  | A.EMock (es, h, b, _) -> List.iter ge (es @ [ h ]); ge b
   | A.ECond (arms, _) -> List.iter (fun (c, b) -> ge c; ge b) arms
   | A.EPipe (a, b, _) -> ge a; ge b
   | A.EAnnot (e, t, _) -> ge e; warn_predicate_ty errctx t

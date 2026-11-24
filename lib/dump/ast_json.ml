@@ -415,6 +415,15 @@ let rec expr_to_json (e : expr) : string =
       ("span", span_to_json span);
       rty;
     ]
+  | EMock (entries, handler, body, span) ->
+    Dump.json_obj [
+      ("kind", Dump.json_string "EMock");
+      ("entries", Dump.json_list (List.map expr_to_json entries));
+      ("handler", expr_to_json handler);
+      ("body", expr_to_json body);
+      ("span", span_to_json span);
+      rty;
+    ]
   | ECond (arms, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "ECond");

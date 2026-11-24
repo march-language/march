@@ -2058,7 +2058,7 @@ let span_of_expr (e : expr) : span =
   | ELam (_, _, sp) | EBlock (_, sp) | ELet (_, sp)
   | EMatch (_, _, sp) | ETuple (_, sp) | ERecord (_, sp)
   | ERecordUpdate (_, _, sp) | EField (_, _, sp)
-  | EIf (_, _, _, sp) | ERestrict (_, _, sp) | ECond (_, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
+  | EIf (_, _, _, sp) | ERestrict (_, _, sp) | EMock (_, _, _, sp) | ECond (_, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
   | ESpawn (_, sp) | EDbg (_, sp) | ELetFn (_, _, _, _, sp) -> sp
   | ELetQ (_, _, _, sp) | ELetStar (_, _, _, sp) -> sp
@@ -2176,7 +2176,14 @@ and apply_inner (fn_val : value) (args : value list) : value =
     (match !Eval_prim.builtin_guard with
      | Some g -> g name
      | None -> ());
-    f args
+    (* Ocap phase 7: in a test build, once a `mock` has been entered, an
+       interceptable operation consults the mocks in force ([mock_call]). *)
+    (match !Eval_runtime.mock_fns with
+     | None -> f args
+     | Some fns ->
+       (match Hashtbl.find_opt Eval_runtime.mock_ops name with
+        | None -> f args
+        | Some op -> mock_call fns op name f args))
 
   | VForeign (lib, sym, ef_raises, param_tys, ret_ty) ->
     (match !foreign_guard_fn with
@@ -2205,6 +2212,41 @@ and apply_inner (fn_val : value) (args : value list) : value =
          (String.concat " or " arities) n)
 
   | _ -> eval_error "applied non-function value: %s" (value_to_string fn_val)
+
+(** An interceptable operation [name] (real implementation [f]) under the
+    interpreter's twin of the test build's dispatch wrapper
+    ([Io_ops_gen.dispatch_wrapper]): the innermost mock covering it
+    ([Authority.mock_for]) gets it when its handler has the field; a handler
+    without it runs the real operation, checked against the authority outside
+    the mock ([Authority.mock_fallthrough]); no mock runs it as is.  An
+    absent field (a partial record literal) reads as [None]. *)
+and mock_call ((mock_for, fallthrough) : value * value) (op : Eval_runtime.mock_op)
+    (name : string) (f : value list -> value) (args : value list) : value =
+  let arg i = match List.nth_opt args i with Some v -> v | None -> VUnit in
+  let target =
+    match op.Eval_runtime.mo_target with
+    | March_caps.Mock_target.Lit s -> s
+    | March_caps.Mock_target.Arg i -> (match arg i with VString s -> s | _ -> "")
+    | March_caps.Mock_target.Int_arg i -> (match arg i with VInt n -> string_of_int n | _ -> "")
+    | March_caps.Mock_target.Host_port (i, j) ->
+      (match arg i, arg j with VString h, VInt p -> h ^ ":" ^ string_of_int p | _ -> "")
+  in
+  let kind = VString op.Eval_runtime.mo_kind in
+  match apply mock_for [ kind; VString target ] with
+  | VCon ("Some", [ VInt id ]) ->
+    let field =
+      match Eval_runtime.mock_lookup id with
+      | VRecord fields -> List.assoc_opt name fields
+      | _ -> None
+    in
+    (match field, op.Eval_runtime.mo_shape with
+     | Some (VCon ("Some", [ v ])), Eval_runtime.Mock_value -> v
+     | Some (VCon ("Some", [ g ])), Eval_runtime.Mock_unit -> apply g [ VUnit ]
+     | Some (VCon ("Some", [ g ])), Eval_runtime.Mock_args -> apply g args
+     | _ ->
+       ignore (apply fallthrough [ kind; VString target ]);
+       f args)
+  | _ -> f args
 
 (** Depth-tracking wrapper around [apply_inner]. *)
 and apply (fn_val : value) (args : value list) : value =
@@ -2618,6 +2660,24 @@ and eval_expr_inner (env : env) (e : expr) : value =
             | VString t -> t
             | _ -> eval_error "Scope.text: expected a string")
     in
+    let saved = apply (lookup "Authority.enter_fn" env) [ layer ] in
+    Fun.protect ~finally:(fun () -> Eval_builtins.cap_slot := saved)
+      (fun () -> eval_expr env body)
+
+  | EMock (es, h, body, _) ->
+    (* ocap phase 7: register the handler record and push a ByMock(id)
+       layer around [body], as [Lower.lower_mock] does.  A partial record
+       literal needs no completing here: the interceptable builtins
+       ([mock_intercept]) read an absent field as [None]. *)
+    ensure_module_loaded "Authority";
+    let text = match March_caps.Scope_expr.restrict_text es with
+      | Some t -> t
+      | None -> eval_error "a mock's scope must be literal" in
+    if !Eval_runtime.mock_fns = None then
+      Eval_runtime.mock_fns :=
+        Some (lookup "Authority.mock_for" env, lookup "Authority.mock_fallthrough" env);
+    let id = Eval_runtime.mock_register (eval_expr env h) in
+    let layer = apply (lookup "Authority.mock_layer" env) [ VInt id; VString text ] in
     let saved = apply (lookup "Authority.enter_fn" env) [ layer ] in
     Fun.protect ~finally:(fun () -> Eval_builtins.cap_slot := saved)
       (fun () -> eval_expr env body)

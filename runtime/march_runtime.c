@@ -4395,7 +4395,6 @@ typedef struct {
      * Guarded by g_supervise_mu; zeroed explicitly at registration (realloc). */
     char  **pending_names;
     int     pending_name_count;
-    void   *pending_spawn_cap;
     /* ocap phase 4: the run-time authority of this slot's FIRST spawn (the
      * child's meta->auth at registration), an owned reference released with
      * the supervisor's meta (meta_free).  Every restart of the slot runs its
@@ -4537,26 +4536,6 @@ typedef struct march_actor_meta {
     int64_t                     backoff_base_ms;
     int64_t                     backoff_cap_ms;
     int64_t                     backoff_jitter_pct;
-    /* Capability-passing (--test builds only): the capability captured at the
-     * SPAWN site, so that an actor handler can dispatch through its dictionary.
-     *
-     * A handler is entered from the scheduler, not from an elaborated caller,
-     * so there is nobody to thread a capability parameter from — the dispatch
-     * function's arity is frozen because the actor record holds it as
-     * $d_dispatch.  The spawn site DOES have the capability in scope, so it is
-     * captured here and read back by the dispatch.
-     *
-     * Kept on the meta rather than as a field on the actor record on purpose:
-     * the record's layout is pinned by the C runtime's hardcoded word indices
-     * (a[2]=dispatch, a[3]=alive) AND is what migrate_state, hot reload and
-     * @compat all reason about.  The meta is runtime-internal and none of them
-     * see it.
-     *
-     * NULL — the overwhelming case, every release build — means "no captured
-     * capability", which reads back as the plain sentinel and takes the
-     * ambient path. _Atomic for the same reason as green_thread: written on
-     * the spawning thread, read on the actor's own. */
-    _Atomic(void *)             spawn_cap;
     /* ocap phase 4: the run-time authority this actor was spawned under (the
      * spawner's slot at march_spawn_common, or a restart's first-spawn
      * authority), an owned reference released by meta_free.  Installed on
@@ -6074,7 +6053,6 @@ static void stash_child_for_restart(march_actor_meta *m,
         n = m->reg_name_count;
     }
     pthread_mutex_unlock(&g_registry_mu);
-    void *cap = atomic_load_explicit(&m->spawn_cap, memory_order_acquire);
 
     pthread_mutex_lock(&g_supervise_mu);
     march_sup_child *c = &sup->sup_children[idx];
@@ -6082,7 +6060,6 @@ static void stash_child_for_restart(march_actor_meta *m,
     int old_n = c->pending_name_count;
     c->pending_names = names;
     c->pending_name_count = n;
-    c->pending_spawn_cap = cap;
     pthread_mutex_unlock(&g_supervise_mu);
     for (int i = 0; i < old_n; i++) free(old[i]);
     free(old);
@@ -7667,12 +7644,11 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
     void *new_child = march_spawn_supervised(raw);
     march_cap_restore(auth_saved);
 
-    /* Take what the dead incarnation stashed on this slot (its names and its
-     * spawn-site capability; stash_child_for_restart). */
+    /* Take what the dead incarnation stashed on this slot (its names;
+     * stash_child_for_restart). */
     pthread_mutex_lock(&g_supervise_mu);
     char **names = child->pending_names;
     int    n_names = child->pending_name_count;
-    void  *cap = child->pending_spawn_cap;
     child->pending_names = NULL;
     child->pending_name_count = 0;
     pthread_mutex_unlock(&g_supervise_mu);
@@ -7689,12 +7665,6 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
         __atomic_store_n(&new_meta->sup_pe, sup_meta->pe, __ATOMIC_RELEASE);
         atomic_store_explicit(&new_meta->pe->epoch, inherited_epoch,
                               memory_order_release);
-        /* Capture-at-spawn (--test builds only ever set it): the replacement
-         * inherits the crashed incarnation's captured capability record, so
-         * a mock that reached the child reaches its restart.  The record is
-         * retained forever (never freed), so sharing the pointer needs no RC. */
-        if (cap)
-            atomic_store_explicit(&new_meta->spawn_cap, cap, memory_order_release);
         pthread_mutex_unlock(&g_tbl_mu);
         __atomic_store_n(&child->cur_pid, pe_pid_or_0(new_meta->pe),
                          __ATOMIC_RELEASE);
@@ -9028,36 +8998,6 @@ static void *march_spawn_common(void *actor, int defer_activation) {
      * the background thread before returning. */
     march_ensure_sched_started();
     return actor;
-}
-
-/* Capability-passing: attach the spawn-site capability to an actor, and read
- * it back from inside the actor's dispatch.  Both take the ACTOR pointer,
- * which is what march_actor_meta is keyed by and what the spawn lowering has
- * in hand (`let $raw_actor = Name_spawn() in spawn($raw_actor)`).
- *
- * Set is called AFTER march_spawn, because march_spawn is what creates the
- * meta.  Reading an actor with no meta, or one spawned outside a --test build,
- * yields NULL — the plain sentinel — so the ambient path runs. */
-void march_set_actor_caps(void *actor, void *caps) {
-    march_reclaim_enter();   /* m: resolved and used inside */
-    march_actor_meta *m = find_meta(actor);
-    if (m) atomic_store_explicit(&m->spawn_cap, caps, memory_order_release);
-    march_reclaim_exit();
-}
-
-/* Returns an OWNED reference: the meta keeps its own, and the dispatch's
- * Perceus releases the one it reads (a dispatch arm that uses no capability
- * `dec_rc`s `$caps`). Handing back the meta's reference instead freed the
- * record on the second message to such an actor and underflowed on a later
- * one, in every --test build (depot's Pool under conduit's suite). */
-void *march_actor_caps(void *actor) {
-    march_reclaim_enter();   /* m: resolved and used inside */
-    march_actor_meta *m = find_meta(actor);
-    void *caps = m ? atomic_load_explicit(&m->spawn_cap, memory_order_acquire)
-                   : NULL;
-    if (caps) march_incrc(caps);
-    march_reclaim_exit();
-    return caps;
 }
 
 void *march_spawn(void *actor) {
@@ -14120,7 +14060,6 @@ void march_actor_register_child(void *supervisor, void *child,
     sup_meta->sup_children[idx].last_crash_ms = 0;
     sup_meta->sup_children[idx].pending_names = NULL;
     sup_meta->sup_children[idx].pending_name_count = 0;
-    sup_meta->sup_children[idx].pending_spawn_cap = NULL;
     march_incrc(child_meta->auth);
     sup_meta->sup_children[idx].first_auth = child_meta->auth;
     __atomic_store_n(&sup_meta->sup_num_children, idx + 1, __ATOMIC_RELAXED);

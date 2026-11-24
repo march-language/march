@@ -83,6 +83,19 @@ val cap_slot : value ref
 
 (** The mock registry (ocap phase 7): [mock_register h] keeps a `mock`
     block's handler record and returns its id; [mock_lookup id] reads it. *)
+type mock_shape = Mock_value | Mock_unit | Mock_args
+    (** A value-typed operation ([process_cwd]), a zero-argument one, or one
+        taking arguments. *)
+type mock_op = { mo_kind : string; mo_target : March_caps.Mock_target.t; mo_shape : mock_shape }
+
+val mock_ops : (string, mock_op) Hashtbl.t
+(** The interceptable builtins of a test build, filled by the driver; empty
+    outside one. *)
+
+val mock_fns : (value * value) option ref
+(** [Authority.mock_for] and [Authority.mock_fallthrough], set when the
+    first [mock] block is entered. *)
+
 val mock_register : value -> int
 val mock_lookup : int -> value
 val with_actor_authority : value -> (unit -> 'a) -> 'a

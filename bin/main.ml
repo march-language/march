@@ -2507,11 +2507,6 @@ let codegen_cas_tags () =
      predates capability passing; it was found by compiling the same file both
      ways and getting the same artifact.) *)
   @ (if !do_test then ["test"] else [])
-  (* The capability-passing pass changes the emitted program, so a build with
-     it on must not share a CAS entry with one without.  Found the same way the
-     --test omission was: the same file built both ways returned the same
-     artifact, so the "pass off" run printed the mocked output. *)
-  @ (if Sys.getenv_opt "MARCH_CAP_PASSING" = Some "1" then ["cappass"] else [])
   @ (if cap_mocking () then ["capdisp"] else [])
   (* MARCH_NO_INLINE_RC=1 turns off the inline refcount fast path, which changes
      the emitted code without changing the compiler binary. *)
@@ -3027,6 +3022,44 @@ let peel_dep_grants (args : string list) : string option * string list =
   let rest = go [] args in
   (!flag, rest)
 
+(** The test build's dispatch wrappers ([Io_ops_gen.dispatch_wrappers_source]),
+    parsed and desugared: appended to the program (compiled, JS) or to the
+    JIT's precompiled stdlib.  Their spans name the file ["<cap-dispatch>"],
+    which may name the stdlib-only mock registry builtins. *)
+let cap_dispatch_decls () : March_ast.Ast.decl list =
+  let src = March_typecheck.Io_ops_gen.dispatch_wrappers_source () in
+  let lexbuf = Lexing.from_string src in
+  lexbuf.Lexing.lex_curr_p <-
+    { lexbuf.Lexing.lex_curr_p with
+      Lexing.pos_fname = March_typecheck.Typecheck_builtins.cap_dispatch_file };
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
+  (March_desugar.Desugar.desugar_module m).March_ast.Ast.mod_decls
+
+(** A test build (ocap phase 7): `mock` blocks type-check, and the
+    interpreter intercepts the operations a mock can take over
+    ([Eval_runtime.mock_ops], from the same dictionaries the compiled test
+    build's dispatch wrappers are generated from). *)
+let enable_test_build () =
+  March_typecheck.Typecheck.test_build := true;
+  let module G = March_typecheck.Io_ops_gen in
+  let module TT = March_typecheck.Typecheck_types in
+  if Hashtbl.length March_eval.Eval_runtime.mock_ops = 0 then
+    List.iter
+      (fun (op, cap) ->
+         match List.assoc_opt op (G.dict_fields cap) with
+         | None -> ()
+         | Some fty ->
+           let shape =
+             match fty with
+             | TT.TCon ("Option", [ TT.TArrow (TT.TTuple [], _) ]) -> March_eval.Eval_runtime.Mock_unit
+             | TT.TCon ("Option", [ TT.TArrow _ ]) -> March_eval.Eval_runtime.Mock_args
+             | _ -> March_eval.Eval_runtime.Mock_value
+           in
+           Hashtbl.replace March_eval.Eval_runtime.mock_ops op
+             { March_eval.Eval_runtime.mo_kind = cap;
+               mo_target = March_caps.Mock_target.of_op cap op; mo_shape = shape })
+      March_typecheck.Typecheck_builtins.builtin_cap_table
+
 (** Run the test subcommand and exit.
     Discovers test files, parses/typechecks them, and runs all test blocks.
     Usage: march test [--verbose|-v] [--filter=pattern] [file...] *)
@@ -3056,6 +3089,7 @@ let run_test_cmd args =
     | a :: rest -> targets := a :: !targets; parse_args rest
   in
   parse_args args;
+  enable_test_build ();
   let targets = List.rev !targets in
   (* Same FFI wiring the plain interpreter path uses (setup_interpreter_ffi),
      so tests that call into forge.toml [ffi] shims (e.g. depot's sqlite
@@ -4238,19 +4272,9 @@ let compile filename =
      [Io_ops_gen.dispatch_wrappers_source]. *)
   let desugared =
     if not (cap_mocking ()) then desugared
-    else begin
-      let src = March_typecheck.Io_ops_gen.dispatch_wrappers_source () in
-      let lexbuf = Lexing.from_string src in
-      lexbuf.Lexing.lex_curr_p <-
-        { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = "<cap-dispatch>" };
-      let m =
-        March_parser.Parse.module_of_lexbuf lexbuf
-      in
-      let d = March_desugar.Desugar.desugar_module m in
+    else
       { desugared with
-        March_ast.Ast.mod_decls =
-          desugared.March_ast.Ast.mod_decls @ d.March_ast.Ast.mod_decls }
-    end
+        March_ast.Ast.mod_decls = desugared.March_ast.Ast.mod_decls @ cap_dispatch_decls () }
   in
   let user_only_desugared = desugared in
   stamp "resolve-imports";
@@ -4911,36 +4935,11 @@ let compile filename =
         March_tir.Net_scope.rewrite ~scopes tir
       end
     in
-    (* Capability-passing analysis dump.  Immediately after lowering is the one
-       point where a TIR fn's name is still exactly its source name, which is
-       what the analysis keys on. *)
-    if Sys.getenv_opt "MARCH_DUMP_CAP_PASSING" = Some "1" then
-      March_tir.Cap_passing.dump tir;
-    (* Capability-passing threading.  Forced on by MARCH_CAP_PASSING=1 while it
-       is being validated: with nothing consuming the new parameters the
-       program must behave identically, which makes the whole test suite a
-       check on the arity change flowing through Defun/Mono/Perceus and the CAS
-       key.  It becomes `--test`-gated once the dispatch half exists. *)
-    (* NOT enabled by --test yet: the threading half has a known crash (see
-       below), so wiring it into `forge test` would break every project's test
-       run.  Enabled only by MARCH_CAP_PASSING=1, with MARCH_CAP_DISPATCH=1
-       additionally routing operations through their dictionary wrappers.
-
-       Open bug: threading a capability into `File.with_lines` produces a
-       compiled binary that dies with SIGBUS (rc=138).  Reduced repro: read a
-       file through `File.with_lines(path, fn(lines) -> ...)` and compile —
-       correct with the pass off, rc=138 with it on, and `dispatch` plays no
-       part (this is the threading alone).  The shape is a lazy `Seq` whose
-       step is a closure, so the likely cause is a threaded function reaching a
-       closure this pass did not classify as arity-frozen: the `unsafe` rule
-       keys on `ADefRef`'s [did_name] matching a top-level [fn_name], and if
-       lower spells those differently the function is never excluded and an
-       indirect call then passes the OLD arity. *)
-    let tir =
-      if Sys.getenv_opt "MARCH_CAP_PASSING" = Some "1" || cap_mocking () then
-        March_tir.Cap_passing.elaborate ~dispatch:(cap_mocking ()) tir
-      else tir
-    in
+    (* Ocap phase 7: in a test build every interceptable capability operation
+       goes through its dispatch wrapper, which consults the `mock` layers of
+       the current authority ([Mock_dispatch]).  Right after lowering, where a
+       builtin call is still an EApp of its source name. *)
+    let tir = if cap_mocking () then March_tir.Mock_dispatch.rewrite tir else tir in
     (* @[vectorize]/@[vectorize(warn)]: this is the one point in the
        pipeline where a TIR fn's name is still exactly its source name —
        Mono hasn't mangled/duplicated anything yet, Defun hasn't lifted
@@ -4981,7 +4980,9 @@ let compile filename =
        the identity. *)
     let tir, grants_kept =
       March_tir.Auth_rt.grants tir ~tbl:March_tir.Lower.fn_grant_tbl in
-    let has_frames = frames_kept || restricts_kept || grants_kept in
+    (* A mock (ocap phase 7) is a layer too: closures made inside one keep it. *)
+    let has_frames = frames_kept || restricts_kept || grants_kept
+                     || !March_tir.Lower.mock_sites > 0 in
     let tir = March_tir.Auth_rt.captures tir ~has_frames ~repl:false in
     (* Ocap phase 4, Task 4b: a native binary judges capability operations
        with the C runtime's copy of the Authority policy
@@ -7257,8 +7258,13 @@ let compile filename =
        Fun.protect
          ~finally:(fun () -> March_jit.Repl_jit.cleanup jit_ctx)
          (fun () ->
+            (* A test build's JIT stdlib carries the dispatch wrappers (its
+               own prelude cache entry: the content hash covers them), and
+               [Repl_jit] routes the operations through them. *)
+            let prelude_decls =
+              if cap_mocking () then stdlib_decls @ cap_dispatch_decls () else stdlib_decls in
             March_repl.Repl.maybe_precompile_stdlib (Some jit_ctx)
-              ~stdlib_decls ~type_map;
+              ~stdlib_decls:prelude_decls ~type_map;
             let tc_env = get_stdlib_tc_env ~for_js:false stdlib_decls in
             (* JIT'd code writes through the C runtime's own stdout and can
                terminate the process with C `exit()` (panic_, exit_, a fatal
@@ -8480,6 +8486,7 @@ let () =
      IO capability (mocking an IO effect) is admitted only in a test build; see
      [Typecheck_env.test_build] and [check_cap_impl_sites]. *)
   March_typecheck.Typecheck.test_build := cap_mocking ();
+  if cap_mocking () then enable_test_build ();
   (* --emit-core-ast takes its target file as its own flag argument (not a
      positional file), so route it into the normal [f] :: compile dispatch
      below rather than falling through to the REPL branch. *)

@@ -1,0 +1,11 @@
+exit: 1
+-- CAPABILITY --------- errors/mock_handler_field_1.march
+
+The handler of a `mock IO.Console` has no field `println`. Its fields are: `io_read_byte`, `io_read_line`, `print`, `print_line`, `print_stderr`. [mock_handler_field]
+
+6 |     mock IO.Console with { println: Some(fn _ -> ()) } do
+                               ^^^^^^^
+
+    run `march --explain mock_handler_field`
+
+

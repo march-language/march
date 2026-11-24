@@ -1,19 +1,16 @@
 mod CapMockSupervisedNested do
-  -- Capability mocking reaching the child of a NESTED supervisor.
+  -- A mock reaching the child of a NESTED supervisor (ocap phase 7).
   --
-  -- Top supervises Mid supervises Leaf. Mid's spawn glue used to be passed
-  -- to register_supervisor_child as a VALUE (for respawn), which froze its
-  -- arity, so it could carry nothing to Leaf and Leaf ran unmocked. The
-  -- respawn value is now a closure that calls Mid's glue with the
-  -- capabilities in scope, so Mid's glue carries them like Top's does.
+  -- Top supervises Mid supervises Leaf. Every incarnation of each runs under
+  -- the authority of its slot's first spawn, which for a Top spawned inside
+  -- the mock includes the mock layer, so Leaf is mocked through any number of
+  -- Mid restarts.
   --
   -- Four lines, and which are mocked is the whole test:
-  --   in    : the grandchild of a Top spawned inside with_cap -> mocked
+  --   in    : the grandchild of a Top spawned inside the mock -> mocked
   --   again : after `kill`ing Mid, the NEW Leaf its respawn created -> still
-  --           mocked (the closure re-supplies the caps)
-  --   third : after killing Mid a SECOND time -> still mocked; this row is
-  --           the one only the runtime's per-respawn inc of the closure
-  --           makes possible (the apply fn drops what it is handed)
+  --           mocked
+  --   third : after killing Mid a SECOND time -> still mocked
   --   out   : the grandchild of a Top spawned outside, sent to AFTER the
   --           block closes -> real
   needs Actor.Introspect
@@ -59,12 +56,10 @@ mod CapMockSupervisedNested do
   fn mid_of(intro : Cap(Actor.Introspect), top) do field_pid(intro, top, "m") end
   fn leaf_of(intro : Cap(Actor.Introspect), top) do field_pid(intro, mid_of(intro, top), "l") end
 
-  fn main(c : Cap(IO.Console), io : Cap(IO)) do
+  fn main(io : Cap(IO)) do
     let intro = Actor.introspect(io)
     let outside = spawn(Top)
-    let mock = cap_impl(c, { cap_ops_empty(c) with
-      print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) })
-    with_cap(mock, fn _ -> do
+    mock IO.Console with { print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) } do
       let inside = spawn(Top)
       send(leaf_of(intro, inside), Say("in"))
       run_until_idle()
@@ -76,7 +71,7 @@ mod CapMockSupervisedNested do
       run_until_idle()
       send(leaf_of(intro, inside), Say("third"))
       run_until_idle()
-    end)
+    end
     send(leaf_of(intro, outside), Say("out"))
     run_until_idle()
   end

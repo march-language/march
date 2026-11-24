@@ -237,6 +237,15 @@ let cap_slot : value ref = ref cap_nil
 (* The mock registry (ocap phase 7; the C runtime's march_mock_register):
    a `mock` block's handler record, named in its layer ByMock(id). Kept
    for the life of the run, as natively. *)
+(* The interceptable builtins of a test build (ocap phase 7), filled by the
+   driver from Io_ops_gen: name -> its capability, target and call shape.
+   Empty outside a test build, so nothing is intercepted. *)
+type mock_shape = Mock_value | Mock_unit | Mock_args
+type mock_op = { mo_kind : string; mo_target : March_caps.Mock_target.t; mo_shape : mock_shape }
+let mock_ops : (string, mock_op) Hashtbl.t = Hashtbl.create 64
+(* Authority.mock_for and Authority.mock_fallthrough, looked up when the
+   first `mock` block is entered; until then no mock can be in force. *)
+let mock_fns : (value * value) option ref = ref None
 let mock_tab : value list ref = ref []
 let mock_count = ref 0
 let mock_register (h : value) : int =

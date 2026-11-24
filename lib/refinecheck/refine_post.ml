@@ -100,6 +100,7 @@ let rec tails_bound (path : (A.expr * bool) list) (bound : string list) (e : A.e
   | A.EIf (c, t, el, _) ->
     tails_bound ((c, false) :: path) bound t @ tails_bound ((c, true) :: path) bound el
   | A.ERestrict (_, b, _) -> tails_bound path bound b
+  | A.EMock (_, _, b, _) -> tails_bound path bound b
   (* A later `cond` arm, and any `match` arm but an irrefutable first one,
      is reached under conditions this path does not record (the earlier
      conditions' failure, the pattern itself): the opaque marker, which is
@@ -178,6 +179,7 @@ let rec tails_let_calls (lets : (string * A.expr) list) (e : A.expr) : (string *
      | [] -> [ lets ])
   | A.EIf (_, t, el, _) -> tails_let_calls lets t @ tails_let_calls lets el
   | A.ERestrict (_, b, _) -> tails_let_calls lets b
+  | A.EMock (_, _, b, _) -> tails_let_calls lets b
   | A.ECond (arms, _) -> List.concat_map (fun (_, b) -> tails_let_calls lets b) arms
   | A.EMatch (_, branches, _) ->
     List.concat_map
@@ -230,6 +232,7 @@ let rename_free_checked (env : (string * string) list) (e : A.expr) : A.expr * b
       | A.EAnnot (x, t, sp) -> A.EAnnot (go env x, t, sp)
       | A.EIf (c, t, el, sp) -> A.EIf (go env c, go env t, go env el, sp)
       | A.ERestrict (es, b, sp) -> A.ERestrict (List.map (go env) es, go env b, sp)
+      | A.EMock (es, h, b, sp) -> A.EMock (List.map (go env) es, go env h, go env b, sp)
       | A.ECond (arms, sp) -> A.ECond (List.map (fun (c, b) -> (go env c, go env b)) arms, sp)
       | A.ERecord (fs, sp) -> A.ERecord (List.map (fun (n, v) -> (n, go env v)) fs, sp)
       | A.ERecordUpdate (r, fs, sp) ->
@@ -1679,6 +1682,7 @@ let rec expr_vars (acc : string list) (e : A.expr) : string list option =
   | A.ERecordUpdate (r, fs, _) -> fold acc (r :: List.map snd fs)
   | A.EIf (c, t, f, _) -> fold acc [ c; t; f ]
   | A.ERestrict (es, b, _) -> fold acc (es @ [ b ])
+  | A.EMock (es, h, b, _) -> fold acc ((es @ [ h ]) @ [ b ])
   | A.ELet (b, _) -> fold (pat_binders b.A.bind_pat @ acc) [ b.A.bind_expr ]
   | A.EMatch (x, brs, _) ->
     List.fold_left
@@ -1804,6 +1808,7 @@ let record_body (e : A.expr) : A.expr =
     | A.ERecordUpdate (r, fs, _) -> List.fold_left (fun n (_, v) -> n + size v) (1 + size r) fs
     | A.EIf (c, t, f, _) -> 1 + size c + size t + size f
     | A.ERestrict (es, b, _) -> List.fold_left (fun n x -> n + size x) (1 + size b) es
+    | A.EMock (es, h, b, _) -> List.fold_left (fun n x -> n + size x) (1 + size b) (es @ [ h ])
     | A.ELet (b, _) -> 1 + size b.A.bind_expr
     | A.EMatch (x, brs, _) ->
       List.fold_left (fun n (br : A.branch) -> n + size br.A.branch_body) (1 + size x) brs
@@ -3129,6 +3134,7 @@ let gate_unverified_posts_ih ~root ?(ih : (gate_item list -> ih_group list) opti
         (calls_of acc x) brs
     | A.EIf (c, t, f, _) -> calls_of (calls_of (calls_of acc c) t) f
     | A.ERestrict (es, b, _) -> calls_of (List.fold_left calls_of acc es) b
+    | A.EMock (es, h, b, _) -> calls_of (List.fold_left calls_of acc (es @ [ h ])) b
     | A.EPipe (a, b, _) -> calls_of (calls_of acc a) b
     | A.EAnnot (x, _, _) | A.EField (x, _, _) -> calls_of acc x
     | _ -> acc

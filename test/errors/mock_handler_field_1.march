@@ -1,0 +1,11 @@
+-- MARCH-MODE: test
+mod ConsoleTest do
+  needs IO.Console
+
+  test "a field the kind does not have" do
+    mock IO.Console with { println: Some(fn _ -> ()) } do
+      println("hello")
+    end
+    ()
+  end
+end
