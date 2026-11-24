@@ -1,0 +1,19 @@
+corpus	scenario	run	opt	status	total_ms	front_ms	tir_ms	back_ms	cpu_ms	post_opt_ms
+topology	cold	1	2	miss	37954	4402	4412	28745	34720	1008
+topology	cold	2	2	miss	37089	4377	4252	26981	33660	976
+topology	cold	3	2	miss	36124	4142	4061	27681	33290	924
+topology	warm	1	2	src-hit	143				80	
+topology	warm	2	2	src-hit	142				80	
+topology	warm	3	2	src-hit	145				80	
+topology	comment	1	2	tir-hit	5760	1297	4025		5690	850
+topology	comment	2	2	tir-hit	5875	1299	4109		5790	877
+topology	comment	3	2	tir-hit	5978	1350	4144		5880	880
+topology	leaf	1	2	miss	20669	1349	4149	14897	20380	887
+topology	leaf	2	2	miss	15744	1050	3100	11247	15530	666
+topology	leaf	3	2	miss	15396	1054	3192	10886	15150	657
+topology	sig	1	2	n/a						
+topology	sig	2	2	n/a						
+topology	sig	3	2	n/a						
+topology	field	1	2	n/a						
+topology	field	2	2	n/a						
+topology	field	3	2	n/a						
