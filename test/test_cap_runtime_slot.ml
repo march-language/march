@@ -216,6 +216,64 @@ end
 let test_compiled_drop () =
   check_all ~skip:[ "js" ] ~name:"compiled_drop" ~src:drop_src [ ("", "flat\n") ]
 
+(* march_cap_unwind takes its OWN reference to the authority it puts back.
+   It must not instead adopt the reference held by the saved value of the
+   frame the panic abandoned ("the slot's reference moved into that saved
+   value, so reuse it"): nothing keeps that saved value alive until the
+   panic.  [boom] below never restores what its push returned, so the
+   compiler drops the saved value right after the push, and at the panic the
+   only reference to the outer authority is the pushed cell's tail.  An
+   unwind that takes no reference then frees the outer authority while it is
+   in force, and [under]'s cap_restore releases it again: the runtime aborts
+   with "RC underflow" (a use-after-free under ASan).  Tried and measured:
+   specs/todos/2026-11-19-ocap-cap-unwind-mark-leak.md. *)
+let unwind_adopt_src = {|mod CapUnwindAdopt do
+  needs IO.Console
+  fn layer(name : String) do
+    Authority.Layer(ByFnNeeds(name), "IO.FileRead(\"/srv/\")",
+      Cons(Authority.CapEntry("IO.FileRead", Authority.Paths(Cons("/srv/", Nil))), Nil))
+  end
+  fn boom(n : Int) : Int do
+    let _old = cap_push(layer("inner"))
+    panic("boom " ++ int_to_string(n))
+  end
+  fn catch_one(act : Bool -> Int) : Int do
+    match __try_call_val(act) do
+    Ok(_) -> 0
+    Err(_) -> 1
+    end
+  end
+  fn bare(act : Bool -> Int, n : Int, acc : Int) : Int do
+    if n == 0 do acc else bare(act, n - 1, acc + catch_one(act)) end
+  end
+  fn under(act : Bool -> Int, n : Int, acc : Int) : Int do
+    if n == 0 do acc
+    else
+      let old = cap_push(layer("outer"))
+      let c = catch_one(act)
+      let depth = List.length(cap_layers())
+      cap_restore(old)
+      under(act, n - 1, acc + c + depth - 1)
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    let act = fn _ -> boom(1)
+    let caught = bare(act, 200, 0) + under(act, 200, 0)
+    println("caught " ++ int_to_string(caught))
+    println("layers " ++ int_to_string(List.length(cap_layers())))
+  end
+end
+|}
+
+let test_unwind_keeps_mark () =
+  (* Not interpreted: the interpreter puts an authority back when a framed
+     call or a captured value returns (eval.ml's Fun.protect), not at the
+     catch, so [boom]'s raw cap_push stays in force there after [bare]'s
+     catches and the printlns are refused.  Only stdlib-internal code can
+     push without a frame. *)
+  check_all ~skip:[ "interp" ] ~name:"unwind_adopt" ~src:unwind_adopt_src
+    [ ("", "caught 400\nlayers 0\n") ]
+
 (* Task 10b: cap_enter of the authority already in force changes nothing
    and touches no count (natively it returns a tagged word that cap_restore
    treats as "nothing to undo").  Pinned in every runtime: the launch
@@ -485,6 +543,8 @@ let tests =
         Alcotest.test_case "push/restore leaves nothing live" `Quick test_no_leak;
         Alcotest.test_case "compiled code dropping the last CapAuthRef releases it" `Quick
           test_compiled_drop;
+        Alcotest.test_case "a caught panic keeps the authority it restores alive" `Quick
+          test_unwind_keeps_mark;
         Alcotest.test_case "cap_enter of the authority in force changes nothing" `Quick
           test_enter_same;
         Alcotest.test_case "the Task 10b fast paths leave nothing live" `Quick
