@@ -10,3 +10,7 @@ Design: `specs/2026-11-11-ocap-capture-checking-design.md` (approved 2026-11-12)
 in three steps, 8a (inference and display, no new errors), 8b (`scoped` parameters and
 escape), 8c (public signatures). Parent design: `specs/2026-11-10-object-capability-design.md`
 §13 and the phases table in §17.
+
+**Status (2026-11-24).** 8a is done: `specs/progress/2026-11-24-ocap-p8a-capture-sets.md`
+(inference, hover, `march --dump-captures`, the soundness oracle; no new errors). Open: 8b and
+8c. Before 8b: `specs/todos/2026-11-24-ocap-capture-pass-always-on-prerequisites.md`.

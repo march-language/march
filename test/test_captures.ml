@@ -272,6 +272,29 @@ let test_toplevel_restrict_not_narrowed () =
   str "made by module-level code" "IO.FileRead" (set_at r "fn p ->");
   str "made when a module-level closure runs" "IO.FileRead(\"/srv/\")" (set_at r "fn q ->")
 
+let test_authority_check_kinds () =
+  let r =
+    dump
+      "  pfn probe(kind : String, target : String) do Authority.check(kind, target) end\n  pfn pick() do \"IO.\" ++ \"Clock\" end\n  fn main() do\n    let lit = fn () -> Authority.check(\"IO.FileRead\", \"/srv/x\")\n    let through = fn () -> probe(\"IO.Console\", \"\")\n    let computed = fn () -> Authority.check(pick(), \"\")\n    (lit, through, computed)\n  end"
+  in
+  str "a literal kind" "IO.FileRead" (set_at r "fn () -> Authority.check(\"IO.FileRead");
+  (* A helper that passes its parameter on as the kind: its callers name it. *)
+  str "a kind named by the caller" "IO.Console" (set_at r "fn () -> probe");
+  str "a computed kind is not tracked" "?" (set_at r "fn () -> Authority.check(pick");
+  let _, lines = r in
+  Alcotest.(check bool) "the report says where and why" true
+    (List.exists (fun l -> contains l "not tracked: an authority check of a computed kind") lines);
+  Alcotest.(check bool) "and counts it" true (List.exists (fun l -> contains l "3 function values, 1 not tracked") lines)
+
+let test_unmodelled_is_unknown_not_smaller () =
+  (* A function value read back from a table opened by name: nothing the
+     pass can see put it there, so it may do anything. *)
+  let r =
+    dump
+      "  fn main() do\n    let t = Authority.must(Vault.open(\"capt_unknown\"))\n    let stored = Vault.get(t, \"k\")\n    let call = fn () ->\n      match stored do\n        Some(f) -> f(\"x\")\n        None -> ()\n      end\n    call\n  end"
+  in
+  str "the closure that calls it" "?" (set_at r "fn () ->")
+
 (* ── static authority (Task 5) ──────────────────────────────────────────── *)
 
 let test_restrict () =
@@ -334,6 +357,9 @@ let tests =
         Alcotest.test_case "a top-level let closure" `Quick test_toplevel_let_closure;
         Alcotest.test_case "a module-level restrict narrows nothing" `Quick test_toplevel_restrict_not_narrowed;
         Alcotest.test_case "a vault is invariant" `Quick test_vault_invariant;
+        Alcotest.test_case "authority checks: literal, named by the caller, computed" `Quick test_authority_check_kinds;
+        Alcotest.test_case "what is not modelled is not tracked, never smaller" `Quick
+          test_unmodelled_is_unknown_not_smaller;
         Alcotest.test_case "restrict" `Quick test_restrict;
         Alcotest.test_case "a clause narrows a lambda" `Quick test_clause_narrows_lambda;
         Alcotest.test_case "a named value inside a restrict" `Quick test_restrict_named_value;

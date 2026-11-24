@@ -3282,6 +3282,7 @@ let run_test_cmd args =
         else check (i + 1)
       in check 0
     in
+    if Capture_oracle.active () then Capture_oracle.install test_tc_env desugared.March_ast.Ast.mod_decls;
     let (n_tests, n_failed, file_failures) =
       if !verbose then
         March_eval.Eval.run_tests ~verbose:true ~filter:!filter ~capture_io desugared
@@ -4577,6 +4578,19 @@ let compile filename =
   report_z3 errors ~filename ~user_files;
   March_refine.Refine.shutdown ();
   stamp "typecheck";
+  (* Capture inference (ocap phase 8a) runs only on demand: for
+     --dump-captures above, for an editor hover, and for the soundness
+     oracle.  MARCH_CAPTURES=1 forces it here and discards the result, to
+     measure what turning it on for every build would cost
+     (scripts/capture-cost.sh); MARCH_CAPTURES=all also analyses every
+     stdlib function, reached or not. *)
+  (match Sys.getenv_opt "MARCH_CAPTURES" with
+   | Some ("1" | "all" as mode) ->
+     ignore
+       (March_typecheck.Typecheck.capture_analyse ~all:(mode = "all") typecheck_env
+          desugared.March_ast.Ast.mod_decls);
+     stamp "captures"
+   | _ -> ());
   (* Lemma erasure (§4.5): after the refinement checker, before anything
      lowers, interprets or JIT-compiles the program. *)
   let user_only_desugared = erase_lemmas_in ~errors ~whole:desugared user_only_desugared in

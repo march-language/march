@@ -118,6 +118,10 @@ type active = {
   a_result_ty : ty option;
   a_own : svar;
   a_val : svar;
+  a_names : string list;  (** the parameters' names *)
+  mutable a_kind_params : int list;
+      (** parameters passed on as the KIND of an authority check: the
+          function's reach has whatever kind its caller names there *)
 }
 
 type scheme = {
@@ -126,6 +130,7 @@ type scheme = {
   sc_result : T.t;
   sc_result_ty : ty option;
   sc_own : S.t;  (** the function's own reach, narrowed by its clause *)
+  sc_kind_params : int list;  (** see [active.a_kind_params] *)
   sc_val : svar;
   sc_iface : svar list;
   sc_bounds : (svar * S.t) list;
@@ -183,6 +188,7 @@ type st = {
 
 type ctx = {
   owner : string;
+  act : active option;  (** the named function body being walked, when not inside a function value *)
   own : svar;
   valv : svar;
   scope : (string * binding) list;
@@ -294,6 +300,13 @@ let scan_decls (s : st) (decls : Ast.decl list) : unit =
                    (qual prefix n.Ast.txt ^ "_" ^ h.Ast.ah_msg.Ast.txt)
                    (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) h.Ast.ah_params, h.Ast.ah_body))
               (a.Ast.actor_handlers @ Option.to_list a.Ast.actor_on_stop)
+          (* A test body or a setup block: a body of its own, so the
+             function values made in it are sites. *)
+          | Ast.DTest (t, sp) ->
+            add_body (qual prefix (Printf.sprintf "$test@%d:%d" sp.Ast.start_line sp.Ast.start_col)) ([], t.Ast.test_body)
+          | Ast.DSetup (e, sp) | Ast.DSetupAll (e, sp) ->
+            add_body (qual prefix (Printf.sprintf "$setup@%d:%d" sp.Ast.start_line sp.Ast.start_col)) ([], e)
+          | Ast.DDescribe (_, inner, _) -> go prefix inner
           | _ -> ());
          match decl with
         | Ast.DMod (n, _, inner, _) -> go (qual prefix n.Ast.txt) inner
@@ -352,6 +365,11 @@ let grant_of (s : st) (owner : string) : S.t option =
     | None -> None
     | Some pkg -> (
       match Hashtbl.find_opt s.env.fn_bound_points (pkg ^ "$grant") with
+      | Some { fb_origin = Dep_grant { text; _ }; fb_caps; _ } -> (
+        (* The grant as written, scopes included. *)
+        match March_caps.Dep_grants.parse_scope_text text with
+        | Ok entries -> Some (S.of_entries entries)
+        | Error _ -> Some (S.of_scopes (List.map (fun kind -> { S.kind; arg = None }) fb_caps)))
       | Some { fb_caps; _ } -> Some (S.of_scopes (List.map (fun kind -> { S.kind; arg = None }) fb_caps))
       | None -> None)
 
@@ -424,6 +442,20 @@ let scope_own (own : S.t) (lit : S.scope option) : S.t =
       in
       if hit = [] then own else S.of_scopes (sc :: rest)
 
+(* Builtins whose result holds no function value from anywhere: one that
+   never returns, or one that makes a fresh, empty container.  Every other
+   builtin that returns a function-holding value no argument accounts for is
+   treated as conjuring it (builder's call 8). *)
+let fresh_result_builtins : string list =
+  [ (* never return *)
+    "panic_"; "unreachable_"; "todo_";
+    (* a fresh, empty container *)
+    "vault_new"; "ring_buf_make";
+    (* a pid: holding one adds nothing to a set (design §2) *)
+    "pid_of_int"; "actor_whereis";
+    (* decoded or logged data: no function value can come out of it *)
+    "from_json"; "elts"; "logger_get_fields"; "diag_context_get" ]
+
 (* ── schemes: generalise and instantiate ────────────────────────────────── *)
 
 let dedup (l : svar list) : svar list = List.sort_uniq compare l
@@ -471,6 +503,7 @@ let generalise (s : st) (key : string) (value : (svar, S.t) Hashtbl.t) (a : acti
   { sc_params = params;
     sc_param_tys = List.map (function T.Hole h -> h.T.h_hm | _ -> None) a.a_params;
     sc_result_ty = a.a_result_ty;
+    sc_kind_params = List.sort_uniq compare a.a_kind_params;
     sc_result = result; sc_own = own; sc_val = a.a_val; sc_iface = iface;
     sc_bounds = List.filter_map (fun v -> let c = get v in if S.is_empty c then None else Some (v, c)) iface;
     sc_flows = flows }
@@ -502,7 +535,14 @@ let map_tvar (s : st) (i : inst) (id : int) (hv : svar) (t : T.t) : unit =
   if not (Hashtbl.mem i.i_mapped id) then begin
     Hashtbl.replace i.i_mapped id t;
     let hv' = inst_var s i hv in
-    List.iter (fun v -> add_edge s.store v hv') (T.svars t);
+    (* What a value of this type holds is in the variable's set (a
+       function's parameters are not something it holds). *)
+    List.iter (fun v -> add_edge s.store v hv') (T.held t);
+    (* And out again: a value of this type that the function hands back
+       holds whatever the function knows a value of this type can hold,
+       which is how a function value conjured inside it (read from a table
+       opened by name) reaches the caller as not tracked. *)
+    List.iter (fun v -> add_edge s.store hv' v) (T.held t);
     if T.has_opaque t then add_const s.store hv' S.unknown
   end
 
@@ -844,7 +884,7 @@ and walk_fn_value (s : st) (c : ctx) ~(self : (Ast.name * T.t) option) ~(params 
   (* What a function value creates is in the set of the one that creates it
      (design §6.1). *)
   (match c.lams with (_, outer) :: _ -> add_edge s.store set outer | [] -> ());
-  let c' = { c with own; valv; scope; lams = (depth, set) :: c.lams; depth } in
+  let c' = { c with act = None; own; valv; scope; lams = (depth, set) :: c.lams; depth } in
   let bt = walk s c' body in
   List.iter (fun ((n : Ast.name), h) -> record_annot s n.Ast.span h) holes;
   add_edge s.store ~narrow:c.auth own set;
@@ -957,6 +997,8 @@ and named_value (s : st) (c : ctx) (n : Ast.name) (key : string) : T.t =
              (match t with
               | Some _ ->
                 add_const s.store ~why set (S.narrow sc.sc_own ~by:c.auth);
+                if sc.sc_kind_params <> [] then
+                  add_unknown s.store set ~cause:"an authority check of a computed kind" n.Ast.span;
                 add_edge s.store (inst_var s i sc.sc_val) set
               | None -> ());
              t)
@@ -1050,14 +1092,8 @@ and walk_app (s : st) (c : ctx) (f : Ast.expr) (args : Ast.expr list) (sp : Ast.
       apply_value s c ft ats sp ~what:(Printf.sprintf "calls `%s`" n.Ast.txt)
     | Some "Authority.check" ->
       (* A direct authority check is an operation of the kind it names
-         (every capability entry point of the stdlib is one).  A computed
-         kind is not tracked. *)
-      (match args with
-       | Ast.ELit (Ast.LitString kind, _) :: _ when March_caps.Cap_lattice.suggest_cap kind = None ->
-         add_const s.store c.own
-           (S.of_scopes [ { S.kind; arg = None } ])
-           ~why:{ why = Printf.sprintf "checks `%s`" kind; rspan = sp }
-       | _ -> add_unknown s.store c.own ~cause:"an authority check of a computed kind" sp);
+         (every capability entry point of the stdlib is one). *)
+      (match args with kind :: _ -> charge_kind s c kind sp | [] -> ());
       T.Plain
     | Some key -> call_named s c n key args ats sp
     | None -> call_builtin s c n args ats sp)
@@ -1070,6 +1106,29 @@ and walk_app (s : st) (c : ctx) (f : Ast.expr) (args : Ast.expr list) (sp : Ast.
       | _ -> "calls a function value"
     in
     apply_value s c ft ats sp ~what
+
+(* The operation an authority check of kind [kind_expr] is: a literal names
+   it; the enclosing named function's own parameter makes the function
+   kind-parametric (its callers name the kind); anything else is not
+   tracked. *)
+and charge_kind (s : st) (c : ctx) (kind_expr : Ast.expr) (sp : Ast.span) : unit =
+  let param_index (name : string) : int option =
+    match c.act, List.assoc_opt name c.scope with
+    | Some a, Some (Bound (_, 0)) ->
+      let rec find i = function [] -> None | x :: rest -> if x = name then Some i else find (i + 1) rest in
+      find 0 a.a_names
+    | _ -> None
+  in
+  match kind_expr with
+  | Ast.ELit (Ast.LitString kind, _) when March_caps.Cap_lattice.suggest_cap kind = None ->
+    add_const s.store c.own
+      (S.of_scopes [ { S.kind; arg = None } ])
+      ~why:{ why = Printf.sprintf "checks `%s`" kind; rspan = sp }
+  | Ast.EVar p when c.lams = [] && param_index p.Ast.txt <> None -> (
+    match c.act, param_index p.Ast.txt with
+    | Some a, Some i -> a.a_kind_params <- i :: a.a_kind_params
+    | _ -> ())
+  | _ -> add_unknown s.store c.own ~cause:"an authority check of a computed kind" sp
 
 and call_named (s : st) (c : ctx) (n : Ast.name) (key : string) (args : Ast.expr list) (ats : T.t list)
     (sp : Ast.span) : T.t =
@@ -1112,6 +1171,9 @@ and call_named (s : st) (c : ctx) (n : Ast.name) (key : string) (args : Ast.expr
           let r = subst s i sc.sc_result (if nargs <= List.length sc.sc_params then result_ty else None) in
           finish_inst s i sc ~why;
           add_const s.store ~why c.own (scope_own sc.sc_own lit);
+          List.iter
+            (fun k -> match List.nth_opt args k with Some a -> charge_kind s c a sp | None -> ())
+            sc.sc_kind_params;
           if s.unsound <> Some `Drop_callee_effect then add_edge s.store ~why (inst_var s i sc.sc_val) c.valv;
           finish r (List.length sc.sc_params))
        pick
@@ -1124,6 +1186,9 @@ and call_named (s : st) (c : ctx) (n : Ast.name) (key : string) (args : Ast.expr
             List.iteri (fun k p -> match List.nth_opt ats k with Some x -> flow s x p | None -> ()) a.a_params;
           add_edge s.store ~why a.a_own c.own;
           add_edge s.store ~why a.a_val c.valv;
+          (* Inside a recursive group the kind parameters are not final. *)
+          if a.a_kind_params <> [] then
+            add_unknown s.store c.own ~cause:"an authority check of a computed kind" sp;
           finish a.a_result (List.length a.a_params))
        pick);
   join
@@ -1153,14 +1218,14 @@ and call_bodiless (s : st) (c : ctx) (n : Ast.name) (key : string) (args : Ast.e
        builtin rule for what it is handed. *)
     let kinds = Option.value ~default:[] (Hashtbl.find_opt s.env.own_cap_closures key) in
     add_const s.store ~why c.own (S.of_scopes (List.map (fun kind -> { S.kind; arg = None }) kinds));
-    builtin_flows s c ats sp join
+    builtin_flows ~name:n.Ast.txt s c ats sp join
   end
 
 (* The default capture signature of a builtin (builder's call 8): it may
    call any function value it is handed, and anything in its arguments may
    be in its result.  A function value in the result that no argument
    accounts for came from somewhere the pass cannot see. *)
-and builtin_flows (s : st) (c : ctx) (ats : T.t list) (sp : Ast.span) (join : T.t) : unit =
+and builtin_flows ?(name = "") (s : st) (c : ctx) (ats : T.t list) (sp : Ast.span) (join : T.t) : unit =
   let arg_vars = List.concat_map T.svars ats in
   if List.exists T.has_opaque ats then begin
     add_unknown s.store c.valv ~cause:"a builtin handed a value the pass does not model" sp;
@@ -1180,7 +1245,9 @@ and builtin_flows (s : st) (c : ctx) (ats : T.t list) (sp : Ast.span) (join : T.
   List.iter (fun v -> add_edge s.store v c.valv) (List.concat_map callable ats);
   let rvars = T.svars join in
   List.iter (fun u -> List.iter (fun v -> add_edge s.store u v) rvars) arg_vars;
-  if arg_vars = [] then begin
+  if Sys.getenv_opt "MARCH_CAPTURE_DEBUG" <> None && arg_vars = [] && T.svars join <> [] then
+    Printf.eprintf "[capture] builtin with a set-carrying result and no set-carrying argument: %s\n" name;
+  if arg_vars = [] && not (List.mem name fresh_result_builtins) then begin
     let rec conjured (t : T.t) =
       match t with
       | T.Arrow (a, b, v) ->
@@ -1210,7 +1277,7 @@ and call_builtin (s : st) (c : ctx) (n : Ast.name) (args : Ast.expr list) (ats :
      add_const s.store ~why c.own (scope_own own (literal_scope n.Ast.txt args))
    | None -> ());
   let join = if plain_at s sp then T.Plain else of_span s sp in
-  if join <> T.Plain || List.exists (fun a -> a <> T.Plain) ats then builtin_flows s c ats sp join;
+  if join <> T.Plain || List.exists (fun a -> a <> T.Plain) ats then builtin_flows ~name:n.Ast.txt s c ats sp join;
   join
 
 (* `spawn(A)`: the actor's handlers and `init` run under the authority
@@ -1273,7 +1340,8 @@ and state_of (s : st) (key : string) : fstate =
         (fun (params, (body : Ast.expr)) ->
            let result = if plain_at s (span_of_expr body) then T.Plain else of_span s (span_of_expr body) in
            ( { a_params = List.map (fun _ -> T.new_hole ()) params; a_result = result;
-               a_result_ty = ty_at s (span_of_expr body); a_own = fresh s; a_val = fresh s },
+               a_result_ty = ty_at s (span_of_expr body); a_own = fresh s; a_val = fresh s; a_names = params;
+               a_kind_params = [] },
              params, body ))
         bodies
     in
@@ -1289,7 +1357,7 @@ and state_of (s : st) (key : string) : fstate =
            else List.map2 (fun p h -> (p, Bound (h, 0))) params a.a_params
          in
          let c =
-           { owner = key; own = a.a_own; valv = a.a_val; scope; lams = []; depth = 0;
+           { owner = key; act = Some a; own = a.a_own; valv = a.a_val; scope; lams = []; depth = 0;
              auth = (if is_let then S.full else auth); at_module = is_let }
          in
          let bt = walk s c body in

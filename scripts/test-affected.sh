@@ -95,6 +95,12 @@ expect suites "captures" -- lib/caps/capture_set.ml
 expect suites "captures" -- test/test_capture_set.ml
 expect suites "captures" -- test/run_captures.ml
 expect suites "captures" -- test/captures/lambda_basic.march
+expect suites "captures" -- lib/typecheck/capture.ml
+expect suites "captures" -- lib/typecheck/capture_ty.ml
+expect suites "captures" -- bin/capture_oracle.ml
+expect suites "captures" -- lib/eval/eval_prim.ml
+expect suites "captures" -- test/test_capture_oracle.ml
+expect suites "captures" -- test/cap_conformance/capture_named_fn_value.march
 
 # The FULL fallback: no rule, shared helpers, test wiring, the language corpus.
 expect suites "ALL" -- lib/some_new_library/x.ml

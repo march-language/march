@@ -30,7 +30,7 @@ let install (env : March_typecheck.Typecheck.env) (decls : March_ast.Ast.decl li
   let cwd = Sys.getcwd () in
   let stack : C.site list ref = ref [] in
   let by_actor : (int, C.site list) Hashtbl.t = Hashtbl.create 16 in
-  let calls = ref 0 and ops = ref 0 and checks = ref 0 and misses = ref 0 in
+  let calls = ref 0 and ops = ref 0 and checks = ref 0 and misses = ref 0 and tracked = ref 0 in
   let reported = Hashtbl.create 16 in
   let pos (sp : March_ast.Ast.span) =
     Printf.sprintf "%s:%d:%d" (Filename.basename sp.March_ast.Ast.file) sp.March_ast.Ast.start_line
@@ -59,6 +59,7 @@ let install (env : March_typecheck.Typecheck.env) (decls : March_ast.Ast.decl li
     List.iter
       (fun (x : C.site) ->
          incr checks;
+         if not (S.is_unknown x.C.s_ground) then incr tracked;
          if not (S.admits x.C.s_ground ~kind ~target ~cwd) then begin
            incr misses;
            let key = (x.C.s_key, kind) in
@@ -94,6 +95,6 @@ let install (env : March_typecheck.Typecheck.env) (decls : March_ast.Ast.decl li
              if not (String.length x.C.s_span.March_ast.Ast.file > 0 && x.C.s_span.March_ast.Ast.file.[0] = '/') then
                Printf.eprintf "[capture-oracle] site %s ground {%s}\n" (pos x.C.s_span) (S.to_string x.C.s_ground))
           r.C.sites;
-      Printf.eprintf "[capture-oracle] sites=%d calls=%d ops=%d refused=%d checks=%d misses=%d unknown_sites=%d\n%!"
-        (List.length r.C.sites) !calls !ops !refused !checks !misses
+      Printf.eprintf "[capture-oracle] sites=%d calls=%d ops=%d refused=%d checks=%d tracked=%d misses=%d unknown_sites=%d\n%!"
+        (List.length r.C.sites) !calls !ops !refused !checks !tracked !misses
         (List.length (List.filter (fun (x : C.site) -> S.is_unknown x.C.s_ground) r.C.sites)))

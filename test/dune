@@ -122,7 +122,8 @@
  (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))   ; see "CI sharding" above
  (modules run_captures test_capture_set test_captures test_capture_golden test_capture_oracle)
  (libraries march_test_helpers march_caps march_ast march_parser march_desugar march_typecheck march_errors alcotest unix str)
- (deps ../bin/main.exe (source_tree ../stdlib) (source_tree captures) (source_tree cap_conformance))
+ (deps ../bin/main.exe (source_tree ../stdlib) (source_tree captures) (source_tree cap_conformance)
+       (source_tree ../bench) (source_tree ../examples))
  (action (run %{test} -e)))
 
 (test
