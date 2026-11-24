@@ -1,0 +1,28 @@
+-- DEP: boxy deps/boxy IO.FileRead("/srv/")
+-- A dependency's impl reached through dispatch runs under the grant (ocap
+-- p6 Review Focus 1): `boxy`'s `Show` impl for its type, called by `show`,
+-- by string interpolation, and from generic stdlib code (`List.map(xs,
+-- show)`), is refused a path outside the grant to `boxy`.
+mod GrantImplDispatch do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn direct() : String do
+    show(Boxy.crate("/etc/hosts"))
+  end
+
+  fn interpolated() : String do
+    let c = Boxy.crate("/etc/hosts")
+    "${c}"
+  end
+
+  fn generic() : String do
+    String.join(List.map([Boxy.crate("/srv/x"), Boxy.crate("/etc/hosts")], show), " | ")
+  end
+
+  fn main() do
+    println(direct())
+    println(interpolated())
+    println(generic())
+  end
+end

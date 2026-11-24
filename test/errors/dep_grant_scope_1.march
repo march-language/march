@@ -1,0 +1,13 @@
+-- A scoped grant, and reached code in the dependency that connects to a
+-- literal host outside it.
+-- DEP: weather deps/dep_grant_scope_1/weather IO.NetConnect("api.weather.test/v1/", methods(get))
+mod Main do
+  needs IO.Console, IO.NetConnect
+
+  fn main() do
+    match Weather.forecast("oslo") do
+      Ok(_) -> println("ok")
+      Err(_) -> println("err")
+    end
+  end
+end

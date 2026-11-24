@@ -1,0 +1,7 @@
+mod Main do
+  needs IO.Console, IO.FileRead
+
+  fn main() do
+    println("default body: " ++ peek_eager(Eager.mk()))
+  end
+end

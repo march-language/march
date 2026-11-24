@@ -1,0 +1,10 @@
+-- A library module whose module-level let names one of its own functions
+-- by its bare name (and a nested module's let, one of its parent's).
+mod Selfref do
+  fn bang(s : String) : String do s ++ "!" end
+  let own = bang
+
+  mod Inner do
+    let parent = bang
+  end
+end

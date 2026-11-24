@@ -1,0 +1,9 @@
+-- An `extern` reached in a granted dependency needs `IO.Foreign` in the grant.
+-- DEP: cpid deps/dep_grant_exceeded_3/cpid IO.Console
+mod Main do
+  needs IO.Console, IO.Foreign
+
+  fn main() do
+    println(int_to_string(Cpid.pid()))
+  end
+end

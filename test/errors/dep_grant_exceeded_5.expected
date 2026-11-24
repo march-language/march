@@ -1,0 +1,13 @@
+exit: 1
+-- CAPABILITY --------- errors/dep_grant_exceeded_5.march
+
+`loudy` is granted `()`, but the default `greet` of interface `Greet`, inherited by `impl Greet(Mine)`, needs `IO.Console` (`Main.main → the default greet of interface Greet in impl Greet(Mine)`). [dep_grant_exceeded]
+
+13 |     println(greet(Mine(1)))
+                 ^^^^^
+
+    granted at forge.toml:3
+    hint: widen the grant in forge.toml, or stop calling `greet`
+    run `march --explain dep_grant_exceeded`
+
+

@@ -7,6 +7,19 @@
       runtime reads as unset. Without the header [MARCH_GRANT] is unset.
     - [-- EXIT-ONLY]: compare only the exit status and the first line of
       stderr (a launch error), and require stdout to be empty.
+    - [-- DEP: <package> <dir> <scope text>] (repeatable; ocap phase 6,
+      dependency grants): copies [test/cap_conformance/<dir>] to
+      [<run's temp dir>.deps/<package>] (outside the fixture's own source
+      directory, which must not contain a granted library root) and puts
+      that copy on [MARCH_LIB_PATH]. Unless the scope text is [none] (an ungranted
+      dependency), the package is granted the scope text: a grants file in
+      the temp directory, named by [MARCH_DEP_GRANTS], gets the line
+      [<package>\t<the copy's real path>\tforge.toml:<the DEP line's
+      number>\t<scope text>]; [()] grants nothing. Every mode, the REPL
+      included, runs with the same [MARCH_LIB_PATH] and [MARCH_DEP_GRANTS];
+      a fixture without DEP lines runs with both unset. Dependency sources
+      live under [test/cap_conformance/deps/], which the fixture scan
+      (top-level [*.march] only) never mistakes for fixtures.
     A fixture without headers runs under its own request (`main`'s needs ∪
     its Cap params, else the module's needs line). The program is run
 
@@ -36,7 +49,10 @@
     Regenerate after an intentional change (from the interpreted run; every
     other runtime must still match):
       [UPDATE_CAP_CONFORMANCE=1 ./_build/default/test/run_cap_conformance.exe -e]
-    then review [git diff test/cap_conformance/]. *)
+    then review [git diff test/cap_conformance/].
+    [CAP_CONFORMANCE_ONLY=grant_,refuse_] limits a run to the fixtures whose
+    name starts with one of the comma-separated prefixes (the edit loop; the
+    full run still gates). *)
 
 let update_mode = Sys.getenv_opt "UPDATE_CAP_CONFORMANCE" = Some "1"
 
@@ -57,6 +73,13 @@ let write_file path s =
   let oc = open_out_bin path in
   output_string oc s;
   close_out oc
+
+let rec copy_tree src dst =
+  if Sys.is_directory src then begin
+    if not (Sys.file_exists dst) then Unix.mkdir dst 0o755;
+    Array.iter (fun f -> copy_tree (Filename.concat src f) (Filename.concat dst f))
+      (Sys.readdir src)
+  end else write_file dst (read_file src)
 
 let rec rm_rf p =
   if Sys.file_exists p then
@@ -97,6 +120,8 @@ let js_unsupported : (string * string) list = [
   ("restrict_named_fn_value_inside", "the JS target has no `file_read`");
   ("restrict_actor_restricted_for_life", "the JS target has no tasks");
   ("restrict_task_inherits", "the JS target has no tasks");
+  ("grant_actor_restricted_for_life", "the JS target has no tasks");
+  ("grant_task_inherits", "the JS target has no tasks");
 ]
 
 (* Fixtures the REPL mode does not run, each with the reason. *)
@@ -104,8 +129,13 @@ let repl_unsupported : (string * string) list = [
   ("actor_under_frame_restricted", "actors: the REPL mode runs the fixtures that use no actors");
   ("actor_restart_keeps_authority", "actors: the REPL mode runs the fixtures that use no actors");
   ("restrict_actor_restricted_for_life", "actors: the REPL mode runs the fixtures that use no actors");
+  ("grant_actor_restricted_for_life", "actors: the REPL mode runs the fixtures that use no actors");
   ("grant_wider_launch_error",
    "the REPL requests the full authority (design §21), so no grant is wider than its request");
+  ("grant_default_method",
+   "the REPL's preload does not see an interface declared in a library module, so the \
+    fixture's impl of it is `unknown_interface` there \
+    (specs/todos/2026-11-23-repl-preload-lib-interface-impl.md)");
 ]
 
 let have_node = lazy (Sys.command "command -v node >/dev/null 2>&1" = 0)
@@ -127,6 +157,58 @@ let headers (src : string) : (string * string) list =
     | _ -> List.rev acc
   in
   scan [] (String.split_on_char '\n' src)
+
+(* The fixture's [-- DEP:] lines (see the header comment), in order, as
+   (line number, package, dir relative to test/cap_conformance, scope text,
+   or None for [none]). Only the leading header lines count. *)
+let deps_of (src : string) : (int * string * string * string option) list =
+  let lines = String.split_on_char '\n' src in
+  let n_headers = List.length (headers src) in
+  List.concat
+    (List.mapi (fun i l ->
+         if i < n_headers && String.starts_with ~prefix:"-- DEP:" l then
+           let rest = String.trim (String.sub l 7 (String.length l - 7)) in
+           let word s =
+             match String.index_opt s ' ' with
+             | Some a -> (String.sub s 0 a, String.trim (String.sub s a (String.length s - a)))
+             | None -> failwith ("malformed -- DEP: line (want <package> <dir> <scope text>): " ^ l) in
+           let pkg, rest = word rest in
+           let dir, text = word rest in
+           if text = "" then failwith ("malformed -- DEP: line (no scope text): " ^ l);
+           [ (i + 1, pkg, dir, if text = "none" then None else Some text) ]
+         else [])
+       lines)
+
+(* Where a run's dependencies are copied: beside its temp dir, not in it. *)
+let deps_dir_of tmp = tmp ^ ".deps"
+
+(* Lay out [src]'s dependencies beside [tmp] (see the header comment) and return
+   the shell assignments that point every mode at them. *)
+let setup_deps ~tmp ~src : string =
+  match deps_of src with
+  | [] -> "unset MARCH_LIB_PATH; unset MARCH_DEP_GRANTS;"
+  | deps ->
+    let deps_dir = deps_dir_of tmp in
+    Unix.mkdir deps_dir 0o755;
+    let placed =
+      List.map (fun (line, pkg, dir, text) ->
+          let dst = Filename.concat deps_dir pkg in
+          copy_tree (Filename.concat (fixtures_dir ()) dir) dst;
+          (line, pkg, Unix.realpath dst, text))
+        deps in
+    let lib_path = String.concat ":" (List.map (fun (_, _, at, _) -> at) placed) in
+    let grants =
+      List.filter_map (fun (line, pkg, at, text) ->
+          Option.map (fun t -> Printf.sprintf "%s\t%s\tforge.toml:%d\t%s\n" pkg at line t) text)
+        placed in
+    let grants_env =
+      if grants = [] then "unset MARCH_DEP_GRANTS;"
+      else begin
+        let f = Filename.concat (Unix.realpath tmp) "dep-grants" in
+        write_file f (String.concat "" grants);
+        Printf.sprintf "export MARCH_DEP_GRANTS=%s;" (Filename.quote f)
+      end in
+    Printf.sprintf "export MARCH_LIB_PATH=%s; %s" (Filename.quote lib_path) grants_env
 
 (* The lines of `main`'s body: from the line after `  fn main(` up to the
    first line that is exactly `  end`. *)
@@ -169,7 +251,7 @@ let repl_grant (src : string) (grant : string option) : string option =
 
 let modes = [ "interp"; "jit"; "compiled"; "js"; "repl" ]
 
-let script ~dir ~name ~grant ~repl_grant =
+let script ~dir ~name ~grant ~repl_grant ~deps_env =
   let exe = Filename.quote (Test_helpers.find_main_exe ()) in
   let home = Filename.quote (Lazy.force private_home) in
   let f = Filename.quote (name ^ ".march") in
@@ -183,7 +265,7 @@ let script ~dir ~name ~grant ~repl_grant =
     | None -> ""
     | Some g -> "--grant " ^ Filename.quote g in
   Printf.sprintf
-    "cd %s && export HOME=%s; %s \
+    "cd %s && export HOME=%s; %s %s \
      %s %s > interp.out 2>interp.err; echo $? > interp.code; \
      %s --jit %s > jit.out 2>jit.err; echo $? > jit.code; \
      %s --compile --opt 0 %s -o ./prog > build.out 2>&1; \
@@ -200,7 +282,7 @@ let script ~dir ~name ~grant ~repl_grant =
        (unset MARCH_GRANT; MARCH_REPL_INTERP=1 %s repl %s repl/%s < repl.in > repl.out 2>repl.err; \
         echo $? > repl.code); \
      fi; true"
-    (Filename.quote dir) home grant_env
+    (Filename.quote dir) home grant_env deps_env
     exe f exe f exe f js_ok exe f
     repl_ok exe repl_grant_arg f
 
@@ -279,9 +361,10 @@ let run_all (names : string list) : (string, (string * run) list) Hashtbl.t =
        Unix.mkdir (Filename.concat tmp "repl") 0o755;
        write_file (Filename.concat tmp (Filename.concat "repl" (name ^ ".march")))
          (without_main src));
+    let deps_env = setup_deps ~tmp ~src in
     let pid =
       Unix.create_process "/bin/sh"
-        [| "/bin/sh"; "-c"; script ~dir:tmp ~name ~grant ~repl_grant |]
+        [| "/bin/sh"; "-c"; script ~dir:tmp ~name ~grant ~repl_grant ~deps_env |]
         Unix.stdin Unix.stdout Unix.stderr in
     Hashtbl.replace running pid (name, tmp)
   in
@@ -302,7 +385,8 @@ let run_all (names : string list) : (string, (string * run) list) Hashtbl.t =
                else (out, err) in
              (m, { out; err; code = int_of_string (String.trim (f (m ^ ".code"))) }))
             modes);
-      (try rm_rf tmp with _ -> ())
+      (try rm_rf tmp with _ -> ());
+      (try rm_rf (deps_dir_of tmp) with _ -> ())
   in
   List.iter (fun name ->
       while Hashtbl.length running >= jobs do reap () done;
@@ -316,6 +400,12 @@ let fixtures () =
   |> Array.to_list
   |> List.filter (fun f -> Filename.check_suffix f ".march")
   |> List.map Filename.remove_extension
+  |> List.filter (fun n ->
+      match Sys.getenv_opt "CAP_CONFORMANCE_ONLY" with
+      | None | Some "" -> true
+      | Some ps ->
+        List.exists (fun p -> p <> "" && String.starts_with ~prefix:p n)
+          (String.split_on_char ',' ps))
   |> List.sort compare
 
 let results = lazy (run_all (fixtures ()))

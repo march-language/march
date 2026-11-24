@@ -110,6 +110,12 @@ let gated : (string * string * compare_mode) list = [
   "restrict_enter",          "500000500000", Exact;
   "restrict_enter_static",   "500000500000", Exact;
   "restrict_enter_computed", "500000500000", Exact;
+  (* ocap phase 6 dependency-grant benches: 1M app -> dep boundary calls,
+     each doing 1,000 internal dep calls of n + 1, under a scoped grant
+     (framed) and an unscoped proven grant (frame dropped). Both need a
+     library path and a grants file: see [bench_envs]. *)
+  "grant_enter",        "500000500000000", Exact;
+  "grant_enter_static", "500000500000000", Exact;
   (* checked Int `+ - *` in counted loops: the cost the 2026-10-30
      overflow trap adds per iteration. *)
   "index_loop",       "548550000003", Exact;
@@ -311,6 +317,45 @@ let read_file_opt path =
    as stdlib sources (ocap phase 2, task 9). *)
 let stdlib_source_benches = [ "cluster_frames" ]
 
+(* Benches that compile against a dependency on MARCH_LIB_PATH under a
+   dependency grant (ocap phase 6). Each entry names the dependency's
+   directory under bench/ (copied beside the bench's temp dir, as the source
+   is copied into it), its package name and the grant's scope text. A grants
+   file's library root must be absolute, so it is written per run, into the
+   temp dir, naming the copy's real path. Every other bench gets no environment
+   and no extra flag, exactly as before. *)
+let bench_envs : (string * (string * string * string)) list = [
+  "grant_enter",        ("grant_enter_dep", "grant_dep", "IO.FileRead(\"/srv/\")");
+  "grant_enter_static", ("grant_enter_dep", "grant_dep", "IO.FileRead");
+]
+
+(* Copy bench/<dep_dir>/*.march into [tmp].deps/<dep_dir> and write
+   [tmp]/dep-grants granting it. Returns the env prefix and the extra
+   compiler flag. The copy sits beside [tmp], not in it: a granted library
+   root inside the entry's own source directory is [dep_module_conflict]
+   (its modules would also load as the app's). *)
+let bench_env ~tmp (dep_dir, pkg, scope) : string * string =
+  let src_dir = Filename.concat (bench_dir ()) dep_dir in
+  let deps = tmp ^ ".deps" in
+  Unix.mkdir deps 0o755;
+  let dst_dir = Filename.concat deps dep_dir in
+  Unix.mkdir dst_dir 0o755;
+  Array.iter (fun f ->
+    if Filename.check_suffix f ".march" then
+      match read_file_opt (Filename.concat src_dir f) with
+      | None -> ()
+      | Some data ->
+        let oc = open_out_bin (Filename.concat dst_dir f) in
+        output_string oc data; close_out oc)
+    (Sys.readdir src_dir);
+  let root = Unix.realpath dst_dir in
+  let grants = Filename.concat tmp "dep-grants" in
+  let oc = open_out_bin grants in
+  Printf.fprintf oc "%s\t%s\tforge.toml:1\t%s\n" pkg root scope;
+  close_out oc;
+  (Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote root),
+   Printf.sprintf " --dep-grants %s" (Filename.quote grants))
+
 let compile_and_run (name : string) : (string, string) result =
   let main_exe = Test_helpers.find_main_exe () in
   let src = Filename.concat (bench_dir ()) (name ^ ".march") in
@@ -333,9 +378,14 @@ let compile_and_run (name : string) : (string, string) result =
        let oc = open_out_bin src_copy in
        output_string oc data; close_out oc);
     let src = src_copy in
-    match Test_helpers.compile_march_or_skip
-            ~extra_args:(if List.mem name stdlib_source_benches
-                         then "--opt 2 --stdlib-source" else "--opt 2")
+    let (cmd_prefix, env_args) =
+      match List.assoc_opt name bench_envs with
+      | Some e -> bench_env ~tmp e
+      | None -> ("", "") in
+    match Test_helpers.compile_march_or_skip ~cmd_prefix
+            ~extra_args:((if List.mem name stdlib_source_benches
+                          then "--opt 2 --stdlib-source" else "--opt 2")
+                         ^ env_args)
             ~main_exe ~bin ~src () with
     | None -> Error "SKIP:no-clang"
     | Some bin ->

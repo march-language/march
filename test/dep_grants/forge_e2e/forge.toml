@@ -1,0 +1,11 @@
+# A two-package forge project (ocap phase 6, Task 7): the app and a path
+# dependency under deps/reader/lib, outside the app's src/.  The dependency
+# is granted reads under /srv/data only, so its read of /etc/hosts is
+# refused at run time by the grant.
+[package]
+name = "forge_e2e"
+version = "0.1.0"
+type = "app"
+
+[deps]
+reader = { path = "deps/reader", grant = ['IO.FileRead("/srv/data")'] }

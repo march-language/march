@@ -1,0 +1,22 @@
+-- A many-feature API client: `forecast` stays on the weather API; the
+-- `Telemetry` module connects elsewhere, but only `ping_home` reaches it.
+mod Weather do
+  needs IO.NetConnect
+
+  mod Telemetry do
+    needs IO.NetConnect
+
+    fn ping() do
+      HttpClient.get(HttpClient.new_client(), "https://telemetry.example.net/ping")
+    end
+  end
+
+  fn forecast(city : String) do
+    let c = HttpClient.new_client()
+    HttpClient.get(c, "https://api.weather.test/v1/forecast?city=" ++ city)
+  end
+
+  fn ping_home() do
+    Telemetry.ping()
+  end
+end

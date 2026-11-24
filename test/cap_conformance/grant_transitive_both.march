@@ -1,0 +1,29 @@
+-- DEP: relay deps/relay IO.FileRead("/srv/")
+-- DEP: gate deps/gate IO.FileRead("/srv/a/"), IO.FileRead("/tmp/")
+-- A transitive dependency the consumer also grants runs under both grants
+-- (design §10): reached through `relay`, `gate` is limited by the grant to
+-- `relay` and by its own, and a refusal names the innermost refusing layer:
+-- `gate`'s grant, even for a path `relay`'s grant refuses too, and
+-- `relay`'s grant for a path `gate`'s admits but `relay`'s does not. Called
+-- directly by the app, `gate` is limited by its own grant alone.
+mod GrantTransitiveBoth do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn through_relay(p : String) : String do
+    Relay.via_gate(p)
+  end
+
+  fn direct(p : String) : String do
+    Gate.check_path(p)
+  end
+
+  fn main() do
+    println(through_relay("/srv/a/x"))
+    println(through_relay("/srv/b/x"))
+    println(through_relay("/etc/hosts"))
+    println(through_relay("/tmp/x"))
+    println(direct("/srv/b/x"))
+    println(direct("/tmp/x"))
+  end
+end

@@ -1,0 +1,6 @@
+mod Main do
+  needs IO.Console, IO.FileRead
+  fn main() do
+    println(Peeker.peek("IO.FileRead", "/etc/hosts") ++ " " ++ Peeker.twice("x"))
+  end
+end

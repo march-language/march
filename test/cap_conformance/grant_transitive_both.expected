@@ -1,0 +1,7 @@
+allowed /srv/a/x
+IO.FileRead("/srv/b/x") refused by the grant to package gate (IO.FileRead("/srv/a/"), IO.FileRead("/tmp/"))
+IO.FileRead("/etc/hosts") refused by the grant to package gate (IO.FileRead("/srv/a/"), IO.FileRead("/tmp/"))
+IO.FileRead("/tmp/x") refused by the grant to package relay (IO.FileRead("/srv/"))
+IO.FileRead("/srv/b/x") refused by the grant to package gate (IO.FileRead("/srv/a/"), IO.FileRead("/tmp/"))
+allowed /tmp/x
+exit 0

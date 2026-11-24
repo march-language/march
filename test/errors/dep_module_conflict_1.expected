@@ -1,0 +1,13 @@
+exit: 1
+-- NAMING -------------------- deps/weather/weather.march
+
+Module `Weather` is defined twice under dependency grants: in `deps/app_lib/weather.march` (outside any granted package) and in `deps/weather/weather.march` (package `weather`). [dep_module_conflict]
+
+1 | mod Weather do
+        ^^^^^^^
+
+    a module belongs to the package whose library root holds its file; with two definitions on different sides the build would keep one and silently drop the other
+    hint: rename one of the modules, or remove the copy that should not be built
+    run `march --explain dep_module_conflict`
+
+

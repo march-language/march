@@ -335,7 +335,8 @@ let test_legacy_baseline_has_no_mode () =
   Alcotest.(check (list (pair string (list string)))) "entries still read"
     [ ("a", [ "IO.Clock" ]) ] (Cmd_audit.read_baseline p);
   Cmd_audit.write_baseline ~inferred:true p
-    [ { Cmd_audit.dc_name = "a"; dc_caps = [ "IO.Clock" ]; dc_installed = true } ];
+    [ { Cmd_audit.dc_name = "a"; dc_caps = [ "IO.Clock" ]; dc_installed = true;
+      dc_grant = None; dc_nested_grants = [] } ];
   Alcotest.(check bool) "written inferred" true (Cmd_audit.baseline_mode p = Some `Inferred);
   Alcotest.(check (list (pair string (list string)))) "mode line does not disturb entries"
     [ ("a", [ "IO.Clock" ]) ] (Cmd_audit.read_baseline p);

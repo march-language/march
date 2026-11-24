@@ -1,0 +1,8 @@
+-- Generic code in a granted package that formats a value by string
+-- interpolation: `"${x}"` lowers to `to_string(x)`, which mono resolves to
+-- the caller's `Show` impl, so the frame is kept as for a written `show(x)`.
+mod Genfmt do
+  fn bracket(x) do
+    "[${x}]"
+  end
+end

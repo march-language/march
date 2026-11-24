@@ -1,0 +1,7 @@
+mod Speaker do
+  needs IO.Console
+
+  fn say(s : String) do
+    println(s)
+  end
+end

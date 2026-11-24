@@ -18,7 +18,7 @@
  (name march_test_eval)
  (wrapped false)
  (modules test_eval)
- (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_coverage march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_caps march_errors march_effects march_eval march_coverage march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
  (name march_test_codegen)
@@ -53,7 +53,7 @@
 ; (`dune build @test/runtest-run_codegen`, ...) and runs everything else with
 ; MARCH_CI_RUNTEST_SPLIT=1 set, which drops exactly these three stanzas (exe
 ; and alias both) from `dune runtest`, along with run_cap_conformance,
-; run_errors and test_jit, which CI runs in the `forge` shard. Unset --
+; run_errors, test_jit and run_dep_grants, which CI runs in the `forge` shard. Unset --
 ; every local run -- nothing
 ; changes. Do not set it outside that CI job: a local `dune runtest` with it
 ; set runs none of the three and still reports success.
@@ -93,6 +93,23 @@
  (modules run_authority test_cap_runtime_slot test_scope_value test_authority_differential test_auth_rt)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_tir march_caps yojson alcotest str unix threads.posix)
  (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
+ (action (run %{test} -e)))
+
+;; The dependency-grants loader and package membership (ocap phase 6,
+;; lib/caps/dep_grants.ml). Fast unit tests, but kept out of the `rest` and
+;; `compiler` shards (both near their 75-minute step timeout): CI runs it in
+;; the `forge` shard through its alias, @test/runtest-run_dep_grants.
+(test
+ (name run_dep_grants)
+ (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))   ; see "CI sharding" above
+ (modules run_dep_grants test_dep_grants)
+ (libraries march_caps march_ast march_parser march_desugar march_resolver march_errors alcotest unix str)
+ ; the stdlib, for the conflict cases that name a stdlib module; the
+ ; compiler and the fixtures, for the end-to-end `march --check` cases
+ ; the runtime, for the cases that compile and run a program (Task 4)
+ ; forge, for the end-to-end `forge build` cases (Task 7)
+ (deps ../bin/main.exe ../forge/bin/main.exe (source_tree ../stdlib) (source_tree ../runtime)
+       (source_tree dep_grants))
  (action (run %{test} -e)))
 
 (test

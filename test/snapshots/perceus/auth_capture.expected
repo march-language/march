@@ -18,22 +18,22 @@ closure $Clo_$authlam0_main$5_main(Ptr(Unit), CapAuthRef)
 ## $authbody0_main$apply$3_main
 fn $authbody0_main$apply$3_main($clo : Ptr(Unit), k : Int) : Unit =
   let $authbody0_main : (Int) -> Unit = $clo in
-let $t1250 : Bool = ==(k, 0) in
-case $t1250 of
+let $t1325 : Bool = ==(k, 0) in
+case $t1325 of
   True() -> dec_rc $authbody0_main;
 ()
   _ -> println("k");
-let $t1251 : Int = -(k, 1) in
-call_ptr $authbody0_main($t1251)
+let $t1326 : Int = -(k, 1) in
+call_ptr $authbody0_main($t1326)
 
 ## $authlam0_main$apply$5_main
 fn $authlam0_main$apply$5_main($clo : Ptr(Unit), $auth_p11 : String) : () =
   let $auth_cap1 : CapAuthRef = $clo.$fv1 in
 dec_rc $clo;
 let $auth_saved12 : CapAuthRef = cap_enter($auth_cap1) in
-let $auth_result13 : () = let $rc_142 : () = say($auth_p11) in
+let $auth_result13 : () = let $rc_146 : () = say($auth_p11) in
 dec_rc $auth_p11;
-$rc_142 in
+$rc_146 in
 let $auth_unit14 : Unit = cap_restore($auth_saved12) in
 $auth_result13
 
@@ -113,12 +113,12 @@ case $f904 of
   $Tuple2($f905, $f906) -> dec_rc $f904;
 let rest : '_ = $f906 in
 let ms : '_ = $f905 in
-let $t901 : '_ = let $t900 : '_ = let $rc_139 : '_ = string_join(ms, ",") in
+let $t901 : '_ = let $t900 : '_ = let $rc_143 : '_ = string_join(ms, ",") in
 dec_rc ms;
-$rc_139 in
-let $rc_138 : '_ = ++("methods=", $t900) in
+$rc_143 in
+let $rc_142 : '_ = ++("methods=", $t900) in
 dec_rc $t900;
-$rc_138 in
+$rc_142 in
 let $t902 : ('_, '_) = ($t901, rest) in
 alloc Ok($t902)
   _ -> dec_rc $f904;
@@ -132,18 +132,18 @@ alloc Err($t911)
 
 ## $lam0__top$apply$0_main
 fn $lam0__top$apply$0_main($clo : Ptr(Unit), s : String) : () =
-  let $rc_140 : () = println(s) in
+  let $rc_144 : () = println(s) in
 dec_rc s;
-$rc_140
+$rc_144
 
 ## $lam0_main$apply$1_main
 fn $lam0_main$apply$1_main($clo : Ptr(Unit), s : String) : () =
   let $auth_cap1 : CapAuthRef = $clo.$fv1 in
 dec_rc $clo;
 let $auth_saved2 : CapAuthRef = cap_enter($auth_cap1) in
-let $auth_result3 : () = let $rc_141 : () = println(s) in
+let $auth_result3 : () = let $rc_145 : () = println(s) in
 dec_rc s;
-$rc_141 in
+$rc_145 in
 let $auth_unit4 : Unit = cap_restore($auth_saved2) in
 $auth_result3
 
@@ -179,19 +179,19 @@ alloc $Clo_loop_say$4_main(loop_say$apply$4_main, $auth_body8, $auth_cap1) in
 call_ptr p("a");
 let $auth_fnval10 : (String) -> () = alloc $Clo_$authlam0_main$5_main($authlam0_main$apply$5_main, $auth_cap1) in
 apply_to($auth_fnval10, "b");
-let $t1253 : Int = let $t1252 : Int = call_ptr inc(1) in
-scoped($t1252) in
-call_ptr loop_say($t1253);
+let $t1328 : Int = let $t1327 : Int = call_ptr inc(1) in
+scoped($t1327) in
+call_ptr loop_say($t1328);
 call_ptr shout("c");
-let $t1254 : Result((), CapError) = probe() in
-case $t1254 of
-  Ok($f1255) -> dec_rc $t1254;
-dec_rc $f1255;
+let $t1329 : Result((), CapError) = probe() in
+case $t1329 of
+  Ok($f1330) -> dec_rc $t1329;
+dec_rc $f1330;
 ()
-  Err($f1256) -> dec_rc $t1254;
-dec_rc $f1256;
+  Err($f1331) -> dec_rc $t1329;
+dec_rc $f1331;
 ()
-  _ -> dec_rc $t1254;
+  _ -> dec_rc $t1329;
 panic("non-exhaustive pattern match")
 
 ## probe

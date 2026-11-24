@@ -1,0 +1,50 @@
+---
+layout: docs
+title: "dep_grant_scope"
+permalink: /docs/errors/dep_grant_scope/
+---
+
+# `dep_grant_scope`: a granted dependency names a target outside its scoped grant
+
+A dependency grant can carry scopes, as a `needs` clause can:
+`grant = ["IO.FileRead(\"/srv/weather/\")"]` lets the dependency read files
+under that directory only. When code reached in the dependency names a literal
+target (a path, a host) that the scoped grant does not admit, the compiler
+reports it.
+
+## A program that triggers it
+
+The dependency `weather`, in a function your program calls, reads a file by a
+literal path outside its data directory:
+
+```march
+mod Weather do
+  needs IO.FileRead
+
+  fn cached(city : String) do
+    let _ = File.read("/etc/hostname")
+    File.read("/srv/weather/" ++ city)
+  end
+end
+```
+
+while `forge.toml` grants it one directory:
+
+```toml
+[deps]
+weather = { path = "../weather", grant = ["IO.FileRead(\"/srv/weather/\")"] }
+```
+
+## The fix
+
+Add the target to the grant if the dependency should reach it, or stop calling the
+function that names it. A target computed at run time is not checked here: it is
+refused when the operation runs.
+
+## Why the rule exists
+
+A scoped grant is a promise about where a dependency can reach. A literal target
+outside it would be refused at run time anyway; reporting it at compile time shows
+the mismatch while you are choosing the dependency and its grant.
+
+See also: [the language reference](../capabilities.md).

@@ -1,0 +1,16 @@
+-- Function values made by a dependency's module-level code (design §21): a
+-- lambda, a named stdlib function read as a value, and one of the package's
+-- own functions read as a value. Each captures nothing and runs as one of
+-- the package's named functions would: under its caller's authority
+-- narrowed by the grant to `boot` (ocap phase 6, Review Focus 2).
+mod Boot do
+  needs IO.FileRead
+
+  fn own_check(p : String) : Result((), CapError) do
+    Authority.check("IO.FileRead", p)
+  end
+
+  let lam = fn p -> Authority.check("IO.FileRead", p)
+  let named = Authority.check
+  let own = own_check
+end

@@ -1,0 +1,5 @@
+in crew: IO.FileRead("/etc/hosts") refused by the grant to package crew (IO.FileRead("/srv/"), IO.Spawn) | allowed /srv/x
+handed back: IO.FileRead("/etc/hosts") refused by the grant to package crew (IO.FileRead("/srv/"), IO.Spawn)
+app callback: allowed /etc/hosts
+app task: allowed /etc/hosts
+exit 0

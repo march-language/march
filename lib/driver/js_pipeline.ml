@@ -54,7 +54,8 @@ let compile_module_to_js ~source_file ~fn_lines (m : March_ast.Ast.module_) :
     let tir, restricts_kept =
       March_tir.Auth_rt.restricts tir ~sites:March_tir.Lower.restrict_sites in
     let tir, frames_kept = March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
-    let has_frames = frames_kept || restricts_kept in
+    let tir, grants_kept = March_tir.Auth_rt.grants tir ~tbl:March_tir.Lower.fn_grant_tbl in
+    let has_frames = frames_kept || restricts_kept || grants_kept in
     let tir = March_tir.Auth_rt.captures tir ~has_frames ~repl:false in
     let iface_methods = March_tir.Lower.get_iface_methods () in
     let tir = March_tir.Mono.monomorphize ~iface_methods tir in

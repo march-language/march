@@ -243,11 +243,17 @@ type bound_origin =
   | Iface_method of { iface : string; impl_ty : string option }
   | Impl_method of { iface : string; impl_ty : string }
   | Restrict_block of string
+  | Dep_grant of { pkg : string; manifest : string; text : string }
 type ref_use = Ref_call | Ref_value | Ref_spawn
 type restrict_owner = {
   ro_owner : string;
   ro_ops : (string * string * Ast.span) list;
   ro_refs : (string * Ast.span * ref_use) list;
+}
+type grant_owner = {
+  go_pkg : string;
+  mutable go_refs : (string * Ast.span * string * ref_use) list;
+  mutable go_ops : (string * Ast.span) list;
 }
 type fn_bound = { fb_caps : string list; fb_span : Ast.span; fb_site : Ast.span; fb_origin : bound_origin }
 type cap_mismatch_site = {
@@ -349,6 +355,9 @@ type env = {
   fn_grant_points : (string, string list * Ast.span) Hashtbl.t;
   fn_bound_points : (string, fn_bound) Hashtbl.t;
   restrict_owners : (string, restrict_owner) Hashtbl.t;
+  grant_owners : (string, grant_owner) Hashtbl.t;
+  grant_module_pkgs : (string, string) Hashtbl.t;
+  grant_module_scopes : (string, string list * (string * string) list) Hashtbl.t;
   local_mods : string list StrMap.t;
   offer_conts : (session_ty ref * (string * session_ty) list) list ref;
   offer_labels :

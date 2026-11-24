@@ -85,6 +85,7 @@ type fn_needs = Lower_state.fn_needs = {
 
 let fn_needs_tbl = Lower_state.fn_needs_tbl
 let restrict_sites = Lower_state.restrict_sites
+let fn_grant_tbl = Lower_state.fn_grant_tbl
 let _default_dispatch = Lower_state._default_dispatch
 let _alias_candidates = Lower_state._alias_candidates
 let _alias_reported = Lower_state._alias_reported
@@ -275,6 +276,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   _lowered_modules := Hashtbl.create 8;
   Hashtbl.reset Lower_state._fn_typed_module_lets;
   Hashtbl.reset Lower_state.fn_needs_tbl;
+  Hashtbl.reset Lower_state.fn_grant_tbl;
   Lower_state.reset_restricts ();
   (* Entry-file top-level fns named like a builtin that has its own C symbol
      get a distinct TIR name (see [Lower_state._builtin_shadows]).  Only
@@ -785,6 +787,15 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                       iface_self_call_names fn
                   else fn in
                   Provenance.rename ~old:fn.fn_name ~new_:mangled;
+                  (* Keyed as the checker keys an impl method:
+                     [<Mod>.<Iface>$<Ty>.<method>].  Its package is where its
+                     code is written: an interface default body the impl
+                     inherits is the interface's package's code. *)
+                  Lower_state.note_fn_grant ~final:mangled
+                    ~key:(Some (Printf.sprintf "%s%s$%s.%s" mod_prefix idef.impl_iface.txt
+                                  type_name mname.txt))
+                    ~file:(March_caps.Dep_grants.impl_method_file
+                             ~impl_file:impl_sp.Ast.file mname.Ast.span);
                   fns := { fn with fn_name = mangled } :: !fns
                 end;
                 (* Provenance for mono's return-position fallback
@@ -884,6 +895,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         if not (Hashtbl.mem !_default_dispatch def.fn_name.txt) then begin
           let fn = Lower_decls.lower_fn_def env def in   (* evaluate before reading !fns *)
           Lower_state.note_fn_needs ~final:fn.fn_name ~display:def.fn_name.txt def;
+          Lower_state.note_fn_grant ~final:fn.fn_name ~key:(Some def.fn_name.txt)
+            ~file:def.fn_name.span.file;
           fns := fn :: !fns
         end
       | _ -> ()
@@ -923,6 +936,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           in
           note_migrate_msg ~prefix:"" def fn;
           Lower_state.note_fn_needs ~final:fn.fn_name ~display:def.fn_name.txt def;
+          Lower_state.note_fn_grant ~final:fn.fn_name ~key:(Some def.fn_name.txt)
+            ~file:def.fn_name.span.file;
           if Hot_reload.work_entry_source def.fn_name.txt def.fn_name.span.file then
             Hot_reload.note_work_entry fn.fn_name;
           (* The entry file's own top-level fns, by provenance: they may be
@@ -1024,6 +1039,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 let fn = { fn with fn_name = qname } in
                 note_migrate_msg ~prefix def fn;
                 Lower_state.note_fn_needs ~final:qname ~display:(prefix ^ def.fn_name.txt) def;
+                Lower_state.note_fn_grant ~final:qname ~key:(Some (prefix ^ def.fn_name.txt))
+                  ~file:def.fn_name.span.file;
                 if Hot_reload.work_entry_source def.fn_name.txt def.fn_name.span.file then
                   Hot_reload.note_work_entry fn.fn_name;
                 fns := fn :: !fns
@@ -1037,7 +1054,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                  | None -> ())
               | Ast.DMod (sub_name, _, sub_decls, _) ->
                 lower_mod_decls ~enclosing:scopes mod_env (prefix ^ sub_name.txt ^ ".") sub_decls
-              | Ast.DLet (_, b, _) ->
+              | Ast.DLet (_, b, let_sp) ->
                 (* Module-level let bindings are compiled as zero-arg functions
                    so they can be referenced by qualified name after
                    rename_tir_vars renames the short name to prefix^name. *)
@@ -1052,7 +1069,11 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                      fn_body   = rhs;
                      fn_kind   = Tir.FnNormal;  (* module-level `let` as zero-arg fn *)
                    } in
+                   (* As a DFn's: qualify bare references to the module's fns. *)
+                   let fn = Lower_decls.rename_scoped_vars scopes fn in
                    Lower_state.note_module_let fn;
+                   Lower_state.note_fn_grant ~final:fn.fn_name ~key:(Some fn.fn_name)
+                     ~file:let_sp.Ast.file;
                    fns := fn :: !fns
                  | _ -> ())
               | Ast.DUse (ud, _) ->
@@ -1145,6 +1166,18 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 List.iter
                   (fun (fd : Tir.fn_def) ->
                      Handler_owner.register ~fn_name:fd.Tir.fn_name ~owner)
+                  renamed_fns;
+                (* A granted package's actor runs its handlers, on_stop and
+                   init under the grant (ocap phase 6): they are the
+                   package's code whoever spawns the actor.  Not the glue the
+                   runtime holds and that runs no package code (dispatch,
+                   inspect). *)
+                List.iter
+                  (fun (fd : Tir.fn_def) ->
+                     let n = fd.Tir.fn_name in
+                     if not (String.ends_with ~suffix:Tir_names.actor_dispatch_suffix n
+                             || String.ends_with ~suffix:Tir_names.actor_inspect_suffix n)
+                     then Lower_state.note_fn_grant ~final:n ~key:None ~file:span.Ast.file)
                   renamed_fns;
                 types := List.rev_append new_types !types;
                 fns   := List.rev_append renamed_fns !fns

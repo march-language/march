@@ -1,0 +1,3 @@
+mod W do
+  fn hello() : String do "w" end
+end

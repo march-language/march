@@ -1,0 +1,33 @@
+-- The app's own actor shares its name with the granted package's
+-- `Lifecycle.W`: it is the app's code, and must not run under the grant.
+mod Main do
+  needs IO.Console, IO.FileRead, IO.Spawn
+
+  type AReq = AReq
+
+  actor W do
+    state { s : String }
+    init  { s: "app" }
+    on Get(reply_to) do
+      let v = match Authority.check("IO.FileRead", "/etc/hosts") do
+        Ok(_) -> "allowed"
+        Err(_) -> "refused"
+        end
+      Actor.reply(reply_to, "app W handler=" ++ v)
+      state
+    end
+  end
+
+  fn main() do
+    let w = spawn(W)
+    match Actor.call(w, AReq, 5000) do
+    Ok(s) -> println(s)
+    Err(e) -> println("call failed " ++ e)
+    end
+    let w2 = spawn(Lifecycle.W)
+    match Actor.call(w2, Lifecycle.GetReq, 5000) do
+    Ok(s) -> println("package W: " ++ s)
+    Err(e) -> println("call failed " ++ e)
+    end
+  end
+end

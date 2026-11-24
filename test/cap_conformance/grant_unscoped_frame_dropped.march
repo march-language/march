@@ -1,0 +1,38 @@
+-- DEP: shout deps/shout IO.Console
+-- Under an unscoped grant, natively the grant frame of a function the type
+-- checker proved within the grant's kinds is dropped (ocap p6 decision 7:
+-- here `Shout.shout` and `Shout.twice`), while the interpreter always
+-- frames. The output is the same either way: the dropped functions' results,
+-- `shout`'s printing, the app's own authority after the calls, and
+-- `shout`'s check of a kind only known at run time (which no proof by kind
+-- covers, so its frame stays), refused by the grant.
+mod GrantUnscopedFrameDropped do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn mine(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "allowed " ++ p
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn pure_calls() : String do
+    Shout.twice("hi") ++ " / " ++ Shout.shout("ho")
+  end
+
+  fn loud() : () do
+    Shout.say("hey")
+  end
+
+  fn peeks() : String do
+    Shout.peek("IO.Console", "stdout") ++ " | " ++ Shout.peek("IO.FileRead", "/etc/hosts")
+  end
+
+  fn main() do
+    println(pure_calls())
+    loud()
+    println("app: " ++ mine("/etc/hosts"))
+    println(peeks())
+  end
+end

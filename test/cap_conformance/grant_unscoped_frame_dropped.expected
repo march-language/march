@@ -1,0 +1,5 @@
+hi! hi! / ho!
+shout: hey! hey!
+app: allowed /etc/hosts
+allowed stdout | IO.FileRead("/etc/hosts") refused by the grant to package shout (IO.Console)
+exit 0

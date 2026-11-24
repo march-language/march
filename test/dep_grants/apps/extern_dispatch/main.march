@@ -1,0 +1,9 @@
+mod Main do
+  needs IO.Console, IO.Foreign
+
+  fn gopeek(x) do peek(x) end
+
+  fn main() do
+    println(if gopeek(Cpid.tok()) > 0 do "ran getpid" else "ran getpid" end)
+  end
+end

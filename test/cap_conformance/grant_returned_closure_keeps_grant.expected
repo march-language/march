@@ -1,0 +1,4 @@
+IO.FileRead("/etc/hosts") refused by the grant to package gate (IO.FileRead("/srv/")) | allowed /srv/x
+IO.FileRead("/etc/hosts") refused by the grant to package gate (IO.FileRead("/srv/")) | allowed /srv/x
+app: allowed /etc/hosts
+exit 0

@@ -1,0 +1,65 @@
+mod Main do
+  needs IO, IO.Console, IO.FileRead, IO.Spawn, Actor.Introspect
+
+  fn mine() do
+    match Authority.check("IO.FileRead", "/etc/hosts") do
+    Ok(_) -> "allowed"
+    Err(_) -> "refused"
+    end
+  end
+
+  fn ask(tag, w) do
+    match Actor.call(w, Lifecycle.GetReq, 5000) do
+    Ok(s) -> println(tag ++ ": " ++ s)
+    Err(e) -> println(tag ++ ": call failed " ++ e)
+    end
+  end
+
+  fn child(sup) do
+    match get_actor_field(sup, "w") do
+    None -> -1
+    Some(n) -> n
+    end
+  end
+
+  fn actors(intro : Cap(Actor.Introspect)) do
+    let w = spawn(Lifecycle.W)
+    ask("app-spawned", w)
+    let w2 = Lifecycle.start()
+    ask("pkg-spawned", w2)
+    let sup = spawn(Lifecycle.Sup)
+    let c1 = child(sup)
+    ask("sup child", Actor.pid_from_int(intro, c1))
+    kill(Actor.pid_from_int(intro, c1))
+    let c2 = child(sup)
+    println("restarted: " ++ bool_to_string(c2 != c1))
+    ask("restarted child", Actor.pid_from_int(intro, c2))
+    let _ = Actor.stop(w, 1000)
+    run_until_idle()
+    println("after actors: " ++ mine())
+  end
+
+  fn tasks() do
+    println("task inside the package: " ++ Lifecycle.task_probe())
+    let th = Lifecycle.task_handle()
+    match Task.await(th) do
+    Ok(v) -> println("its task awaited by the app: " ++ v)
+    Err(_) -> println("task handle err")
+    end
+    println("after tasks: " ++ mine())
+  end
+
+  fn panics() do
+    match __try_call_val(fn _ -> Lifecycle.boom()) do
+    Ok(_) -> println("boom ok?")
+    Err(_) -> println("boom: err")
+    end
+    println("after a panic in the package: " ++ mine())
+  end
+
+  fn main(io : Cap(IO)) do
+    actors(Actor.introspect(io))
+    tasks()
+    panics()
+  end
+end

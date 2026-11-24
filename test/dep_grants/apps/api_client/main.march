@@ -1,0 +1,10 @@
+mod Main do
+  needs IO.Console, IO.NetConnect
+
+  fn main() do
+    match Weather.forecast("oslo") do
+      Ok(_) -> println("ok")
+      Err(_) -> println("err")
+    end
+  end
+end

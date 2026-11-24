@@ -1,0 +1,7 @@
+mod Main do
+  needs IO.Console
+
+  fn main() do
+    Each.each(["a", "b"], fn x -> println(x))
+  end
+end

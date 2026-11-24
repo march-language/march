@@ -1,0 +1,5 @@
+mod Weather do
+  fn report(city : String) do
+    Speaker.say("sunny in " ++ city)
+  end
+end

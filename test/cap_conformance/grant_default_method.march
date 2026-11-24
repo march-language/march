@@ -1,0 +1,26 @@
+-- DEP: loudy deps/loudy ()
+-- An interface default body declared in a granted dependency and inherited
+-- by an impl the app writes runs under the dependency's grant (ocap p6 final
+-- review I2): the package's code is decided by where it is written, the
+-- interface's file, not by the impl that inherits it. The app's own method
+-- on the same type keeps the app's authority.
+mod GrantDefaultMethod do
+  needs IO.Console
+
+  type Mine = Mine(Int)
+
+  impl Greet(Mine) do
+  end
+
+  fn mine(_m : Mine) : String do
+    match Authority.check("IO.Console", "stdout") do
+    Ok(_) -> "app: allowed"
+    Err(e) -> "app: " ++ Authority.describe(e)
+    end
+  end
+
+  fn main() do
+    println(greet(Mine(1)))
+    println(mine(Mine(2)))
+  end
+end

@@ -1,0 +1,31 @@
+-- DEP: gate deps/gate IO.FileRead("/srv/")
+-- An app `restrict` around a call into a granted dependency: both layers
+-- hold (design §9, §10), and a refusal names the innermost refusing layer.
+-- Inside the dependency that is the grant to `gate`, even for a path the
+-- restrict refuses too; a path the grant admits but the restrict does not is
+-- refused by the restrict; and the restrict's own body is limited by the
+-- restrict alone.
+mod GrantUnderRestrict do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn mine(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "allowed " ++ p
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn inside(p : String) : String do
+    restrict IO.FileRead("/srv/a/"), IO.FileRead("/tmp/") do
+      "gate: " ++ Gate.check_path(p) ++ " | app: " ++ mine(p)
+    end
+  end
+
+  fn main() do
+    println(inside("/srv/a/x"))
+    println(inside("/srv/b/x"))
+    println(inside("/tmp/x"))
+    println(inside("/etc/hosts"))
+  end
+end

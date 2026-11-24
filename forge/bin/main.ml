@@ -2436,6 +2436,7 @@ let () =
   let code =
     try Cmd.eval ~catch:false ~argv main with
     | Toml.Parse_error m -> Printf.eprintf "error: TOML parse error, %s\n%!" m; 1
+    | Cmd_build.Grant_error m | Cmd_audit.Baseline_error m -> Printf.eprintf "error: %s\n%!" m; 1
     | e ->
       Printf.eprintf "forge: internal error, uncaught exception:\n%s\n%!"
         (Printexc.to_string e);

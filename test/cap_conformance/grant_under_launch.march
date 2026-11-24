@@ -1,0 +1,30 @@
+-- GRANT: IO.Console, IO.FileRead("/srv/a/")
+-- DEP: gate deps/gate IO.FileRead("/srv/")
+-- A dependency grant under a launch grant narrower than the program's
+-- request (design §10, §11): the dependency runs under both, and a refusal
+-- names the innermost refusing layer. A path both refuse names the grant to
+-- `gate`; a path the dependency's grant admits but the launch grant does
+-- not names the launch grant; and the app, outside `gate`, is limited by
+-- the launch grant alone.
+mod GrantUnderLaunch do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn mine(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "allowed " ++ p
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn dep(p : String) : String do
+    Gate.check_path(p)
+  end
+
+  fn main() do
+    println(dep("/srv/a/x"))
+    println(dep("/srv/b/x"))
+    println(dep("/etc/hosts"))
+    println("app: " ++ mine("/srv/b/x"))
+  end
+end

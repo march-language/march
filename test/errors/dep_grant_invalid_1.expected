@@ -1,0 +1,13 @@
+exit: 1
+-- CAPABILITY ---------- errors/dep_grant_invalid_1.march
+
+The grant to `weather` (`IO.Console, IO.FileRead("data/")`) is not valid: the scope `data/` on `IO.FileRead` is a relative path, so it would name a different directory depending on the working directory at run time. [dep_grant_invalid]
+
+3 | mod Main do
+        ^^^^
+
+    granted at forge.toml:2
+    hint: write the grant as you would write the package's `needs` clause; `grant = []` grants nothing
+    run `march --explain dep_grant_invalid`
+
+

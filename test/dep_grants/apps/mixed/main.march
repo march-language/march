@@ -1,0 +1,7 @@
+mod Main do
+  needs IO.Clock
+  fn main() do
+    let _ = Mixed.tick()
+    ()
+  end
+end

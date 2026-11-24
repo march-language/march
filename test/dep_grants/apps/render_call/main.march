@@ -1,0 +1,7 @@
+mod Main do
+  needs IO.Console
+
+  fn main() do
+    println(to_string(Loud2.make()))
+  end
+end

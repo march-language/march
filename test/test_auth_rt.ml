@@ -942,6 +942,436 @@ let test_restrict_every_runtime () =
 end
 |}))
 
+(* ── ocap phase 6, Task 4: dependency grant frames ([Auth_rt.grants]) ──
+
+   The lowered TIR of one module whose nested [Dep] stands for a granted
+   package: the grant table is set directly (the lowering fills it from a
+   grants file, which a source string has no path for; test_dep_grants.ml
+   covers that end to end). *)
+
+let grant_of ?(scoped = false) ?(proven = true) () =
+  { Lower_state.fg_pkg = "dep";
+    fg_text = (if scoped then "IO.FileRead(\"/srv/\")" else "IO.FileRead");
+    fg_scoped = scoped;
+    fg_proven = proven }
+
+let grants_of src (entries : (string * Lower_state.fn_grant) list) =
+  let tir = Test_helpers.lower_module_typed src in
+  let tbl = Hashtbl.create 8 in
+  List.iter (fun (n, g) -> Hashtbl.replace tbl n g) entries;
+  let out, kept = Auth_rt.grants tir ~tbl in
+  (tir, out, kept)
+
+(* The direct callees of [e]'s own code: not a lambda's or local fn's. *)
+let rec own_callees (e : Tir.expr) : string list =
+  match e with
+  | Tir.EApp (f, _) -> [ f.Tir.v_name ]
+  | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> own_callees a @ own_callees b
+  | Tir.ELetRec (_, b) -> own_callees b
+  | Tir.ECase (_, brs, d) ->
+    List.concat_map (fun (b : Tir.branch) -> own_callees b.Tir.br_body) brs
+    @ (match d with Some d -> own_callees d | None -> [])
+  | _ -> []
+
+(* The direct callees inside the lambdas and local fns [e] makes. *)
+let rec lambda_callees (e : Tir.expr) : string list =
+  match e with
+  | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> lambda_callees a @ lambda_callees b
+  | Tir.ELetRec (fns, b) ->
+    List.concat_map (fun (f : Tir.fn_def) -> callees f.Tir.fn_body) fns @ lambda_callees b
+  | Tir.ECase (_, brs, d) ->
+    List.concat_map (fun (b : Tir.branch) -> lambda_callees b.Tir.br_body) brs
+    @ (match d with Some d -> lambda_callees d | None -> [])
+  | _ -> []
+
+let grant_layer = "dep$grant$auth_layer"
+
+(* Whether [e] is the grant's frame: the layer, [enter_grant], ... *)
+let is_grant_frame (e : Tir.expr) =
+  match e with
+  | Tir.ELet (_, Tir.EApp (l, []), Tir.ELet (_, Tir.EApp (en, [ _ ]), _)) ->
+    l.Tir.v_name = grant_layer && en.Tir.v_name = Tir_names.enter_grant_name
+  | _ -> false
+
+let check_wrapped out name =
+  let w = fn_exn name out in
+  Alcotest.(check bool) (name ^ " enters the grant") true (is_grant_frame w.Tir.fn_body);
+  Alcotest.(check bool) (name ^ " calls its body") true
+    (List.mem (name ^ "$grant") (callees w.Tir.fn_body))
+
+let check_unwrapped out name =
+  ignore (fn_exn name out);
+  Alcotest.(check bool) (name ^ " has no grant body") true (fn_opt (name ^ "$grant") out = None)
+
+let grant_src = {|mod A do
+  needs IO.Console
+  mod Dep do
+    fn g(x : Int) : Int do x + 1 end
+    fn f(x : Int) : Int do
+      let h = fn y -> g(y)
+      g(x) + h(x)
+    end
+  end
+  fn main() do
+    println(int_to_string(Dep.f(1) + Dep.g(2)))
+  end
+end
+|}
+
+let test_grant_empty_identity () =
+  let tir, out, kept = grants_of grant_src [] in
+  Alcotest.(check bool) "kept" false kept;
+  Alcotest.(check bool) "the module is returned physically unchanged" true (out == tir)
+
+let test_grant_scoped_wraps_and_retargets () =
+  let g = grant_of ~scoped:true () in
+  let _, out, kept = grants_of grant_src [ ("Dep.f", g); ("Dep.g", g) ] in
+  Alcotest.(check bool) "kept" true kept;
+  check_wrapped out "Dep.f";
+  check_wrapped out "Dep.g";
+  let layer = fn_exn grant_layer out in
+  Alcotest.(check (list string)) "one layer fn, built by grant_layer"
+    [ Tir_names.grant_layer_builtin_name ] (callees layer.Tir.fn_body);
+  let body = fn_exn "Dep.f$grant" out in
+  Alcotest.(check bool) "an internal call targets the callee's body" true
+    (List.mem "Dep.g$grant" (own_callees body.Tir.fn_body));
+  Alcotest.(check bool) "and not its wrapper" false (List.mem "Dep.g" (own_callees body.Tir.fn_body));
+  Alcotest.(check bool) "a lambda made in a P fn calls the wrapper" true
+    (List.mem "Dep.g" (lambda_callees body.Tir.fn_body));
+  Alcotest.(check bool) "never the body" false
+    (List.mem "Dep.g$grant" (lambda_callees body.Tir.fn_body));
+  let main = fn_exn "main" out in
+  Alcotest.(check bool) "a call from outside the package keeps the wrapper" true
+    (List.mem "Dep.f" (callees main.Tir.fn_body) && List.mem "Dep.g" (callees main.Tir.fn_body));
+  Alcotest.(check bool) "and never targets a body" false
+    (List.exists (fun n -> String.ends_with ~suffix:"$grant" n) (callees main.Tir.fn_body))
+
+(* Two package fns, no lambda: nothing reaches a function-value call. *)
+let pure_src = {|mod A do
+  needs IO.Console
+  mod Dep do
+    fn g(x : Int) : Int do x + 1 end
+    fn f(x : Int) : Int do g(x) * 2 end
+  end
+  fn main() do
+    println(int_to_string(Dep.f(1)))
+  end
+end
+|}
+
+(* A dropped caller (unscoped, proven, no spawn or indirect call) keeps its
+   callees' wrapper names: the grant is not certainly in force in it. *)
+let test_grant_dropped_caller_keeps_wrapper_names () =
+  let _, out, kept =
+    grants_of pure_src
+      [ ("Dep.f", grant_of ()); ("Dep.g", grant_of ~proven:false ()) ] in
+  Alcotest.(check bool) "kept" true kept;
+  check_unwrapped out "Dep.f";
+  check_wrapped out "Dep.g";
+  let f = fn_exn "Dep.f" out in
+  Alcotest.(check bool) "f calls g's wrapper" true (List.mem "Dep.g" (own_callees f.Tir.fn_body));
+  Alcotest.(check bool) "never g's body" false
+    (List.mem "Dep.g$grant" (callees f.Tir.fn_body))
+
+let spawn_src = {|mod A do
+  needs IO.Console
+  needs IO.Spawn
+  mod Dep do
+    actor W do
+      state { n : Int }
+      init { n: 0 }
+      on Ping() do
+        state
+      end
+    end
+    fn g() do spawn(W) end
+    fn f() do g() end
+    fn pure(x : Int) : Int do x * 2 end
+  end
+  fn main() do
+    let _ = Dep.f()
+    println(int_to_string(Dep.pure(2)))
+  end
+end
+|}
+
+(* An unscoped, proven fn that spawns an actor (or calls one that does)
+   keeps its frame; a proven, spawn-free one does not. *)
+let test_grant_spawn_kept () =
+  let g = grant_of () in
+  let _, out, _ = grants_of spawn_src [ ("Dep.f", g); ("Dep.g", g); ("Dep.pure", g) ] in
+  check_wrapped out "Dep.g";
+  check_wrapped out "Dep.f";
+  check_unwrapped out "Dep.pure";
+  let f = fn_exn "Dep.f$grant" out in
+  Alcotest.(check bool) "the kept caller targets the spawner's body" true
+    (List.mem "Dep.g$grant" (own_callees f.Tir.fn_body))
+
+let test_grant_proven_not_wrapped () =
+  let tir, out, kept = grants_of pure_src [ ("Dep.f", grant_of ()); ("Dep.g", grant_of ()) ] in
+  Alcotest.(check bool) "kept" false kept;
+  Alcotest.(check bool) "the module is returned physically unchanged" true (out == tir)
+
+let test_grant_unproven_wrapped () =
+  let _, out, kept =
+    grants_of grant_src
+      [ ("Dep.f", grant_of ~proven:false ()); ("Dep.g", grant_of ~proven:false ()) ] in
+  Alcotest.(check bool) "kept" true kept;
+  check_wrapped out "Dep.f";
+  check_wrapped out "Dep.g"
+
+let indirect_src = {|mod A do
+  needs IO.Console
+  mod Dep do
+    fn bump(xs : List(Int)) : List(Int) do List.map(xs, fn x -> x + 1) end
+    fn apply(h : Int -> Int, x : Int) : Int do h(x) end
+  end
+  fn main() do
+    println(int_to_string(List.length(Dep.bump([1]))))
+    println(int_to_string(Dep.apply(fn x -> x, 1)))
+  end
+end
+|}
+
+(* Proven yet reaching a call of a function value: [List.map(xs, f)], or a
+   call of its own parameter (proven by design, the callback being charged
+   to the caller), keeps the frame, since a function value runs under its
+   caller's authority. *)
+let test_grant_indirect_wrapped () =
+  let g = grant_of () in
+  let _, out, _ = grants_of indirect_src [ ("Dep.bump", g); ("Dep.apply", g) ] in
+  check_wrapped out "Dep.bump";
+  check_wrapped out "Dep.apply"
+
+let init_src = {|mod A do
+  needs IO.Console
+  mod Dep do
+    let inc = fn x -> x + 1
+  end
+  fn main() do
+    let h = Dep.inc
+    println(int_to_string(h(1)))
+  end
+end
+|}
+
+(* A lambda made by a granted package's module-level code captures nothing
+   and gets the grant's frame around its own body (decision 9). *)
+let test_grant_init_lambda_prologue () =
+  let tir, out, kept = grants_of init_src [ ("Dep.inc", grant_of ()) ] in
+  Alcotest.(check bool) "kept" true kept;
+  Alcotest.(check bool) "the init fn was module-initialiser code" true
+    (Lower_state.is_module_init_fn "Dep.inc");
+  check_unwrapped out "Dep.inc";
+  ignore tir;
+  let inc = fn_exn "Dep.inc" out in
+  match lambdas inc.Tir.fn_body with
+  | [ (fd, _) ] ->
+    Alcotest.(check bool) "a module-initialiser lambda" true
+      (Lower_state.is_module_init_lambda fd.Tir.fn_name);
+    Alcotest.(check bool) "its body is inside the grant's frame" true
+      (is_grant_frame fd.Tir.fn_body);
+    ignore (fn_exn grant_layer out)
+  | ls -> Alcotest.failf "expected one lambda in Dep.inc, got %d" (List.length ls)
+
+let mk_src = {|mod A do
+  needs IO.Console
+  needs IO.FileRead
+  mod Dep do
+|} ^ show_fn ^ {|    fn mk() : String -> String do
+      fn p -> show(Authority.check("IO.FileRead", p))
+    end
+  end
+  fn main() do
+    let m = Dep.mk()
+    println(m("/etc/x"))
+  end
+end
+|}
+
+(* A lambda made inside a wrapped fn captures the authority it was made
+   under (the grant's): [captures] runs with [has_frames]. *)
+let test_grant_lambda_captured () =
+  let _, out, kept = grants_of mk_src [ ("Dep.mk", grant_of ~scoped:true ()) ] in
+  Alcotest.(check bool) "kept" true kept;
+  let cap = Auth_rt.captures out ~has_frames:kept ~repl:false in
+  let body = fn_exn "Dep.mk$grant" cap in
+  Alcotest.(check bool) "the body saves the authority" true (saves body);
+  match lambdas body.Tir.fn_body with
+  | (_, captured) :: _ -> Alcotest.(check bool) "the lambda captures" true captured
+  | [] -> Alcotest.fail "no lambda in Dep.mk$grant"
+
+(* A granted package's actor: its handler and spawn glue (as the lowering
+   tags them) are wrapped, the dispatch glue is not, and the dispatch keeps
+   calling the handler's wrapper. *)
+let test_grant_actor_handlers () =
+  let tir = Test_helpers.lower_module_typed spawn_src in
+  let names = List.map (fun (f : Tir.fn_def) -> f.Tir.fn_name) tir.Tir.tm_fns in
+  let handler = List.find (fun n -> String.ends_with ~suffix:"W_Ping" n) names in
+  let spawner = List.find (fun n -> String.ends_with ~suffix:"W_spawn" n) names in
+  let dispatch = List.find (fun n -> String.ends_with ~suffix:"W_dispatch" n) names in
+  (* As the lowering tags them: no checker key, never proven. *)
+  let g = grant_of ~proven:false () in
+  let _, out, kept = grants_of spawn_src [ (handler, g); (spawner, g) ] in
+  Alcotest.(check bool) "kept" true kept;
+  check_wrapped out handler;
+  check_wrapped out spawner;
+  check_unwrapped out dispatch;
+  let d = fn_exn dispatch out in
+  Alcotest.(check bool) "the dispatch calls the handler's wrapper" true
+    (List.mem handler (callees d.Tir.fn_body))
+
+(* ── Fix round 1 ── *)
+
+(* I1: the package -> layer name map is injective: [a-b] and [a_b] get two
+   layer fns, and each package's wrapper enters its own. *)
+let test_grant_layer_names_injective () =
+  let la = Tir_names.grant_layer_fn_of "a-b" and lb = Tir_names.grant_layer_fn_of "a_b" in
+  Alcotest.(check bool) "distinct names" true (la <> lb);
+  Alcotest.(check string) "a-b" "a_2db$grant$auth_layer" la;
+  Alcotest.(check string) "a_b" "a_5fb$grant$auth_layer" lb;
+  let ga = { (grant_of ~scoped:true ()) with Lower_state.fg_pkg = "a-b" } in
+  let gb = { (grant_of ~scoped:true ()) with Lower_state.fg_pkg = "a_b" } in
+  let _, out, _ = grants_of pure_src [ ("Dep.f", ga); ("Dep.g", gb) ] in
+  let layer_called name = List.hd (callees (fn_exn name out).Tir.fn_body) in
+  Alcotest.(check string) "Dep.f enters a-b's layer" la (layer_called "Dep.f");
+  Alcotest.(check string) "Dep.g enters a_b's layer" lb (layer_called "Dep.g");
+  ignore (fn_exn la out);
+  ignore (fn_exn lb out);
+  let f = fn_exn "Dep.f$grant" out in
+  Alcotest.(check bool) "a call into the other package keeps its wrapper" true
+    (List.mem "Dep.g" (own_callees f.Tir.fn_body))
+
+let generic_src = {|mod A do
+  needs IO.Console
+  type Probe = Probe
+  impl Show(Probe) do
+    fn show(_p) do "probe" end
+  end
+  mod Dep do
+    fn describe(x) do "<" ++ show(x) ++ ">" end
+  end
+  fn main() do
+    println(Dep.describe(Probe))
+  end
+end
+|}
+
+(* I2: an unscoped, proven fn whose generic interface call mono may resolve
+   to an impl outside the package keeps its frame. *)
+let test_grant_iface_dispatch_kept () =
+  let _, out, _ = grants_of generic_src [ ("Dep.describe", grant_of ()) ] in
+  check_wrapped out "Dep.describe"
+
+let interp_src = {|mod A do
+  needs IO.Console
+  type Probe = Probe
+  impl Show(Probe) do
+    fn show(_p) do "probe" end
+  end
+  mod Dep do
+    fn bracket(x) do "[${x}]" end
+  end
+  fn main() do
+    println(Dep.bracket(Probe))
+  end
+end
+|}
+
+(* R1: interpolation on a type variable lowers to [to_string(x)], which mono
+   resolves to Show impls: the frame is kept, as for [show(x)]. *)
+let test_grant_interp_dispatch_kept () =
+  let _, out, _ = grants_of interp_src [ ("Dep.bracket", grant_of ()) ] in
+  check_wrapped out "Dep.bracket"
+
+let two_pkg_src = {|mod A do
+  needs IO.Console
+  mod Other do
+    fn g(x : Int) : Int do x + 1 end
+  end
+  mod Dep do
+    fn f(x : Int) : Int do Other.g(x) * 2 end
+  end
+  fn main() do
+    println(int_to_string(Dep.f(1)))
+  end
+end
+|}
+
+(* M2 (a): a kept body of P calling a fn of another granted package Q keeps
+   Q's wrapper name, so the call enters Q's grant too. *)
+let test_grant_cross_package_keeps_wrapper () =
+  let gq = { (grant_of ~scoped:true ()) with Lower_state.fg_pkg = "other" } in
+  let _, out, _ = grants_of two_pkg_src [ ("Dep.f", grant_of ~scoped:true ()); ("Other.g", gq) ] in
+  check_wrapped out "Dep.f";
+  let f = fn_exn "Dep.f$grant" out in
+  Alcotest.(check bool) "calls Other.g's wrapper" true (List.mem "Other.g" (own_callees f.Tir.fn_body));
+  Alcotest.(check bool) "never its body" false (List.mem "Other.g$grant" (callees f.Tir.fn_body))
+
+let needs_src = {|mod A do
+  needs IO.Console
+  needs IO.FileRead
+  mod Dep do
+    needs IO.FileRead
+    fn f(p : String) : Bool needs IO.FileRead("/srv/") do
+      match Authority.check("IO.FileRead", p) do
+      Ok(_) -> true
+      Err(_) -> false
+      end
+    end
+  end
+  fn main() do
+    println(Dep.f("/srv/x"))
+  end
+end
+|}
+
+(* M2 (b): a P fn that also has a framed `needs` clause: the grant's
+   wrapper [f] (outermost) calls [f$grant], the needs frame's wrapper, which
+   enters the fn frame around [f$auth]. *)
+let test_grant_around_needs_frame () =
+  let tir, needs = lower needs_src in
+  let framed, has = Auth_rt.frames tir ~needs in
+  Alcotest.(check bool) "the needs clause is framed" true has;
+  let tbl = Hashtbl.create 1 in
+  Hashtbl.replace tbl "Dep.f" (grant_of ~scoped:true ());
+  let out, kept = Auth_rt.grants framed ~tbl in
+  Alcotest.(check bool) "kept" true kept;
+  check_wrapped out "Dep.f";
+  let mid = fn_exn "Dep.f$grant" out in
+  Alcotest.(check (list string)) "f$grant enters the fn frame around f$auth"
+    [ "Dep.f$auth_layer"; Tir_names.enter_fn_name; "Dep.f$auth"; "cap_restore" ]
+    (callees mid.Tir.fn_body);
+  Alcotest.(check bool) "f$auth is not wrapped again" true (fn_opt "Dep.f$auth$grant" out = None)
+
+let named_init_src = {|mod A do
+  needs IO.Console
+  needs IO.FileRead
+  mod Dep do
+    let named = Authority.check
+  end
+  fn main() do
+    let n = Dep.named
+    println(n("IO.FileRead", "/etc/x") == Ok(()))
+  end
+end
+|}
+
+(* C1: a named fn value in a P module-level initialiser becomes an eta
+   lambda registered as module-initialiser code, with the grant prologue. *)
+let test_grant_init_named_value_eta () =
+  let _, out, kept = grants_of named_init_src [ ("Dep.named", grant_of ()) ] in
+  Alcotest.(check bool) "kept" true kept;
+  let f = fn_exn "Dep.named" out in
+  match lambdas f.Tir.fn_body with
+  | [ (fd, _) ] ->
+    Alcotest.(check bool) "a module-initialiser lambda" true
+      (Lower_state.is_module_init_lambda fd.Tir.fn_name);
+    Alcotest.(check bool) "inside the grant's frame" true (is_grant_frame fd.Tir.fn_body);
+    Alcotest.(check bool) "that calls the named fn" true
+      (List.mem "Authority.check" (callees fd.Tir.fn_body))
+  | ls -> Alcotest.failf "expected one eta lambda in Dep.named, got %d" (List.length ls)
+
 let tests =
   [ ( "auth_rt",
       [ Alcotest.test_case "an unscoped needs clause that reaches no spawn gets no frame" `Quick
@@ -957,6 +1387,37 @@ let tests =
           test_spawn_via_value_framed;
         Alcotest.test_case "a lambda's self call keeps the frame" `Quick
           test_lambda_calls_wrapper ] );
+    ( "auth_rt_grants",
+      [ Alcotest.test_case "an empty grant table leaves the module unchanged" `Quick
+          test_grant_empty_identity;
+        Alcotest.test_case "a scoped grant wraps every package fn; internal calls target bodies"
+          `Quick test_grant_scoped_wraps_and_retargets;
+        Alcotest.test_case "a dropped caller keeps its callees' wrapper names" `Quick
+          test_grant_dropped_caller_keeps_wrapper_names;
+        Alcotest.test_case "a proven fn that reaches a spawn keeps its frame" `Quick
+          test_grant_spawn_kept;
+        Alcotest.test_case "unscoped, proven, spawn-free fns get no frame" `Quick
+          test_grant_proven_not_wrapped;
+        Alcotest.test_case "an unproven fn is wrapped" `Quick test_grant_unproven_wrapped;
+        Alcotest.test_case "a proven fn reaching a function-value call is wrapped" `Quick
+          test_grant_indirect_wrapped;
+        Alcotest.test_case "a module-level lambda gets the grant prologue" `Quick
+          test_grant_init_lambda_prologue;
+        Alcotest.test_case "a lambda made in a wrapped fn captures" `Quick
+          test_grant_lambda_captured;
+        Alcotest.test_case "a package actor's handler and spawn are wrapped" `Quick
+          test_grant_actor_handlers;
+        Alcotest.test_case "two packages get two layers (a-b, a_b)" `Quick
+          test_grant_layer_names_injective;
+        Alcotest.test_case "a generic interface call keeps the frame" `Quick
+          test_grant_iface_dispatch_kept;
+        Alcotest.test_case "interpolation of a generic value keeps the frame" `Quick
+          test_grant_interp_dispatch_kept;
+        Alcotest.test_case "a call into another granted package keeps its wrapper" `Quick
+          test_grant_cross_package_keeps_wrapper;
+        Alcotest.test_case "the grant wraps a needs frame" `Quick test_grant_around_needs_frame;
+        Alcotest.test_case "a module-level named fn value becomes a framed eta lambda" `Quick
+          test_grant_init_named_value_eta ] );
     ( "auth_rt_capture",
       [ Alcotest.test_case "without frames captures is the identity" `Quick
           test_capture_no_frames_identity;

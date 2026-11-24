@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Under dependency grants, a module name defined twice is an error.** With a grants file
+  in effect, a module defined both by the app and a dependency, by two dependencies, or by a
+  dependency and the standard library is `dep_module_conflict`, as is a granted library root
+  inside the entry's source directory or inside another library directory; before, the first
+  one found silently won, which would let a dependency's module run as the app's, ungranted.
+  Builds without grants keep the old behaviour.
+- **`--check-json` reports import-resolution errors.** An unresolved import (and
+  `dep_module_conflict`) is now printed as a JSON diagnostic too; it went only to stderr.
 - **`restrict` is now a reserved word** (it opens a `restrict ... do ... end` block; see
   Added). `SessionTheory.restrict` is renamed `SessionTheory.restrict_role`; any other program
   that names a function or variable `restrict` must rename it.
@@ -66,6 +74,40 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Dependency grants (object capabilities, phase 6).** A `grant` on a dependency in
+  `forge.toml` limits what its code may do, as a scope list in `needs` syntax:
+  `reader = { path = "deps/reader", grant = ['IO.FileRead("/srv/data")'] }`. Every function
+  of the dependency's package then runs under its caller's authority intersected with the
+  grant; `grant = []` grants nothing, and a dependency with no grant is unchanged. The
+  compiler checks the code the program reaches in the package: a capability the grant lacks is
+  `dep_grant_exceeded`, naming the dependency, the `forge.toml` line and the call chain, and
+  under a scoped grant a literal host, path or name outside it is `dep_grant_scope`. What it
+  cannot see (a computed target, a function value) is refused at run time,
+  `refused by the grant to package reader (IO.FileRead("/srv/data"))` (`ByGrant`). Callbacks
+  the app passes in keep the app's authority; closures, tasks and actors the dependency hands
+  back keep its narrowed one; a dependency it calls runs under its grant too; its module-level
+  code runs under the grant, as do the interface default bodies it declares, whichever impl
+  inherits them. An `extern` the package can reach needs `IO.Foreign` in the grant, reached or
+  not, and C reached under a grant without it at run time is refused (a panic). Every runtime
+  (interpreter, `--jit`, the REPL, compiled, `--target js`) behaves the same. A call into a
+  package under a scoped grant costs about 16 ns; under an unscoped grant the compiler drops
+  the frame where its proof suffices, and calls inside the package cost nothing
+  (`bench/grant_enter*.march`). Only the root project's `forge.toml` grants. See
+  [Capabilities](docs/capabilities.md#dep-grants).
+- **`--dep-grants FILE` / `MARCH_DEP_GRANTS`.** Dependency grants without forge: a file with
+  one package per line (name, absolute library root, `manifest:line`, scope text, separated by
+  tabs), read by `march FILE`, `--check`, `--compile`, `--jit`, `march repl`, `march test`,
+  `march caps` and `march dap`; the flag wins over the variable. forge writes it as
+  `.forge/dep-grants-<hash>` when a dependency has a grant (`forge clean` removes old ones). A
+  malformed grant, a relative or off-path root, or a file under a granted root that is a
+  symlink to code elsewhere is `dep_grant_invalid`. `march repl FILE` refuses to load an entry
+  that breaks its grants.
+- **`forge audit` and `forge.caps.lock` show grants.** The audit prints each dependency's grant
+  beside its capabilities, or `no grant`, and a grant written in a dependency's own
+  `forge.toml` as "not applied". `forge audit --record` writes grants into `forge.caps.lock`;
+  a grant widened or removed since then is an escalation and fails the audit, while one
+  narrowed or newly added is reported and does not. See
+  [Capability audit](docs/capability-audit.md#auditing-grants).
 - **`restrict` blocks and `Scope` values (object capabilities, phase 5).**
   `restrict IO.Console, IO.FileRead("/srv/") do ... end` runs a block, and everything it
   reaches, under the intersection of the current authority and the listed scopes; nested
@@ -1299,6 +1341,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march repl FILE` loads the library modules the file uses.** A preloaded file (as
+  `forge interactive` and the REPL's `:load` give it) now finds the modules it names on
+  `MARCH_LIB_PATH`, as a batch build does; they were "Unknown module". Its modules also load
+  in dependency order (a library module checked before one it calls no longer fails), and an
+  `impl` declared inside a module is visible to the rest of the file and to later inputs (a
+  `show` of that module's type was "does not implement interface `Show`").
+- **A library module's `let` that names one of its own functions compiles.** `let own =
+  helper` at the top of a module loaded from `MARCH_LIB_PATH` (or of a nested module, naming a
+  parent's function) referred to an undefined `@helper` when compiled; the interpreter was
+  right.
 - **Awaiting a task whose cancel token was already cancelled no longer hangs, compiled.**
   `Task.async_cancellable(f, tok)` with `tok` cancelled before the task first ran (before the
   spawn, or between the spawn and the task starting) skipped `f` without ever completing the

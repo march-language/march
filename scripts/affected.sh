@@ -91,7 +91,7 @@ owner_of_test_module() {
     march_test_stdlib_suite) echo stdlib ;;
     march_test_snapshots|run_snapshots) echo @test/runtest-run_snapshots ;;
     march_test_helpers) echo FULL ;;
-    run_compiler|run_eval|run_codegen|run_stdlib|run_errors|run_test_reports|run_cap_conformance|run_authority|test_stdlib_march|test_jit|test_refinecheck)
+    run_compiler|run_eval|run_codegen|run_stdlib|run_errors|run_test_reports|run_cap_conformance|run_authority|run_dep_grants|test_stdlib_march|test_jit|test_refinecheck)
       echo "${stanza#run_}" ;;
     "") ;;
     *) echo "@test/runtest-$stanza" ;;
@@ -117,16 +117,19 @@ classify() {
 
     # ── front end: reaches every suite ───────────────────────────────────
     lib/lexer/*|lib/parser/*)
-      add SUITES compiler eval codegen stdlib stdlib_march errors $ALL_LSP
+      # dep_grants parses a grant's scope text with the real parser.
+      add SUITES compiler eval codegen stdlib stdlib_march errors dep_grants $ALL_LSP
       add CHECKS scripts/check-tree-sitter.sh; add ORACLES types ir
-      reason "$f" "front-end suites, tree-sitter, types+ir oracles" ;;
+      reason "$f" "front-end suites, dep_grants, tree-sitter, types+ir oracles" ;;
     lib/ast/*|lib/desugar/*)
       add SUITES compiler eval codegen stdlib stdlib_march errors test_reports $ALL_LSP; add ORACLES types ir
       reason "$f" "front-end suites, types+ir oracles" ;;
     lib/typecheck/*|lib/modules/*|lib/resolver/*)
-      add SUITES compiler eval codegen stdlib stdlib_march errors refinecheck $ALL_LSP
+      # dep_grants: the resolver's module-conflict check and the type
+      # checker's grant check (ocap phase 6) are driven end to end there.
+      add SUITES compiler eval codegen stdlib stdlib_march errors refinecheck dep_grants $ALL_LSP
       add ORACLES types refine
-      reason "$f" "front-end suites + refinecheck, types+refine oracles" ;;
+      reason "$f" "front-end suites + refinecheck + dep_grants, types+refine oracles" ;;
     lib/errors/*)
       add SUITES compiler errors test_reports $ALL_LSP; add ORACLES types
       reason "$f" "compiler, errors, test_reports, lsp; types oracle" ;;
@@ -160,19 +163,24 @@ classify() {
       add SUITES refinecheck compiler errors; add ORACLES refine
       add CHECKS specs/lang/refine/check_refine.sh
       reason "$f" "refinecheck, compiler, errors; must-reject corpus; refine oracle" ;;
-    lib/caps/*|lib/ctxesc/*|lib/effects/*|lib/cas/*|lib/driver/*)
+    lib/caps/*)
+      # dep_grants.ml (ocap phase 6) has its own runner.
+      add SUITES compiler codegen dep_grants; reason "$f" "compiler, codegen, dep_grants" ;;
+    lib/ctxesc/*|lib/effects/*|lib/cas/*|lib/driver/*)
       add SUITES compiler codegen; reason "$f" "compiler, codegen" ;;
     lib/search/*|lib/query/*)
       add SUITES compiler query_cli lsp; reason "$f" "compiler, query_cli, lsp" ;;
     lib/format/*|lib/lint/*|lib/refactor/*)
       add SUITES compiler lsp; reason "$f" "compiler, lsp" ;;
     lib/forge/*|forge/*)
-      add DUNE @forge/test/runtest; add SUITES compiler; reason "$f" "forge tests, compiler" ;;
+      # dep_grants: its "forge" group runs `forge build` on a granted project.
+      add DUNE @forge/test/runtest; add SUITES compiler dep_grants
+      reason "$f" "forge tests, compiler, dep_grants" ;;
     lsp/*)
       add SUITES $ALL_LSP; reason "$f" "lsp suites" ;;
     bin/*)
-      add SUITES compiler codegen errors test_jit test_reports
-      reason "$f" "compiler, codegen, errors, jit, test_reports" ;;
+      add SUITES compiler codegen errors test_jit test_reports dep_grants
+      reason "$f" "compiler, codegen, errors, jit, test_reports, dep_grants" ;;
 
     # ── stdlib: every program reads it ────────────────────────────────────
     stdlib/*)
@@ -186,6 +194,7 @@ classify() {
       reason "$f" "codegen, snapshots; ir oracle" ;;
     test/stdlib/*) add SUITES stdlib_march; reason "$f" "stdlib_march" ;;
     test/errors/*) add SUITES errors; reason "$f" "errors" ;;
+    test/dep_grants/*) add SUITES dep_grants; reason "$f" "dep_grants" ;;
     test/test_reports/*) add SUITES test_reports; reason "$f" "test_reports" ;;
     test/cap_conformance/*) add SUITES cap_conformance; reason "$f" "cap_conformance" ;;
     test/two_node/*)

@@ -520,6 +520,8 @@ let rec lower_stdlib_mod_decls ?(enclosing = []) (env : Lower_state.env) prefix 
         Provenance.rename ~old:fn.fn_name ~new_:(prefix ^ fn.fn_name);
         Lower_state.note_fn_needs ~final:(prefix ^ fn.fn_name)
           ~display:(prefix ^ def.fn_name.txt) def;
+        Lower_state.note_fn_grant ~final:(prefix ^ fn.fn_name)
+          ~key:(Some (prefix ^ def.fn_name.txt)) ~file:def.fn_name.span.file;
         if Hot_reload.work_entry_source def.fn_name.txt def.fn_name.span.file then
           Hot_reload.note_work_entry (prefix ^ fn.fn_name);
         !Lower_state._fns_ref := { fn with fn_name = prefix ^ fn.fn_name } :: !(!Lower_state._fns_ref)
@@ -531,7 +533,7 @@ let rec lower_stdlib_mod_decls ?(enclosing = []) (env : Lower_state.env) prefix 
          | None -> ())
       | Ast.DMod (sub_name, _, sub_decls, _) ->
         lower_stdlib_mod_decls ~enclosing:scopes env (prefix ^ sub_name.txt ^ ".") sub_decls
-      | Ast.DLet (_, b, _) ->
+      | Ast.DLet (_, b, let_sp) ->
         (* Module-level let bindings are compiled as zero-arg functions so they
            can be referenced by qualified name (e.g. Crypto.pw_dklen). *)
         (match b.bind_pat with
@@ -545,7 +547,13 @@ let rec lower_stdlib_mod_decls ?(enclosing = []) (env : Lower_state.env) prefix 
              fn_body   = rhs;
              fn_kind   = Tir.FnNormal;  (* module-level `let` as zero-arg fn *)
            } in
+           (* Qualify its bare references to this module's (and enclosing
+              modules') fns, as a DFn's are: `let own = own_check` in a
+              library module otherwise named an undefined `@own_check`. *)
+           let fn = rename_scoped_vars scopes fn in
            Lower_state.note_module_let fn;
+           Lower_state.note_fn_grant ~final:fn.fn_name ~key:(Some fn.fn_name)
+             ~file:let_sp.Ast.file;
            !Lower_state._fns_ref := fn :: !(!Lower_state._fns_ref)
          | _ -> ())
       | _ -> ()

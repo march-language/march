@@ -1,0 +1,4 @@
+allowed /etc/hosts | allowed /srv/x
+allowed HOME
+app: allowed /etc/hosts
+exit 0

@@ -1,0 +1,7 @@
+caught
+after: allowed /etc/hosts
+cleanup: allowed /etc/hosts
+caught
+after cleanup: allowed /etc/hosts
+gate again: IO.FileRead("/etc/hosts") refused by the grant to package gate (IO.FileRead("/srv/"))
+exit 0

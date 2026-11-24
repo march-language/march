@@ -38,9 +38,13 @@ let run () =
       dep_lib_paths @ [lib_dir]
       @ (if Sys.file_exists config_dir then [config_dir] else [])
     in
+    (* The project's dependency grants (ocap phase 6), as forge build
+       passes them. *)
+    let grants_env =
+      Cmd_build.dep_grants_env ~scope:proj.Project.deps ~lib_paths:all_lib_paths proj in
     let lib_path_env =
-      Printf.sprintf "MARCH_LIB_PATH=%s MARCH_REPL_INTERP=1"
-        (String.concat ":" all_lib_paths)
+      Printf.sprintf "%sMARCH_LIB_PATH=%s MARCH_REPL_INTERP=1"
+        grants_env (String.concat ":" all_lib_paths)
     in
     let entry = Result.to_option (Project.entry proj) in
     (* Link the same FFI shims as `forge run` / `forge build` (see

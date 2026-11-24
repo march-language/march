@@ -206,10 +206,19 @@ let is_control_wiring_file f = f = March_tir.Hot_reload.control_wiring_file
     answered by [Typecheck_builtins.file_is_stdlib], the same predicate the
     stdlib-only builtin gate uses, so the gate and this filter cannot drift
     apart. *)
+(* A dependency grant's manifest (forge.toml): grant diagnostics
+   (dep_grant_invalid, a nested granted root) point at the grant's line
+   there, and must not be filtered out as someone else's file. *)
+let is_grant_manifest f =
+  f <> ""
+  && List.exists (fun (g : March_caps.Dep_grants.grant) -> g.March_caps.Dep_grants.g_manifest = f)
+       (March_caps.Dep_grants.active ())
+
 let user_diag_file ~filename ~user_files f =
   f = filename
   || (not (March_typecheck.Typecheck_builtins.file_is_stdlib f)
       && (f = "" || f = "<unknown>" || f = synthetic_file || List.mem f user_files))
+  || is_grant_manifest f
 
 (** Whether to show diagnostic [d] to the user.  A HINT inside generated code
     is dropped: a hint asks for an edit (qualify this constructor, rename
@@ -259,7 +268,10 @@ let render_user_diag ~src ~filename ~read_file (d : March_errors.Errors.diagnost
   else
     let (d_src, d_file) =
       if f = filename || f = "" || f = "<unknown>" then (src, filename)
-      else (try read_file f with Sys_error _ -> src), f
+      else
+        (* A grant manifest that cannot be read is shown without an
+           excerpt, never with the entry file's lines. *)
+        (try read_file f with Sys_error _ -> if is_grant_manifest f then "" else src), f
     in
     March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d
 
@@ -2701,6 +2713,18 @@ let probe_cas_tag ~(cross : bool) : string list =
     let s = Lazy.force openssl_probe_flags ^ "|" ^ Lazy.force compress_probe_flags in
     ["libprobe:" ^ String.sub (Digest.to_hex (Digest.string s)) 0 16]
 
+(* Dependency grants (ocap phase 6, decision 12): the active grants decide
+   the verdict (a narrowed grant turns a clean check into a refusal) and the
+   emitted program (grant frames), so their digest is a flag tag of every
+   compiler cache key: --check's and --compile's source keys (and the
+   depend-mode keys built from the same flags) and the interpreter's cached
+   capability verdict.  With no grants there is no tag at all, so a
+   grant-free build's keys are unchanged. *)
+let grants_cas_tag () : string list =
+  match March_caps.Dep_grants.digest () with
+  | Some h -> [ "grants:" ^ h ]
+  | None -> []
+
 let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
       ~(target_label : string) ~(src_hash : string) : string list * string =
   (* Cross-toolchain identity: the target OpenSSL/zlib .so live OUTSIDE the
@@ -2736,6 +2760,7 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
         (* --static links different archives and checks the result. *)
         @ (if !static_build then ["static"] else [])
         @ (if !cap_strict then ["capstrict"] else [])
+        @ grants_cas_tag ()
         (* --target-cpu changes the instructions clang emits (SIMD width),
            so a baseline-ISA cached binary must never satisfy it. *)
         @ (if !target_cpu <> "" then ["cpu:" ^ !target_cpu] else [])
@@ -2867,6 +2892,7 @@ let interp_cap_cache_key ~src ~filename ~is_js ~test_mode : string option =
     let flags =
       (if !stdlib_source then ["stdlib-source"] else [])
       @ (if !cap_strict then ["capstrict"] else [])
+      @ grants_cas_tag ()
       @ (if test_mode then ["test"] else [])
       @ (if is_js then ["js"] else []) in
     Some (March_cas.Cas.compilation_hash
@@ -2962,6 +2988,45 @@ let rec march_files_in dir =
     | exception (Sys_error _ | Unix.Unix_error _) -> acc
   ) [] entries
 
+(* Dependency grants (ocap phase 6): load the grants file named by
+   `--dep-grants FILE`, else by MARCH_DEP_GRANTS, once per process and before
+   anything type-checks.  With neither set nothing is read and the active set
+   stays empty, so every pass that reads it is the identity.  An invalid file
+   is a one-line error and exit 1, not an exception. *)
+let install_dep_grants ?flag () =
+  let module G = March_caps.Dep_grants in
+  match G.load ?flag () with
+  | Ok gs -> G.set_active gs
+  | Error (msg, line) ->
+    let file =
+      match flag with
+      | Some f -> f
+      | None -> Option.value (Sys.getenv_opt G.env_var) ~default:""
+    in
+    Printf.eprintf "march: invalid dependency grants file %s%s: %s\n" file
+      (match line with Some n -> ":" ^ string_of_int n | None -> "")
+      msg;
+    exit 1
+
+(* Peel `--dep-grants FILE` (or `--dep-grants=FILE`) off a subcommand's
+   arguments: the subcommands that parse their own argv (check, caps, test,
+   repl) take it too.  The last one given wins. *)
+let peel_dep_grants (args : string list) : string option * string list =
+  let flag = ref None in
+  let pre = "--dep-grants=" in
+  let np = String.length pre in
+  let rec go acc = function
+    | [] -> List.rev acc
+    | "--dep-grants" :: v :: rest -> flag := Some v; go acc rest
+    | [ "--dep-grants" ] ->
+      prerr_endline "march: --dep-grants needs a file argument"; exit 2
+    | a :: rest when String.length a > np && String.sub a 0 np = pre ->
+      flag := Some (String.sub a np (String.length a - np)); go acc rest
+    | a :: rest -> go (a :: acc) rest
+  in
+  let rest = go [] args in
+  (!flag, rest)
+
 (** Run the test subcommand and exit.
     Discovers test files, parses/typechecks them, and runs all test blocks.
     Usage: march test [--verbose|-v] [--filter=pattern] [file...] *)
@@ -3055,9 +3120,9 @@ let run_test_cmd args =
     end;
     let (resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
     if resolve_errors <> [] then begin
-      List.iter (fun (_mod_name, span, msg) ->
+      List.iter (fun e ->
           Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file
-            (March_errors.Errors.make ~code:March_errors.Code.import_unresolved ~span msg))
+            (March_resolver.Resolver.diagnostic_of_error e))
         ) resolve_errors;
       exit 1
     end;
@@ -3715,7 +3780,7 @@ let source_cache_bypass () : string option =
   ] in
   let envs = [
     "MARCH_DUMP_TXT"; "MARCH_DUMP_CAP_PASSING"; "MARCH_DUMP_CAP_PASSING_FN";
-    "MARCH_DUMP_CAP_ROWS"; "MARCH_DUMP_TOPOLOGY_MAIN";
+    "MARCH_DUMP_CAP_ROWS"; "MARCH_DUMP_TOPOLOGY_MAIN"; "MARCH_DUMP_DEP_PROVEN";
     "MARCH_TRMC_REPORT"; "MARCH_MONO_REPR_REPORT";
     "MARCH_ALIAS_AUDIT"; "MARCH_REPR_AUDIT";
     "MARCH_DEBUG_PERCEUS"; "MARCH_DEBUG_BORROW"; "MARCH_DEBUG_HANDLER_OWNER";
@@ -3929,6 +3994,7 @@ let compile filename =
           (if !stdlib_source then ["stdlib-source"] else [])
           @ z3_cas_tag ()
           @ (if !cap_strict then ["capstrict"] else [])
+          @ grants_cas_tag ()
           @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])
           @ Schema_migration.baseline_cas_tag ()
           @ List.map (fun (p, l) -> "pexpand:" ^ p ^ ":" ^ l)
@@ -4132,9 +4198,9 @@ let compile filename =
    | _ -> ());
   (* Resolve cross-file imports: find imported .march files, parse and inject *)
   let (resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
-  List.iter (fun (_mod_name, span, msg) ->
+  List.iter (fun e ->
       emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file
-        (March_errors.Errors.make ~code:March_errors.Code.import_unresolved ~span msg)))
+        (March_resolver.Resolver.diagnostic_of_error e)))
     ) resolve_errors;
   let has_resolve_errors = resolve_errors <> [] in
   (* --topology: check the digest against what is loaded and, when the entry
@@ -4585,10 +4651,13 @@ let compile filename =
             | March_driver.Cap_static.Diag _ -> ()) (Lazy.force cap_findings);
         cap_diags ()
       end in
+    (* The resolver's errors (an unresolved import, a dependency-grants
+       module conflict) were printed to stderr above; tooling sees them too. *)
+    let resolve_diags = List.map March_resolver.Resolver.diagnostic_of_error resolve_errors in
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d then
         print_string (March_errors.Errors.render_diagnostic_json d ^ "\n")
-    ) (Fix_verify.verify ~src ~verifiable:is_user_file (diags @ cap));
+    ) (Fix_verify.verify ~src ~verifiable:is_user_file (resolve_diags @ diags @ cap));
     exit 0
   end;
   let frontend_rejected =
@@ -4907,7 +4976,12 @@ let compile filename =
       March_tir.Auth_rt.restricts tir ~sites:March_tir.Lower.restrict_sites in
     let tir, frames_kept =
       March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
-    let has_frames = frames_kept || restricts_kept in
+    (* Ocap phase 6: a granted dependency package's fns run under its grant
+       ([Auth_rt.grants]); with no grants file the table is empty and this is
+       the identity. *)
+    let tir, grants_kept =
+      March_tir.Auth_rt.grants tir ~tbl:March_tir.Lower.fn_grant_tbl in
+    let has_frames = frames_kept || restricts_kept || grants_kept in
     let tir = March_tir.Auth_rt.captures tir ~has_frames ~repl:false in
     (* Ocap phase 4, Task 4b: a native binary judges capability operations
        with the C runtime's copy of the Authority policy
@@ -7637,6 +7711,7 @@ let run_check_cmd ?(emit_caps = false) files =
     List.sort_uniq String.compare (files @ !import_user_files) in
   let is_user_file (d : March_errors.Errors.diagnostic) =
     List.mem d.span.March_ast.Ast.file lib_files ||
+    is_grant_manifest d.span.March_ast.Ast.file ||
     d.span.March_ast.Ast.file = "" ||
     d.span.March_ast.Ast.file = "<unknown>"
   in
@@ -7890,16 +7965,22 @@ let () =
   end;
   if Array.length argv >= 2 && argv.(1) = "check" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
+    let flag, rest = peel_dep_grants rest in
+    install_dep_grants ?flag ();
     run_check_cmd rest
   end;
   (* `march caps <files...>` — the package's inferred capability set as JSON.
      Same loading path as `check` so sibling/dependency imports resolve. *)
   if Array.length argv >= 2 && argv.(1) = "caps" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
+    let flag, rest = peel_dep_grants rest in
+    install_dep_grants ?flag ();
     run_check_cmd ~emit_caps:true rest
   end;
   if Array.length argv >= 2 && argv.(1) = "test" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
+    let flag, rest = peel_dep_grants rest in
+    install_dep_grants ?flag ();
     run_test_cmd rest
   end;
   (* Phase 10: GC trace validator — see analyze_gc_trace below. *)
@@ -7975,9 +8056,42 @@ let () =
         if !preload_file = None then preload_file := Some a;
         parse_repl_args rest
     in
-    parse_repl_args
-      (Array.to_list (Array.sub argv 2 (Array.length argv - 2)));
+    let dep_grants_flag, repl_args =
+      peel_dep_grants (Array.to_list (Array.sub argv 2 (Array.length argv - 2))) in
+    install_dep_grants ?flag:dep_grants_flag ();
+    parse_repl_args repl_args;
     let preload_file = !preload_file in
+    (* Dependency grants (ocap phase 6): the REPL's own load path does not run
+       the whole-program type check, so the static grant checks (each grant's
+       validity, a file on both sides of a granted root, a reached violation)
+       would never run on its entry.  Under grants, check the entry exactly
+       as `march --check` does, in a child, and refuse to load it when a
+       grant diagnostic comes back.  No grants: nothing runs. *)
+    (match preload_file with
+     | Some f when March_caps.Dep_grants.active () <> [] ->
+       let cmd =
+         Printf.sprintf "%s%s --check %s 2>&1"
+           (Filename.quote Sys.executable_name)
+           (match dep_grants_flag with
+            | Some g -> " --dep-grants " ^ Filename.quote g
+            | None -> "")
+           (Filename.quote f)
+       in
+       let ic = Unix.open_process_in cmd in
+       let out = In_channel.input_all ic in
+       let status = Unix.close_process_in ic in
+       (* Fail closed: a child that crashed, was killed, or failed with no
+          diagnostic never finished the grant checks.  An entry with
+          ordinary errors (exit 1 with rendered diagnostics) still loads:
+          the REPL reports those itself, as it does without grants. *)
+       (match March_caps.Dep_grants.preload_check_verdict status out with
+        | March_caps.Dep_grants.Load -> ()
+        | March_caps.Dep_grants.Refuse why ->
+          prerr_string out;
+          Printf.eprintf "march repl: not loading %s: %s%s\n%!" f why
+            (if out = "" then "" else " (see above)");
+          exit 1)
+     | _ -> ());
     setup_interpreter_ffi ();
     let runtime_so = ensure_runtime_so () in
     let jit_ctx = March_jit.Repl_jit.create ~runtime_so () in
@@ -7993,6 +8107,13 @@ let () =
        The program to debug is supplied by the editor via the DAP `launch`
        request, not on the command line. We run it through the interpreter
        under a debug context driven by the DAP session. *)
+
+    (* The interpreter honours dependency grants (ocap phase 6), so the
+       debugger loads them as a run does: `--dep-grants FILE`, else
+       MARCH_DEP_GRANTS. *)
+    let dep_grants_flag, _ =
+      peel_dep_grants (Array.to_list (Array.sub argv 2 (Array.length argv - 2))) in
+    install_dep_grants ?flag:dep_grants_flag ();
 
     (* Build a runnable for a source path: parse → desugar → prepend stdlib →
        run_module (the same shape as the interpreter run path). The session
@@ -8060,7 +8181,10 @@ let () =
   end;
   let files = ref [] in
   let prog_args = ref None in
+  let dep_grants_flag = ref None in
   let specs = [
+    ("--dep-grants", Arg.String (fun f -> dep_grants_flag := Some f),
+     "<file>  Dependency grants file (ocap phase 6; forge writes it); overrides MARCH_DEP_GRANTS");
     ("--dump-tir",     Arg.Set dump_tir,     " Print TIR instead of evaluating");
     ("--dump-role-authority", Arg.Set dump_role_authority,
      " Typecheck and print the effective-authority report per granted protocol role (implies --check)");
@@ -8300,6 +8424,7 @@ let () =
       with Arg.Bad m -> prerr_string m; exit 2 | Arg.Help m -> print_string m; exit 0)
    | None ->
      Arg.parse specs add_input "Usage: march [options] [file.march]");
+  install_dep_grants ?flag:!dep_grants_flag ();
   (match March_tir.Pass_switch.disabled with
    | { contents = [] } ->
      (match March_tir.Pass_switch.of_env () with

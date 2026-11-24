@@ -1,0 +1,19 @@
+mod Main do
+  needs IO.Console, IO.FileRead
+
+  fn verdict(r) do
+    match r do
+    Ok(_) -> "allowed"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main() do
+    let l = Leaky.lam
+    println("lambda: " ++ verdict(l("/etc/hosts")))
+    let n = Leaky.named
+    println("named via let: " ++ verdict(n("IO.FileRead", "/etc/hosts")))
+    let g = Leaky.get_named()
+    println("named via fn: " ++ verdict(g("IO.FileRead", "/etc/hosts")))
+  end
+end

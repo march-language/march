@@ -235,6 +235,40 @@ describe "Authority" do
 
   end
 
+  describe "grant layers" do
+
+    test "grant_layer parses the grant text into a ByGrant layer" do
+      assert (Authority.grant_layer("weather", "IO.Console")
+        == Authority.Layer(ByGrant("weather"), "IO.Console",
+             [Authority.CapEntry("IO.Console", Authority.Any)]))
+    end
+
+    test "a refusal by a grant names the package" do
+      match Authority.check_layers("IO.Clock", "", [Authority.grant_layer("weather", "IO.Console")]) do
+      Err(e) -> assert (Authority.describe(e) == "IO.Clock refused by the grant to package weather (IO.Console)")
+      Ok(_) -> assert false
+      end
+    end
+
+    test "has_layer finds the same grant two layers down" do
+      let g = Authority.grant_layer("weather", "IO.Console")
+      let f = Authority.frame_layer("Weather.get", "IO")
+      let l = Authority.Layer(ByLaunch, "IO", [Authority.CapEntry("IO", Authority.Any)])
+      assert (Authority.has_layer([f, l, g], g))
+      assert (Authority.has_layer([f, g, l], Authority.grant_layer("weather", "IO.Console")))
+    end
+
+    test "has_layer needs the same limit and the same text" do
+      let g = Authority.grant_layer("weather", "IO.Console")
+      let f = Authority.frame_layer("Weather.get", "IO.Console")
+      assert (not(Authority.has_layer([f], g)))
+      assert (not(Authority.has_layer([Authority.grant_layer("weather", "IO.Clock")], g)))
+      assert (not(Authority.has_layer([Authority.grant_layer("other", "IO.Console")], g)))
+      assert (not(Authority.has_layer([], g)))
+    end
+
+  end
+
   describe "check_layers" do
 
     test "the innermost refusing layer names the limit" do

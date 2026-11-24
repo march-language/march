@@ -1,0 +1,8 @@
+mod Main do
+  needs IO.Console
+  fn main() do
+    Wrapper.go()
+    let _ = say(Wrapper.bag())
+    ()
+  end
+end

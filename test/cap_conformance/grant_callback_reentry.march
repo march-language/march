@@ -1,0 +1,35 @@
+-- DEP: gate deps/gate IO.FileRead("/srv/")
+-- Recursion in and out of a granted package (ocap p6 Review Focus 3): app
+-- -> gate -> the app's callback -> gate, 1,000 deep. Each callback runs
+-- with the app's authority, and each re-entry into `gate` narrows again, so
+-- at the bottom the callback is allowed what the grant refuses while
+-- `gate`, called from that callback, is refused it by the grant. The app's
+-- authority is back after the recursion unwinds. A kept grant frame is not
+-- a tail position (deferred: specs/todos/2026-11-17-ocap-framed-mutual-tail-
+-- recursion.md), so each hop costs a stack frame though the layer list does
+-- not grow: 10,000 deep overflows the stack compiled (--opt 0) and under
+-- node (3,000 already does), while the same program with `gate` ungranted
+-- runs 10,000 deep as tail calls.
+mod GrantCallbackReentry do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn mine(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "allowed " ++ p
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn hop(n : Int, p : String) : String do
+    Gate.bounce(n, fn m ->
+      if m == 0 do "app: " ++ mine(p) ++ " | gate: " ++ Gate.check_path(p)
+      else hop(m - 1, p) end)
+  end
+
+  fn main() do
+    println(hop(1000, "/etc/hosts"))
+    println(hop(1000, "/srv/x"))
+    println("after: " ++ mine("/etc/hosts"))
+  end
+end

@@ -6,4 +6,6 @@
    march_parser
    march_desugar
    march_errors
+   march_caps
+   march_modules
    unix))

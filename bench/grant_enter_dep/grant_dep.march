@@ -1,0 +1,26 @@
+-- The dependency for bench/grant_enter.march and bench/grant_enter_static.march
+-- (ocap phase 6, dependency grants). It is pure compute: `work(n)` makes 1,000
+-- internal calls of `step(n) = n + 1` and returns their sum.
+--
+-- The benches load this directory through MARCH_LIB_PATH and grant it with a
+-- grants file whose library root is this directory (scripts/bench-grants.sh
+-- and test/test_bench_gate.ml write one). Under a grant every call from the
+-- app into `work` is a boundary call; the calls of `step` and of `inner`
+-- inside the package are retargeted to their bodies and pay no frame.
+mod GrantDep do
+
+fn step(n : Int) : Int do
+  n + 1
+end
+
+pfn inner(k : Int, n : Int, acc : Int) : Int do
+  if k >= 1000 do acc
+  else inner(k + 1, n, acc + step(n))
+  end
+end
+
+fn work(n : Int) : Int do
+  inner(0, n, 0)
+end
+
+end

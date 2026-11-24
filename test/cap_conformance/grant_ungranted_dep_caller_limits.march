@@ -1,0 +1,24 @@
+-- GRANT: IO.Console, IO.FileRead("/srv/")
+-- DEP: gate deps/gate none
+-- A dependency with no grant is limited by its caller's authority (design
+-- §10): under a launch grant narrower than the app's request, `gate`'s
+-- computed path outside the launch grant, and a kind the launch grant does
+-- not list, are refused by the launch grant, naming it; a path inside is
+-- allowed. No grant of `gate`'s own is ever named.
+mod GrantUngrantedDepCallerLimits do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn reads() : String do
+    Gate.read_at("/srv", "x") ++ " | " ++ Gate.read_at("/etc", "hosts")
+  end
+
+  fn env() : String do
+    Gate.probe("IO.Process", "HOME")
+  end
+
+  fn main() do
+    println(reads())
+    println(env())
+  end
+end

@@ -1,0 +1,3 @@
+default greet: IO.Console("stdout") refused by the grant to package loudy (())
+app: allowed
+exit 0

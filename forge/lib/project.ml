@@ -20,6 +20,17 @@ type dep =
     (** { path = "../vault" }
         Local development dep; bypasses solver; not allowed in published packages. *)
 
+(** A declared dependency with its grant (ocap phase 6, plan decision 13).
+    [grant] is the dep's [grant = [...]] list, in `needs` syntax ([Some []]
+    for [grant = []], [None] when the dep has no [grant] key), and
+    [grant_line] the forge.toml line of that key (of the dep's entry when it
+    has none). *)
+type dep_entry = {
+  source     : dep;
+  grant      : string list option;
+  grant_line : int;
+}
+
 (** A [patch] override: substitute a fork for a package before the solver runs. *)
 type patch = {
   patch_name   : string;
@@ -108,6 +119,11 @@ type project = {
       known-hard proof.  Passed to every [march] forge runs, as
       [MARCH_REFINE_RLIMIT] in {!Cmd_build.lib_path_env}.  It is part of the
       refinement cache keys, so changing it never replays an old verdict. *)
+  dep_entries   : (string * dep_entry) list;
+  (** Every dep of [deps], [dev-deps], [dev-only-deps] and [test-deps] (inline
+      and [[deps.X]] forms), in that order, with its grant.  The four
+      [(string * dep) list] fields above stay the source of truth for
+      resolution; this one adds the grants ({!grant_of}). *)
   contracts_no_alloc : string list;
   (** [contracts] no_alloc = ["Dsp.*", "Audio.mix"]: module/function globs that
       `forge fix --contracts` treats as in scope even without in-place reuse.
@@ -144,6 +160,25 @@ let find_forge_toml () =
       else search parent
   in
   search (Sys.getcwd ())
+
+(** A dep's [grant] value: a list of strings, each one `needs` entry.  A
+    tab, newline or carriage return inside an entry is rejected, since the
+    grants file forge writes for the compiler is tab-separated and
+    line-based.  [Failure "forge.toml:<line>: ..."] otherwise. *)
+let parse_grant ~dep_name ~line (v : Toml.value) : string list =
+  let bad why =
+    failwith (Printf.sprintf "forge.toml:%d: the `grant` of dependency '%s' %s" line dep_name why)
+  in
+  match v with
+  | Toml.Array items ->
+    List.map (function
+        | Toml.Str s ->
+          if String.exists (fun c -> c = '\t' || c = '\n' || c = '\r') s then
+            bad "holds a tab or a line break in one of its entries"
+          else String.trim s
+        | _ -> bad "must be a list of strings in `needs` syntax, e.g. ['IO.Console']")
+      items
+  | _ -> bad "must be a list of strings in `needs` syntax, e.g. ['IO.Console']"
 
 (** Parse a single dep inline-table into a [dep] value.
 
@@ -212,6 +247,79 @@ let parse_section_deps prefix doc =
       end else None
     ) doc.Toml.sections
 
+(** Every dep of the [prefix] section (inline form, then [[prefix.X]]
+    sections) with its grant and line, from the located document.  Deps that
+    [parse_deps_section] / [parse_section_deps] skip are skipped here too. *)
+let parse_dep_entries prefix (doc : Toml.document) : (string * dep_entry) list =
+  let inline =
+    match Toml.get_section_at doc prefix with
+    | None -> []
+    | Some ls ->
+      List.filter_map (fun (dep_name, v, line) ->
+          match v with
+          | Toml.InlineTable tbl ->
+            (match parse_dep_table tbl with
+             | None -> None
+             | Some source ->
+               let grant =
+                 Option.map (parse_grant ~dep_name ~line) (List.assoc_opt "grant" tbl) in
+               Some (dep_name, { source; grant; grant_line = line }))
+          | Toml.Str version ->
+            Some (dep_name, { source = RegistryDep { version }; grant = None; grant_line = line })
+          | Toml.Array _ | Toml.Bool _ -> None)
+        ls.Toml.sec_pairs
+  in
+  let plen = String.length prefix in
+  let sections =
+    List.filter_map (fun (ls : Toml.located_section) ->
+        let sec_name = ls.Toml.sec_name in
+        if String.length sec_name > plen + 1
+        && String.sub sec_name 0 (plen + 1) = prefix ^ "."
+        then begin
+          let dep_name = String.sub sec_name (plen + 1) (String.length sec_name - plen - 1) in
+          let pairs = List.map (fun (k, v, _) -> (k, v)) ls.Toml.sec_pairs in
+          match parse_dep_table pairs with
+          | None -> None
+          | Some source ->
+            (match Toml.find_at ls "grant" with
+             | Some (v, line) ->
+               Some (dep_name,
+                     { source; grant = Some (parse_grant ~dep_name ~line v); grant_line = line })
+             | None -> Some (dep_name, { source; grant = None; grant_line = ls.Toml.sec_line }))
+        end
+        else None)
+      doc.Toml.located
+  in
+  inline @ sections
+
+(** The grant the project's own forge.toml gives dependency [name] and the
+    line it is written on, or [None] (no grant: the dep is limited only by
+    its own `needs` and its callers' authority).  The first declaration of
+    [name] wins, in [dep_entries] order. *)
+let grant_of (proj : project) name : (string list * int) option =
+  match List.assoc_opt name proj.dep_entries with
+  | Some { grant = Some g; grant_line; _ } -> Some (g, grant_line)
+  | _ -> None
+
+(** A dependency declared more than once (inline and as [deps.X], or in two
+    sections) with different grants, as
+    [forge.toml:<line>: dependency 'x' is declared again ...]; [grant_of]
+    reads the first declaration, so the other would be silently dropped.
+    Checked where the grants are applied (the root project, plan Q1), so a
+    dependency's own manifest is never refused for it. *)
+let grant_conflict (proj : project) : string option =
+  List.find_map (fun (name, (e : dep_entry)) ->
+      match List.find_opt (fun (n, (e' : dep_entry)) -> n = name && e'.grant <> e.grant)
+              proj.dep_entries with
+      | Some (_, e') ->
+        let a, b = if e.grant_line <= e'.grant_line then e, e' else e', e in
+        Some (Printf.sprintf
+                "forge.toml:%d: dependency '%s' is declared again with a different grant \
+                 (first declared at line %d); give every declaration the same grant"
+                b.grant_line name a.grant_line)
+      | None -> None)
+    proj.dep_entries
+
 (** Parse [archive.task.NAME] sections into archive_task list. *)
 let parse_archive_tasks doc =
   let prefix = "archive.task." in
@@ -252,6 +360,10 @@ let parse_patches doc =
    names ([deps], [preprocessors], ...) are not checked. *)
 let dep_table_keys = [ "git"; "path"; "registry"; "version"; "tag"; "branch"; "rev" ]
 
+(* A dependency section can also carry its grant (ocap phase 6); a [patch]
+   or archive dep cannot. *)
+let dep_section_keys = "grant" :: dep_table_keys
+
 let package_keys =
   [ "name"; "version"; "type"; "description"; "author"; "entrypoint"; "js_entrypoint"; "march";
     "license"; "repository"; "homepage"; "pin_main" ]
@@ -273,9 +385,9 @@ let known_keys_of_section (name : string) : string list option =
   | "refine" -> Some [ "rlimit" ]
   | _ when has_prefix "archive.task." -> Some [ "command"; "module"; "doc" ]
   | _ when has_prefix "patch." -> Some dep_table_keys
-  | _ when List.exists has_prefix
-             [ "deps."; "dev-deps."; "dev-only-deps."; "test-deps."; "archive-deps." ] ->
-    Some dep_table_keys
+  | _ when List.exists has_prefix [ "deps."; "dev-deps."; "dev-only-deps."; "test-deps." ] ->
+    Some dep_section_keys
+  | _ when has_prefix "archive-deps." -> Some dep_table_keys
   | _ -> None
 
 (** Unknown-key warnings for a parsed forge.toml, as
@@ -361,6 +473,10 @@ let load_from root =
   let inline_testdeps  = parse_deps_section (Toml.get_section doc "test-deps") in
   let section_testdeps = parse_section_deps "test-deps" doc in
   let test_deps = inline_testdeps @ section_testdeps in
+  let dep_entries =
+    List.concat_map (fun prefix -> parse_dep_entries prefix doc)
+      [ "deps"; "dev-deps"; "dev-only-deps"; "test-deps" ]
+  in
   (* [patch.NAME] sections *)
   let patches = parse_patches doc in
   (* [archive.task.NAME] sections *)
@@ -453,7 +569,7 @@ let load_from root =
   in
   { name; version; project_type = project_type_of_string type_str;
     description; author; root; entrypoint; js_entrypoint; march_req; license; repository; homepage;
-    pin_main; deps; dev_deps; dev_only_deps; test_deps; patches; archive_tasks; archive_deps;
+    pin_main; deps; dev_deps; dev_only_deps; test_deps; dep_entries; patches; archive_tasks; archive_deps;
     preprocessors; ffi_sources; ffi_link; ffi_rust; js_deps; hot_reload;
     refine_rlimit; contracts_no_alloc }
 

@@ -1,0 +1,29 @@
+-- An ungranted package that calls C: its `Peek` impl and `positive` call
+-- `getpid`.  Called from the app it runs under the app's authority; reached
+-- from inside a granted package (through a generic call of `peek`, which
+-- the static reach does not follow into an impl) it runs under that
+-- package's grant, which refuses the extern at run time unless the grant
+-- names IO.Foreign.
+mod Pidlib do
+  needs IO.Foreign
+
+  extern "c" : Cap(IO.Foreign) do
+    fn getpid() : Int = "getpid"
+  end
+
+  type Tok = Tok(Int)
+
+  interface Peek(a) do
+    fn peek : a -> String
+  end
+
+  impl Peek(Tok) do
+    fn peek(_t) do
+      if getpid() > 0 do "ran getpid" else "ran getpid" end
+    end
+  end
+
+  fn tok() : Tok do Tok(1) end
+
+  fn positive() : Bool do getpid() > 0 end
+end

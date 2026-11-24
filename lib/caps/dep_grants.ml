@@ -1,0 +1,390 @@
+(* Dependency grants (ocap phase 6): the grants file and package membership.
+   See dep_grants.mli for the file format and the contract; the plan is
+   specs/plans/2026-11-22-ocap-p6-grants-plan.md (decisions 3, 4, 5, 12). *)
+
+open March_ast
+
+type grant = {
+  g_pkg : string;
+  g_root : string;
+  g_manifest : string;
+  g_line : int;
+  g_text : string;
+  g_entries : (Ast.name list * string option) list;
+  g_scoped : bool;
+}
+
+let env_var = "MARCH_DEP_GRANTS"
+
+(* ── Scope text ─────────────────────────────────────────────────────────── *)
+
+let wrapper_module = "G__"
+
+let parse_scope_text (text : string) :
+    ((Ast.name list * string option) list, string) result =
+  let t = String.trim text in
+  if t = "()" then Ok []
+  else if t = "" then Error "the grant is empty; write `()` to grant nothing"
+  else if String.contains t '\n' || String.contains t '\r' then
+    Error "the grant spans more than one line"
+  else
+    let src = Printf.sprintf "mod %s do needs %s end" wrapper_module t in
+    let bad () =
+      Error (Printf.sprintf "`%s` is not a list of capabilities in `needs` syntax" t)
+    in
+    match March_parser.Parse.module_ ~filename:"<grant>" src with
+    | Error (d :: _) ->
+      (* The parser's first line, unless it is only a lead-in to a caret
+         snippet ("I got stuck here:"), which means nothing out of context. *)
+      let first = String.trim (List.hd (String.split_on_char '\n' d.March_errors.Errors.message)) in
+      if first = "" || first.[String.length first - 1] = ':' then bad ()
+      else
+        Error
+          (Printf.sprintf "`%s` is not a list of capabilities in `needs` syntax: %s" t first)
+    | Error [] -> bad ()
+    | Ok { Ast.mod_name; mod_decls = [ Ast.DNeeds (entries, _) ] }
+      when mod_name.Ast.txt = wrapper_module ->
+      Ok entries
+    | Ok _ -> bad ()
+
+(* ── The file ───────────────────────────────────────────────────────────── *)
+
+let read_file path =
+  let ic = open_in_bin path in
+  Fun.protect ~finally:(fun () -> close_in_noerr ic) (fun () ->
+      really_input_string ic (in_channel_length ic))
+
+let is_space c = c = ' ' || c = '\t' || c = '\n' || c = '\r'
+
+(* One non-comment line of the grants file into a grant. *)
+let parse_line (line : string) : (grant, string) result =
+  let ( let* ) = Result.bind in
+  let* () =
+    if String.contains line '\r' then Error "a field contains a carriage return"
+    else Ok ()
+  in
+  let* pkg, root, man, text =
+    match String.split_on_char '\t' line with
+    | [ a; b; c; d ] -> Ok (a, b, c, d)
+    | fs when List.length fs < 4 ->
+      Error
+        (Printf.sprintf
+           "expected four tab-separated fields (package, library root, \
+            manifest:line, grant), found %d"
+           (List.length fs))
+    | _ ->
+      Error
+        "a field contains a tab: expected exactly four tab-separated fields \
+         (package, library root, manifest:line, grant)"
+  in
+  let* () =
+    if pkg = "" then Error "the package name is empty"
+    else if String.exists is_space pkg then
+      Error (Printf.sprintf "the package name `%s` contains white space" pkg)
+    else Ok ()
+  in
+  let* root =
+    if root = "" || root.[0] <> '/' then
+      Error
+        (Printf.sprintf
+           "the library root `%s` of `%s` is not an absolute path" root pkg)
+    else
+      match Unix.realpath root with
+      | r when Sys.file_exists r && Sys.is_directory r -> Ok r
+      | _ ->
+        Error
+          (Printf.sprintf "the library root `%s` of `%s` is not a directory" root
+             pkg)
+      | exception Unix.Unix_error _ ->
+        Error
+          (Printf.sprintf "the library root `%s` of `%s` does not exist" root pkg)
+  in
+  let* manifest, mline =
+    let bad () =
+      Error
+        (Printf.sprintf
+           "`%s` is not `<manifest>:<line>` (the forge.toml entry that grants \
+            `%s`)"
+           man pkg)
+    in
+    match String.rindex_opt man ':' with
+    | None -> bad ()
+    | Some i ->
+      let m = String.sub man 0 i
+      and n = String.sub man (i + 1) (String.length man - i - 1) in
+      if m = "" || n = "" || not (String.for_all (fun c -> c >= '0' && c <= '9') n)
+      then bad ()
+      else (
+        match int_of_string_opt n with
+        | Some k when k >= 1 -> Ok (m, k)
+        | _ -> bad ())
+  in
+  let* entries =
+    Result.map_error
+      (fun msg -> Printf.sprintf "the grant to `%s`: %s" pkg msg)
+      (parse_scope_text text)
+  in
+  let canonical, scoped = Cap_request.request_of_entries entries in
+  Ok
+    {
+      g_pkg = pkg;
+      g_root = root;
+      g_manifest = manifest;
+      g_line = mline;
+      g_text = (if entries = [] then "()" else canonical);
+      g_entries = entries;
+      g_scoped = scoped;
+    }
+
+let parse_file (path : string) : (grant list, string * int option) result =
+  match read_file path with
+  | exception Sys_error msg ->
+    Error (Printf.sprintf "cannot read it (%s)" msg, None)
+  | contents ->
+    let lines = String.split_on_char '\n' contents in
+    let rec go lineno acc = function
+      | [] -> Ok (List.rev acc)
+      | line :: rest ->
+        if String.trim line = "" || line.[0] = '#' then go (lineno + 1) acc rest
+        else (
+          match parse_line line with
+          | Error msg -> Error (msg, Some lineno)
+          | Ok g -> (
+            match
+              List.find_opt
+                (fun (o : grant) -> o.g_pkg = g.g_pkg || o.g_root = g.g_root)
+                acc
+            with
+            | Some o when o.g_pkg = g.g_pkg ->
+              Error
+                (Printf.sprintf "the package `%s` is listed more than once" g.g_pkg,
+                 Some lineno)
+            | Some o ->
+              Error
+                ( Printf.sprintf
+                    "`%s` and `%s` have the same library root `%s`" o.g_pkg
+                    g.g_pkg g.g_root,
+                  Some lineno )
+            | None -> go (lineno + 1) (g :: acc) rest))
+    in
+    go 1 [] lines
+
+let load ?flag () : (grant list, string * int option) result =
+  let source =
+    match flag with
+    | Some f -> Some f
+    | None -> (
+      match Sys.getenv_opt env_var with
+      | Some "" | None -> None
+      | Some f -> Some f)
+  in
+  match source with
+  | None -> Ok []
+  | Some path -> parse_file path
+
+(* ── The active set ─────────────────────────────────────────────────────── *)
+
+let active_grants : grant list ref = ref []
+let active_digest : string option ref = ref None
+let membership : (string, grant option) Hashtbl.t = Hashtbl.create 64
+let proven : (string, unit) Hashtbl.t = Hashtbl.create 64
+
+(* MARCH_LIB_PATH's directories as (lexical spelling, real path), read once
+   per [set_active] (the variable does not change within a compilation). *)
+let lib_entries : (string * string) list option ref = ref None
+
+type conflict = {
+  c_file : string;  (** the file as the loader named it *)
+  c_real : string;  (** its real path *)
+  c_logical : grant option;  (** the package its spelled location is in *)
+  c_resolved : grant option;  (** the package its real path is in *)
+}
+
+let conflict_tbl : (string, conflict) Hashtbl.t = Hashtbl.create 4
+
+let digest_of (gs : grant list) : string option =
+  match gs with
+  | [] -> None
+  | _ ->
+    let b = Buffer.create 256 in
+    List.iter
+      (fun g ->
+         Buffer.add_string b
+           (Printf.sprintf "%s\t%s\t%s:%d\t%s\n" g.g_pkg g.g_root g.g_manifest
+              g.g_line g.g_text))
+      gs;
+    Some (Digest.to_hex (Digest.string (Buffer.contents b)))
+
+let set_active (gs : grant list) =
+  active_grants := gs;
+  active_digest := digest_of gs;
+  Hashtbl.reset membership;
+  Hashtbl.reset conflict_tbl;
+  lib_entries := None;
+  Hashtbl.reset proven
+
+let active () = !active_grants
+let digest () = !active_digest
+
+(* [root] contains [path] (both real paths, no trailing slash except "/"). *)
+let contains ~root path =
+  path = root
+  ||
+  let pre = if root = "/" then "/" else root ^ "/" in
+  String.length path > String.length pre
+  && String.sub path 0 (String.length pre) = pre
+
+(* A path made absolute against the working directory and normalised
+   lexically ("." and empty segments dropped, ".." pops), with no symlink
+   resolved: the path as the loader spelled it. *)
+let lexical_abs (p : string) : string =
+  let p = if Filename.is_relative p then Filename.concat (Sys.getcwd ()) p else p in
+  let segs =
+    List.fold_left (fun acc seg ->
+        match seg with
+        | "" | "." -> acc
+        | ".." -> (match acc with [] -> [] | _ :: tl -> tl)
+        | s -> s :: acc)
+      [] (String.split_on_char '/' p)
+  in
+  "/" ^ String.concat "/" (List.rev segs)
+
+
+let get_lib_entries () =
+  match !lib_entries with
+  | Some l -> l
+  | None ->
+    let l =
+      match Sys.getenv_opt "MARCH_LIB_PATH" with
+      | None -> []
+      | Some s ->
+        List.filter_map (fun d ->
+            if d = "" then None
+            else
+              let sp = lexical_abs d in
+              let real = try Unix.realpath d with Unix.Unix_error _ -> sp in
+              Some (sp, real))
+          (String.split_on_char ':' s)
+    in
+    lib_entries := Some l;
+    l
+
+
+let longest (gs : grant list) (path : string) : grant option =
+  List.fold_left
+    (fun best g ->
+       if contains ~root:g.g_root path then
+         match best with
+         | Some b when String.length b.g_root >= String.length g.g_root -> best
+         | _ -> Some g
+       else best)
+    None gs
+
+let same a b =
+  match a, b with
+  | None, None -> true
+  | Some x, Some y -> x.g_pkg = y.g_pkg
+  | _ -> false
+
+(* Membership is decided by both the path the loader found the file under
+   and the file's real path, and the two must agree (fail closed).  The
+   spelled location: for each MARCH_LIB_PATH directory D whose lexical
+   spelling contains the file's, the real path of D followed by the rest of
+   the file's spelling (so a project reached through a symlinked parent,
+   /tmp -> /private/tmp, still matches the real-path roots).  A file under a
+   granted root that is a symlink to code outside it (or a symlinked
+   subdirectory) would otherwise run ungranted: such a file is recorded as
+   a conflict (reported as [dep_grant_invalid]) and treated as the granted
+   package's. *)
+let package_of_file (file : string) : grant option =
+  match !active_grants with
+  | [] -> None
+  | gs -> (
+    match Hashtbl.find_opt membership file with
+    | Some r -> r
+    | None ->
+      let spelled = lexical_abs file in
+      let real = try Some (Unix.realpath file) with Unix.Unix_error _ -> None in
+      let logical =
+        List.filter_map (fun (d_sp, d_real) ->
+            if contains ~root:d_sp spelled then
+              let rest = String.sub spelled (String.length d_sp)
+                  (String.length spelled - String.length d_sp) in
+              Some (longest gs (if d_real = "/" then rest else d_real ^ rest))
+            else None)
+          (get_lib_entries ())
+      in
+      let resolved = Option.map (longest gs) real in
+      let all = (match resolved with Some r -> [ r ] | None -> []) @ logical in
+      let r =
+        match all with
+        | [] -> None
+        | first :: rest ->
+          if List.for_all (same first) rest then first
+          else begin
+            let logical_pkg = List.find_map Fun.id logical in
+            let resolved_pkg = Option.join resolved in
+            Hashtbl.replace conflict_tbl file
+              { c_file = file; c_real = Option.value real ~default:spelled;
+                c_logical = logical_pkg; c_resolved = resolved_pkg };
+            (* fail closed: some grant applies *)
+            match logical_pkg with Some g -> Some g | None -> resolved_pkg
+          end
+      in
+      Hashtbl.replace membership file r;
+      r)
+
+let impl_method_file ~(impl_file : string) (name_span : Ast.span) : string =
+  let f = name_span.Ast.file in
+  if f = "" || f = Ast.dummy_span.Ast.file then impl_file else f
+
+let conflicts () =
+  Hashtbl.fold (fun _ c acc -> c :: acc) conflict_tbl []
+  |> List.sort (fun a b -> compare a.c_file b.c_file)
+
+(* Decision 2: a grant's root is a MARCH_LIB_PATH directory or a parent of
+   one (forge puts a dep's root and its subdirectories on the path). *)
+let root_problem (g : grant) : string option =
+  let dirs =
+    match Sys.getenv_opt "MARCH_LIB_PATH" with
+    | None -> []
+    | Some s -> List.filter (fun d -> d <> "") (String.split_on_char ':' s)
+  in
+  let real d = try Unix.realpath d with Unix.Unix_error _ -> d in
+  if List.exists (fun d -> contains ~root:g.g_root (real d)) dirs then None
+  else
+    Some
+      (Printf.sprintf
+         "the library root `%s` of package `%s` is not on MARCH_LIB_PATH, \
+          nor a parent of a directory on it, so the grant governs no code \
+          the build loads"
+         g.g_root g.g_pkg)
+
+(* ── The REPL's preload check (bin/main.ml) ─────────────────────────────── *)
+
+type preload_verdict = Load | Refuse of string
+
+let contains_sub (s : string) (sub : string) : bool =
+  let n = String.length s and k = String.length sub in
+  let rec go i = i + k <= n && (String.sub s i k = sub || go (i + 1)) in
+  go 0
+
+(* A rendered diagnostic's header line: `-- TYPE MISMATCH ------ file`. *)
+let is_diag_header (l : string) : bool =
+  String.length l > 4 && String.sub l 0 3 = "-- " && l.[3] >= 'A' && l.[3] <= 'Z'
+  && contains_sub l " --"
+
+let preload_check_verdict (st : Unix.process_status) (out : string) : preload_verdict =
+  if contains_sub out "[dep_grant_" || contains_sub out "[dep_module_conflict]" then
+    Refuse "it breaks its dependency grants"
+  else
+    match st with
+    | Unix.WEXITED 0 -> Load
+    | Unix.WEXITED 1 when List.exists is_diag_header (String.split_on_char '\n' out) -> Load
+    | Unix.WEXITED n ->
+      Refuse (Printf.sprintf "its grant check (`march --check`) failed with exit status %d \
+                              and no diagnostic" n)
+    | Unix.WSIGNALED n ->
+      Refuse (Printf.sprintf "its grant check (`march --check`) was killed by signal %d" n)
+    | Unix.WSTOPPED n ->
+      Refuse (Printf.sprintf "its grant check (`march --check`) was stopped by signal %d" n)

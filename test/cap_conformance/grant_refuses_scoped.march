@@ -1,0 +1,33 @@
+-- DEP: gate deps/gate IO.FileRead("/srv/")
+-- A scoped grant limits every function of the dependency (design §10): a
+-- path the dependency computes outside the grant, and a kind the grant does
+-- not list, are refused, naming the grant to package `gate` with its scope
+-- text; a computed path inside the grant is allowed; and the app's own
+-- authority, which admits both, is back after each call returns.
+mod GrantRefusesScoped do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Process
+
+  fn mine(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn dep_reads() : String do
+    Gate.read_at("/srv", "x") ++ " | " ++ Gate.read_at("/etc", "hosts")
+  end
+
+  fn dep_env() : String do
+    Gate.probe("IO.Process", "HOME")
+  end
+
+  fn main() do
+    println(dep_reads())
+    println(dep_env())
+    println(mine("IO.FileRead", "/etc/hosts"))
+    println(mine("IO.Process", "HOME"))
+  end
+end

@@ -1,0 +1,9 @@
+-- A grant whose path scope is relative.
+-- DEP: weather deps/dep_grant_invalid_1/weather IO.Console, IO.FileRead("data/")
+mod Main do
+  needs IO.Console
+
+  fn main() do
+    Weather.log("hello")
+  end
+end

@@ -1,0 +1,51 @@
+-- DEP: crew deps/crew IO.FileRead("/srv/"), IO.Spawn
+-- A task a granted dependency spawns runs under the grant (design §7,
+-- §10): awaited inside the package, or handed back and awaited by the app,
+-- it is refused outside the grant to `crew`. The app's own callback, run in
+-- a task `crew` spawns, keeps the app's authority (design §5), and the
+-- app's own tasks are not limited by the grant.
+mod GrantTaskInherits do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Spawn
+
+  fn mine(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "allowed " ++ p
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn inside() : String do
+    Crew.task_probe("/etc/hosts") ++ " | " ++ Crew.task_probe("/srv/x")
+  end
+
+  fn handed_back() : String do
+    match Task.await(Crew.task_handle("/etc/hosts")) do
+    Ok(s) -> s
+    Err(e) -> "await failed: " ++ e
+    end
+  end
+
+  fn callback() : String do
+    Crew.task_of(fn () -> mine("/etc/hosts"))
+  end
+
+  fn own() : String do
+    match Task.async(fn () -> mine("/etc/hosts")) do
+    Err(e) -> "spawn: " ++ Authority.describe(e)
+    Ok(t) ->
+      match Task.await(t) do
+      Ok(s) -> s
+      Err(e) -> "await failed: " ++ e
+      end
+    end
+  end
+
+  fn main() do
+    println("in crew: " ++ inside())
+    println("handed back: " ++ handed_back())
+    println("app callback: " ++ callback())
+    println("app task: " ++ own())
+  end
+end

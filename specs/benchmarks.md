@@ -1493,6 +1493,7 @@ to the features it exercises. Quick reference:
 | interpreter (`lib/eval/eval.ml`) / REPL-JIT (`lib/jit/`) changes | `bench/run_interp_bench.sh` (interp vs. compiled vs. repl-clang vs. repl-orc A-B over `bench/interp/`) |
 | ocap run-time authority (`stdlib/authority.march`, `runtime/march_authority.c`, `march_cap_*` in the runtime, `lib/tir/auth_rt.ml`, `lib/tir/auth_native.ml`) | `println_loop clock_loop spawn_loop actor_ping cap_check_slow cap_capture_closures list_ops` |
 | ocap `restrict` / scope values (`ERestrict` lowering in `lib/tir/lower*.ml`, `Auth_rt.restricts`, `stdlib/scope.march`, `Authority.restrict_layer`, the interpreter's restrict frame) | `restrict_enter restrict_enter_static restrict_enter_computed list_ops` (read each restrict bench against a copy with the `restrict` removed) |
+| ocap dependency grants (`lib/caps/dep_grants.ml`, `Auth_rt.grants`, `Authority.enter_grant` / `grant_layer`, `Typecheck.check_dep_grants`, the interpreter's grant frames, forge's grants file) | `grant_enter grant_enter_static list_ops` via `scripts/bench-grants.sh` (it writes the grants files and reads both against the same build with no grants file) |
 
 ## scripts/compile-time-bench.sh — compile-time scenarios (cold / warm / per-edit)
 
@@ -1586,6 +1587,34 @@ First measurement (macOS arm64, 14 cores, load average about 3.3, 11 interleaved
 and 0.1 ns on the minima (noise: the plain loop is mostly process start-up);
 `restrict_enter_computed` 399 ms against 18 ms, about 380 ns per entry. Detail in
 `specs/progress/2026-11-19-ocap-p5-restrict.md`.
+
+## bench/grant_enter*.march — ocap dependency-grant boundary cost (2026-11-23)
+
+`grant_enter` and `grant_enter_static` make 1,000,000 calls from the app into
+`GrantDep.work` (`bench/grant_enter_dep/`, loaded through `MARCH_LIB_PATH`), each of which
+makes 1,000 internal calls of `step(n) = n + 1`; both print `500000500000000`. They need a
+grants file whose library root is absolute, so run them with `scripts/bench-grants.sh`
+(the bench gate writes its own, see `bench_envs` in `test/test_bench_gate.ml`). The script
+builds three binaries at `--opt 2`, checks each one's grant-frame decisions
+(`MARCH_DUMP_GRANT_FRAMES`) and output, and runs them interleaved (11 rounds by default):
+
+- `framed`: `grant_enter` under `IO.FileRead("/srv/")`. A scoped grant keeps every package
+  function's frame: each boundary call reads the package's layer cell, runs
+  `Authority.enter_grant` and restores the authority. The calls inside the package go to the
+  bodies and pay nothing.
+- `static`: `grant_enter_static` under `IO.FileRead`. The package is pure, so the checker
+  proves it within the grant and the frames are dropped: each call is a plain call.
+- `control`: `grant_enter` with no grants file.
+
+ns per boundary call = (median(variant) − median(control)) / 1e6. The phase-6 budget is
+≤ 50 ns for the framed call and within noise for the static one.
+
+First measurement (macOS arm64, 14 cores, load average about 6.8, 11 interleaved runs,
+`--opt 2`, wall): framed 458.2 ms median, static 444.0 ms, control 442.2 ms; about **16 ns
+per framed boundary call** (12 ns on the minima) and 2 ns for the static one (1 ns on the
+minima; noise). The inner loop's billion internal calls cost the same in all three, so a
+call inside a granted package pays nothing. Detail in
+`specs/progress/2026-11-22-ocap-p6-grants.md`.
 
 ## bench/int_divmod.march — Int `/` and `%` zero-divisor check (2026-11-06)
 

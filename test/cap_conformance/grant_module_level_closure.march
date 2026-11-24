@@ -1,0 +1,40 @@
+-- DEP: boot deps/boot IO.FileRead("/srv/")
+-- Function values made by a granted dependency's module-level code (design
+-- §21, ocap p6 Review Focus 2): a lambda, a named stdlib function read as a
+-- value, and the package's own function read as a value, each called by the
+-- app, run under the app's authority narrowed by the grant, never the app's
+-- full authority: each is refused outside the grant and allowed inside it.
+mod GrantModuleLevelClosure do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn verdict(r : Result((), CapError)) : String do
+    match r do
+    Ok(_) -> "allowed"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn call_lam(p : String) : String do
+    let l = Boot.lam
+    "lambda: " ++ verdict(l(p))
+  end
+
+  fn call_named(p : String) : String do
+    let n = Boot.named
+    "named: " ++ verdict(n("IO.FileRead", p))
+  end
+
+  fn call_own(p : String) : String do
+    let o = Boot.own
+    "own: " ++ verdict(o(p))
+  end
+
+  fn main() do
+    println(call_lam("/etc/hosts"))
+    println(call_named("/etc/hosts"))
+    println(call_own("/etc/hosts"))
+    println(call_lam("/srv/x"))
+    println("app: " ++ verdict(Authority.check("IO.FileRead", "/etc/hosts")))
+  end
+end

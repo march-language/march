@@ -1,0 +1,55 @@
+-- DEP: crew deps/crew IO.FileRead("/srv/"), IO.Spawn
+-- An actor a granted dependency spawns runs under the grant for life
+-- (design §7, §10): asked by the app after the spawning call has returned,
+-- it is refused outside the grant, naming the grant to `crew`. The child of
+-- a supervisor `crew` spawns is limited the same way, and a supervisor
+-- restart (after it crashes, and after the app, which holds its own wider
+-- authority, kills it) restores that authority. The app is not limited.
+mod GrantActorRestrictedForLife do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Spawn
+  needs Actor.Introspect
+
+  fn child_of(boss) : Int do
+    match get_actor_field(boss, "child") do
+    None -> -1
+    Some(n) -> n
+    end
+  end
+
+  fn mine(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "allowed " ++ p
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn ask(p) : String do
+    match Actor.call(p, Crew.ProbeReq, 5000) do
+    Ok(s) -> s
+    Err(e) -> "call failed: " ++ e
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
+    let w = Crew.hire()
+    println("hand: " ++ ask(w))
+    let boss = Crew.hire_foreman()
+    let c1 = child_of(boss)
+    println("child: " ++ ask(Actor.pid_from_int(intro, c1)))
+    send(Actor.pid_from_int(intro, c1), Crew.Poison())
+    run_until_idle()
+    let c2 = child_of(boss)
+    println("restarted: " ++ bool_to_string(c2 != c1))
+    println("after crash: " ++ ask(Actor.pid_from_int(intro, c2)))
+    kill(Actor.pid_from_int(intro, c2))
+    run_until_idle()
+    let c3 = child_of(boss)
+    println("restarted again: " ++ bool_to_string(c3 != c2))
+    println("after kill: " ++ ask(Actor.pid_from_int(intro, c3)))
+    println("app: " ++ mine("/etc/hosts"))
+  end
+end

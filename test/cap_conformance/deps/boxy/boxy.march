@@ -1,0 +1,22 @@
+-- A dependency type whose `Show` impl probes the path it holds: reached only
+-- through dispatch (a `show` call, interpolation, generic stdlib code), it
+-- runs under the grant to `boxy` (ocap phase 6, Review Focus 1).
+mod Boxy do
+  needs IO.FileRead
+
+  type Crate = Crate(String)
+
+  impl Show(Crate) do
+    fn show(c) do
+      match c do
+      Crate(p) ->
+        match Authority.check("IO.FileRead", p) do
+        Ok(_) -> "Crate(allowed " ++ p ++ ")"
+        Err(e) -> "Crate(" ++ Authority.describe(e) ++ ")"
+        end
+      end
+    end
+  end
+
+  fn crate(p : String) : Crate do Crate(p) end
+end

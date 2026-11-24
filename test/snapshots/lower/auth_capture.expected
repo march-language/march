@@ -24,14 +24,14 @@ p("a");
 let $auth_fnval10 : (String) -> () = letrec [$authlam0_main] in
 $authlam0_main in
 apply_to($auth_fnval10, "b");
-let $t1253 : Int = let $t1252 : Int = inc(1) in
-scoped($t1252) in
-loop_say($t1253);
+let $t1328 : Int = let $t1327 : Int = inc(1) in
+scoped($t1327) in
+loop_say($t1328);
 shout("c");
-let $t1254 : Result((), CapError) = probe() in
-case $t1254 of
-  Ok($f1255) -> ()
-  Err($f1256) -> ()
+let $t1329 : Result((), CapError) = probe() in
+case $t1329 of
+  Ok($f1330) -> ()
+  Err($f1331) -> ()
   _ -> panic("non-exhaustive pattern match")
 
 ## probe

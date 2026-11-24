@@ -1,0 +1,13 @@
+exit: 1
+-- CAPABILITY --------- errors/dep_grant_exceeded_3.march
+
+`cpid` is granted `IO.Console`, but `Cpid.getpid` needs `IO.Foreign` (`Main.main → Cpid.pid → Cpid.getpid`). [dep_grant_exceeded]
+
+7 |     println(int_to_string(Cpid.pid()))
+                              ^^^^^^^^
+
+    granted at forge.toml:2
+    hint: widen the grant in forge.toml, or stop calling `Cpid.pid`
+    run `march --explain dep_grant_exceeded`
+
+

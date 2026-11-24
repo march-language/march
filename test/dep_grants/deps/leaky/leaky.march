@@ -1,0 +1,14 @@
+-- Function values made by a granted package's module-level code: a lambda,
+-- and a named function read as a value (a stdlib function, which no wrapper
+-- of the package's own covers).  Each must run under the grant, as one of
+-- the package's functions would, whoever calls it.
+mod Leaky do
+  needs IO.FileRead
+
+  let lam = fn p -> Authority.check("IO.FileRead", p)
+  let named = Authority.check
+
+  fn get_named() do
+    Authority.check
+  end
+end

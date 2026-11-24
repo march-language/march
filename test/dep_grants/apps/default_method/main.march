@@ -1,0 +1,12 @@
+mod Main do
+  needs IO.Console
+
+  type Mine = Mine(Int)
+
+  impl Greet(Mine) do
+  end
+
+  fn main() do
+    println(greet(Mine(1)))
+  end
+end

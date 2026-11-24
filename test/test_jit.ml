@@ -358,14 +358,14 @@ let contains ~needle hay =
 
 (** Pipe [lines] into the REPL under [env_prefix] (e.g. "MARCH_JIT_BACKEND=orc"),
     returning (combined stdout+stderr, exit code; signals map to 128+n). *)
-let run_repl_session ~env_prefix (lines : string list) : string * int =
+let run_repl_session ?(args = "") ~env_prefix (lines : string list) : string * int =
   let input = Filename.temp_file "march_repl_session" ".txt" in
   let oc = open_out input in
   List.iter (fun l -> output_string oc l; output_char oc '\n') lines;
   close_out oc;
-  let cmd = Printf.sprintf "HOME=%s %s %s < %s 2>&1"
+  let cmd = Printf.sprintf "HOME=%s %s %s %s < %s 2>&1"
       (Filename.quote (Lazy.force session_home))
-      env_prefix (Filename.quote main_exe) (Filename.quote input) in
+      env_prefix (Filename.quote main_exe) args (Filename.quote input) in
   let ic = Unix.open_process_in cmd in
   let buf = Buffer.create 1024 in
   (try
@@ -416,6 +416,83 @@ let test_repl_session_fn_redefinition_orc () =
 let test_repl_session_fn_redefinition_interp () =
   check_redefinition ~label:"interpreter mode"
     (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" redefinition_session)
+
+(* Run [k] with fresh temp dirs named by [prefixes], removed afterwards. *)
+let with_temp_dirs (prefixes : string list) (k : string list -> unit) : unit =
+  let dirs = List.map (fun p -> Filename.temp_dir p "") prefixes in
+  Fun.protect
+    ~finally:(fun () ->
+        List.iter (fun d -> ignore (Sys.command ("rm -rf " ^ Filename.quote d))) dirs)
+    (fun () -> k dirs)
+
+(* ── A preloaded file reaches MARCH_LIB_PATH modules ──────────────────
+   `march repl FILE` preloads FILE (as forge interactive and the cap
+   conformance suite's REPL mode do).  Its imports used to be resolved with
+   library auto-discovery off, so a module the file names only by a
+   qualified call (`Libmod.hello()`), found on MARCH_LIB_PATH by every batch
+   build, was "Unknown module" at the REPL.  The library and the preloaded
+   file sit in two unrelated temp dirs, so only MARCH_LIB_PATH can supply
+   the module. *)
+
+let test_repl_preload_lib_path_interp () =
+  with_temp_dirs [ "march_repl_lib"; "march_repl_app" ] @@ fun dirs ->
+  let lib = List.nth dirs 0 and app = List.nth dirs 1 in
+  let write path s = let oc = open_out path in output_string oc s; close_out oc in
+  write (Filename.concat lib "libmod.march")
+    "mod Libmod do\n  fn hello() : String do \"hi from the lib path\" end\nend\n";
+  let entry = Filename.concat app "pre.march" in
+  write entry "mod Pre do\n  fn go() : String do Libmod.hello() end\nend\n";
+  let (out, code) =
+    run_repl_session ~args:("repl " ^ Filename.quote entry)
+      ~env_prefix:("MARCH_REPL_INTERP=1 MARCH_LIB_PATH=" ^ Filename.quote lib)
+      [ "go()"; "Libmod.hello()" ] in
+  Alcotest.(check int) ("REPL exit code; " ^ out) 0 code;
+  if contains ~needle:"Unknown module" out || contains ~needle:"cannot find" out then
+    Alcotest.failf "the preloaded file could not reach Libmod:\n%s" out;
+  let n = ref 0 and i = ref 0 in
+  let needle = "\"hi from the lib path\"" in
+  let nl = String.length needle in
+  while !i + nl <= String.length out do
+    if String.sub out !i nl = needle then (incr n; i := !i + nl) else incr i
+  done;
+  if !n < 2 then
+    Alcotest.failf "expected both inputs to answer %s, got:\n%s" needle out
+
+(* The REPL checks a loaded file's declarations one at a time, where the
+   batch driver checks them as one module: a library module that calls one
+   checked after it was "Unknown module", and an impl inside a module was
+   never registered, so a later fn's `show` of its type was "does not
+   implement interface `Show`".  Here `Upper` (first on MARCH_LIB_PATH) calls
+   `Lower`, and `Lower` holds the impl. *)
+let test_repl_preload_order_and_impls_interp () =
+  with_temp_dirs [ "march_repl_liba"; "march_repl_libb"; "march_repl_app" ] @@ fun dirs ->
+  let a = List.nth dirs 0 and b = List.nth dirs 1 and app = List.nth dirs 2 in
+  let write path s = let oc = open_out path in output_string oc s; close_out oc in
+  write (Filename.concat a "upper.march")
+    "mod Upper do\n  fn up() : String do Lower.tag(\"up\") end\nend\n";
+  write (Filename.concat b "lower.march")
+    "mod Lower do\n  type Crate = Crate(String)\n  impl Show(Crate) do\n    fn show(c) do\n      \
+     match c do\n      Crate(s) -> \"Crate:\" ++ s\n      end\n    end\n  end\n  \
+     fn tag(s : String) : String do s ++ \"/lower\" end\n  \
+     fn crate(s : String) : Crate do Crate(s) end\nend\n";
+  let entry = Filename.concat app "pre.march" in
+  write entry
+    "mod Pre do\n  fn go() : String do Upper.up() end\n  \
+     fn shown() : String do show(Lower.crate(\"x\")) end\nend\n";
+  let (out, code) =
+    run_repl_session ~args:("repl " ^ Filename.quote entry)
+      ~env_prefix:("MARCH_REPL_INTERP=1 MARCH_LIB_PATH="
+                   ^ Filename.quote (a ^ ":" ^ b))
+      [ "go()"; "shown()" ] in
+  Alcotest.(check int) ("REPL exit code; " ^ out) 0 code;
+  List.iter (fun needle ->
+      if not (contains ~needle out) then
+        Alcotest.failf "expected %S in the session, got:\n%s" needle out)
+    [ "= \"up/lower\""; "= \"Crate:x\"" ];
+  List.iter (fun needle ->
+      if contains ~needle out then
+        Alcotest.failf "unexpected %S in the session:\n%s" needle out)
+    [ "Unknown module"; "does not implement"; "cannot find" ]
 
 (* ── Stdlib-only builtins at the REPL ────────────────────────────────────
    The gate (Typecheck_builtins.stdlib_only) fires at name resolution, so the
@@ -1624,6 +1701,10 @@ let () =
         test_repl_session_fn_redefinition_orc;
       Alcotest.test_case "fn redefinition (interpreter)" `Quick
         test_repl_session_fn_redefinition_interp;
+      Alcotest.test_case "a preloaded file reaches MARCH_LIB_PATH modules (interpreter)" `Quick
+        test_repl_preload_lib_path_interp;
+      Alcotest.test_case "a loaded file's modules load in dependency order, impls too (interpreter)"
+        `Quick test_repl_preload_order_and_impls_interp;
       Alcotest.test_case "stdlib-only builtins rejected (interpreter)" `Quick
         test_repl_session_stdlib_only_interp;
       Alcotest.test_case "stdlib-only builtins rejected (clang JIT)" `Slow

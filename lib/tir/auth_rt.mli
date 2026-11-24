@@ -30,10 +30,31 @@ val frames :
 val restricts :
   Tir.tir_module -> sites:(string, Lower_state.restrict_site) Hashtbl.t -> Tir.tir_module * bool
 
+(** [grants m ~tbl] runs every fn of a granted dependency package ([tbl],
+    keyed by TIR fn name: normally [Lower.fn_grant_tbl]) under its
+    package's grant (ocap phase 6, plan decisions 6, 7 and 9).  A tagged fn
+    [f] becomes a wrapper that enters [ByGrant(<pkg>)] around [f$grant], its
+    original body, whose direct calls of its package's wrapped fns (not
+    those in a lambda it makes) target their [$grant] bodies; every other
+    call and every value use keeps the wrapper's name.  The wrapper is
+    dropped (the fn left as it was) when the grant carries no scope, the
+    fn is [fg_proven] and it reaches (through direct calls) no actor spawn,
+    no call of a function value and no unresolved interface-method call
+    (which mono may resolve to an impl outside the package).  A
+    module-initialiser lambda made in a tagged fn
+    ([Lower_state.is_module_init_lambda]) gets the grant's frame around its
+    own body; so does a named fn value in a tagged module-initialiser fn
+    whose call can depend on the authority, first turned into such a
+    lambda (an eta expansion).  Runs after [frames]; returns the module and whether any
+    grant frame was made: with an empty [tbl], [m] itself (physically) and
+    [false]. *)
+val grants :
+  Tir.tir_module -> tbl:(string, Lower_state.fn_grant) Hashtbl.t -> Tir.tir_module * bool
+
 (** [captures m ~has_frames ~repl]: a function value runs under the
     authority it was made under, not its caller's (design §5).  Runs right
-    after [frames], with [has_frames] true when [frames] or [restricts] kept
-    a frame.  The identity (physically [m]) when [not has_frames &&
+    after [grants], with [has_frames] true when [frames], [restricts] or
+    [grants] kept a frame.  The identity (physically [m]) when [not has_frames &&
     not repl]: with no frame every slot holds the launch authority, so a
     capture would change nothing.  Otherwise:
     - a lambda whose body reaches a capability operation, an actor spawn or

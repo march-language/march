@@ -265,6 +265,70 @@ let collect_lib_files dir =
   in
   walk [] dir
 
+(* ── Dependency grants: one module name, one side (ocap phase 6, Q2) ──────
+
+   Under a grants file ([March_caps.Dep_grants.active () <> []]) a module name
+   must be defined on one side only.  Each granted package is a side; code
+   under no granted root (the app and ungranted deps) is one side; the stdlib
+   is one side.  Otherwise the resolver's "first file wins" rule would let a
+   dependency's module silently replace an app or stdlib module (and run
+   ungranted as that code), or the reverse.  Two files on one side keep
+   today's behaviour, and with no grants nothing here runs at all, so a
+   grant-free build resolves exactly as before. *)
+
+(* The tag in the first field of a resolver error that is a
+   [dep_module_conflict] rather than an [import_unresolved]: two definitions
+   of one module name, or a granted library root nested in a directory of
+   the project's (whose tag carries the manifest position after the colon). *)
+let dep_module_conflict_tag = "<dep_module_conflict>"
+let dep_root_nested_prefix = "<dep_module_conflict:nested:"
+
+(* The manifest position a nested-root tag carries. *)
+let nested_tag_at tag =
+  let p = String.length dep_root_nested_prefix in
+  if String.length tag > p && String.sub tag 0 p = dep_root_nested_prefix then
+    Some (String.sub tag p (String.length tag - p - 1))
+  else None
+
+(** The diagnostic code of a [resolve_imports] error. *)
+let error_code ((tag, _, _) : string * March_ast.Ast.span * string) : string =
+  if tag = dep_module_conflict_tag || nested_tag_at tag <> None then
+    March_errors.Code.dep_module_conflict
+  else March_errors.Code.import_unresolved
+
+(** A [resolve_imports] error as a diagnostic, with its code (and, for a
+    [dep_module_conflict], the notes and hint that go with it). *)
+let diagnostic_of_error ((tag, span, msg) as e) : March_errors.Errors.diagnostic =
+  let code = error_code e in
+  let notes =
+    if tag = dep_module_conflict_tag then
+      [ "a module belongs to the package whose library root holds its file; \
+         with two definitions on different sides the build would keep one and \
+         silently drop the other";
+        "hint: rename one of the modules, or remove the copy that should not be built" ]
+    else match nested_tag_at tag with
+      | Some at ->
+        [ "granted at " ^ at;
+          "hint: move the dependency outside the project's directories, or drop its grant" ]
+      | None -> [] in
+  March_errors.Errors.make ~code ~notes ~span msg
+
+type side = Side_pkg of string | Side_none | Side_stdlib
+
+let describe_side = function
+  | Side_pkg p -> Printf.sprintf "package `%s`" p
+  | Side_none -> "outside any granted package"
+  | Side_stdlib -> "the standard library"
+
+let realpath_or p = try Unix.realpath p with Unix.Unix_error _ -> p
+
+(* [root] holds [p] (real paths). *)
+let path_within ~root p =
+  p = root
+  || (let pre = if root = "/" then "/" else root ^ "/" in
+      String.length p > String.length pre
+      && String.sub p 0 (String.length pre) = pre)
+
 (** Resolve cross-file imports and auto-discover project library files.
 
     Step 1 resolves explicit [import]/[alias] declarations from the entry
@@ -325,6 +389,50 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
   let loaded_srcs : (string * March_ast.Ast.decl list) list ref = ref [] in
   let errors : (string * March_ast.Ast.span * string) list ref = ref [] in
   let dummy_span = March_ast.Ast.dummy_span in
+  (* Dependency grants (see [error_code] above): which side each module name
+     was first defined on.  Every [claim] is a no-op without grants. *)
+  let grants = March_caps.Dep_grants.active () in
+  let grants_on = grants <> [] in
+  let stdlib_root =
+    lazy (Option.map realpath_or (March_modules.Module_registry.find_stdlib_dir ())) in
+  let side_of file =
+    let real = realpath_or file in
+    match Lazy.force stdlib_root with
+    | Some r when path_within ~root:r real -> Side_stdlib
+    | _ ->
+      (match March_caps.Dep_grants.package_of_file file with
+       | Some g -> Side_pkg g.March_caps.Dep_grants.g_pkg
+       | None -> Side_none)
+  in
+  (* A stdlib file as `stdlib/<path>`, so a message does not depend on where
+     the compiler is installed. *)
+  let stdlib_display p =
+    let real = realpath_or p in
+    match Lazy.force stdlib_root with
+    | Some r when path_within ~root:r real && real <> r ->
+      "stdlib/" ^ String.sub real (String.length r + 1) (String.length real - String.length r - 1)
+    | _ -> p
+  in
+  let claims : (string, string * side) Hashtbl.t = Hashtbl.create 16 in
+  let claim (name : March_ast.Ast.name) file =
+    if grants_on then begin
+      let mn = name.March_ast.Ast.txt in
+      let side = side_of file in
+      if not (Hashtbl.mem claims mn) then
+        (match March_modules.Module_registry.find_stdlib_file mn with
+         | Some p -> Hashtbl.add claims mn (stdlib_display p, Side_stdlib)
+         | None -> ());
+      match Hashtbl.find_opt claims mn with
+      | None -> Hashtbl.add claims mn (file, side)
+      | Some (f0, s0) ->
+        if s0 <> side && realpath_or f0 <> realpath_or file then
+          errors := (dep_module_conflict_tag, name.March_ast.Ast.span,
+                     Printf.sprintf
+                       "Module `%s` is defined twice under dependency grants: in `%s` (%s) \
+                        and in `%s` (%s)."
+                       mn f0 (describe_side s0) file (describe_side side)) :: !errors
+    end
+  in
   (* Pre-mark the entry file so auto-discovery never re-loads it.
      Canonicalise the path so that relative and absolute references to the
      same file are treated as identical (prevents the file being loaded a
@@ -333,6 +441,52 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
     (try Unix.realpath source_file with Unix.Unix_error _ -> source_file) in
   Hashtbl.add loaded_paths canonical_source ();
   note_user_file source_file canonical_source;
+  claim m.March_ast.Ast.mod_name source_file;
+  (* A granted library root inside the entry's source directory, or strictly
+     inside a library directory that belongs to no granted package (the
+     project's own lib/), would have its files discovered as the project's
+     own code too: refuse it. *)
+  if grants_on then begin
+    let src_real = realpath_or source_dir in
+    (* A real path under the current directory is shown relative to it. *)
+    let cwd = lazy (try Some (realpath_or (Sys.getcwd ())) with Sys_error _ -> None) in
+    let display_path p =
+      match Lazy.force cwd with
+      | Some c when p <> c && path_within ~root:c p ->
+        let pre = if c = "/" then 1 else String.length c + 1 in
+        String.sub p pre (String.length p - pre)
+      | _ -> p in
+    let in_some_root d =
+      List.exists (fun (g : March_caps.Dep_grants.grant) ->
+          path_within ~root:g.March_caps.Dep_grants.g_root d) grants in
+    List.iter (fun (g : March_caps.Dep_grants.grant) ->
+        let open March_caps.Dep_grants in
+        (* The manifest line when the manifest can be shown, else the entry
+           module (the note names the manifest position either way). *)
+        let span =
+          if Sys.file_exists g.g_manifest then
+            { March_ast.Ast.file = g.g_manifest; start_line = g.g_line; start_col = 0;
+              end_line = g.g_line; end_col = 0 }
+          else m.March_ast.Ast.mod_name.March_ast.Ast.span in
+        let tag = Printf.sprintf "%s%s:%d>" dep_root_nested_prefix g.g_manifest g.g_line in
+        let nested dir what =
+          errors := (tag, span,
+                     Printf.sprintf
+                       "The library root `%s` of package `%s` lies inside %s `%s`, so its \
+                        modules would also be built as code outside the package."
+                       (display_path g.g_root) g.g_pkg what dir) :: !errors in
+        if path_within ~root:src_real g.g_root then
+          nested (display_path src_real) "the entry's source directory"
+        else
+          match
+            List.find_opt (fun d ->
+                d <> g.g_root && path_within ~root:d g.g_root && not (in_some_root d))
+              (List.map realpath_or all_lib_paths)
+          with
+          | Some d -> nested (display_path d) "the library directory"
+          | None -> ())
+      grants
+  end;
 
   (* Does [path] declare `mod [mod_name]` at the start of a line?  A cheap
      textual check — enough to locate the file, which is then parsed
@@ -431,6 +585,7 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
                 errors := (mod_name, from_span, msg) :: !errors; []
               | Ok ast ->
                 let ast = March_desugar.Desugar.desugar_module ~is_entry:false ast in
+                claim ast.March_ast.Ast.mod_name file_path;
                 loaded_srcs := (src, ast.March_ast.Ast.mod_decls) :: !loaded_srcs;
                 (* Mark resolved BEFORE recursing so cycles don't duplicate. *)
                 Hashtbl.add resolved mod_name [];
@@ -650,6 +805,7 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
           else begin
             Hashtbl.add loaded_paths canon_fp ();
             note_user_file orig_path canon_fp;
+            claim ast.March_ast.Ast.mod_name orig_path;
             let mn = mod_name_of ast in
             if Hashtbl.mem resolved mn then []
             else begin

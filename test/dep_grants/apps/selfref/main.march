@@ -1,0 +1,8 @@
+mod Main do
+  needs IO.Console
+  fn main() do
+    let o = Selfref.own
+    let p = Selfref.Inner.parent
+    println(o("own") ++ " " ++ p("parent"))
+  end
+end

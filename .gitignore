@@ -78,6 +78,7 @@ __pycache__/
 !/bench/cpp/
 !/bench/tfb/
 !/bench/actors/
+!/bench/grant_enter_dep/
 !/bench/actors/*.march
 !/bench/interp/
 !/bench/interp/*.march

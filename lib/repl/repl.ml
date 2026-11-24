@@ -114,6 +114,26 @@ let user_scope eval_env tc_env result_h ~baseline_env =
   (scope, result_latest)
 
 (* Load a list of pre-desugared declarations into the eval/typecheck envs silently. *)
+(** The impls declared in the [DMod]s of [decls] (nested ones too),
+    registered in [tc_env] as [check_module]'s pass 1 registers them for a
+    whole program: [check_decl] of a [DMod] exports its names, types and
+    ctors but keeps its impls in the module's inner env.  Used for the
+    stdlib below, and for a module the REPL loads from a file once it has
+    checked (a library module's `impl Show(T)`, say), so a later input can
+    dispatch to it. *)
+let rec register_module_impls tc_env (decls : March_ast.Ast.decl list) =
+  let open March_ast.Ast in
+  List.fold_left (fun env d ->
+    match d with
+    | DMod (mname, _, inner, _) ->
+      let env = List.fold_left (fun e d -> match d with
+          | DImpl (idef, _) ->
+            March_typecheck.Typecheck.register_impl_shape e idef ~decl_module:mname.txt
+          | _ -> e) env inner in
+      register_module_impls env (List.filter (function DMod _ -> true | _ -> false) inner)
+    | _ -> env
+  ) tc_env decls
+
 (** Pre-register all DType definitions found inside stdlib DMod declarations.
     Without this pass, circular type dependencies between stdlib modules
     (e.g. http_server.march uses WsSocket from websocket.march, and vice versa)
@@ -156,18 +176,7 @@ let preregister_stdlib_types tc_env (stdlib_decls : March_ast.Ast.decl list) =
      `Eq`" (2026-11-18, specs/progress/2026-11-18-native-repl-quirks.md).
      After the types, which [register_impl_shape] consults to name an impl
      head's declaring module. *)
-  let rec add_impls env decls =
-    List.fold_left (fun env d ->
-      match d with
-      | DMod (mname, _, inner, _) ->
-        let env = List.fold_left (fun e d -> match d with
-            | DImpl (idef, _) -> register_impl_shape e idef ~decl_module:mname.txt
-            | _ -> e) env inner in
-        add_impls env (List.filter (function DMod _ -> true | _ -> false) inner)
-      | _ -> env
-    ) env decls
-  in
-  add_impls (add_from tc_env stdlib_decls) stdlib_decls
+  register_module_impls (add_from tc_env stdlib_decls) stdlib_decls
 
 let load_decls_into_env env tc_env decls =
   let (env_final, tc_final) = List.fold_left (fun (e, tc) decl ->
@@ -494,6 +503,24 @@ let repl_check_caps ~stdlib_decls ~(prior_mods : March_ast.Ast.decl list) ~src
   | _ -> ()
 
 (** Non-TUI fallback REPL. *)
+(* Load the declarations of a loaded file (its own and the modules its
+   import resolution pulled in, library modules from MARCH_LIB_PATH among
+   them) one at a time, as the REPL checks every input.  The batch driver
+   checks them as one module, so their order there does not matter; here a
+   module checked before one it calls ("Unknown module") fails although
+   the program is fine.  So a declaration that fails is retried after the
+   others, as long as a pass loads at least one more; what still fails then
+   reports its diagnostics, in the file's order.  [load d] loads [d] and
+   returns [None], or returns [Some report] without changing any state. *)
+let load_in_dependency_order (decls : 'd list) (load : 'd -> (unit -> unit) option) : unit =
+  let rec pass pending =
+    let failed = List.filter_map (fun d -> Option.map (fun r -> (d, r)) (load d)) pending in
+    if failed = [] then ()
+    else if List.length failed < List.length pending then pass (List.map fst failed)
+    else List.iter (fun (_, report) -> report ()) failed
+  in
+  pass decls
+
 let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx=(None : March_jit.Repl_jit.t option)) ?(preload_file=None) () =
   let use_jit = jit_ctx <> None &&
     Sys.getenv_opt "MARCH_REPL_INTERP" = None in
@@ -577,15 +604,18 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
 
   (* Load a file path into env/tc_env, printing any errors to stderr. *)
   let load_decls_list path all_decls =
-    List.iter (fun decl ->
+    load_in_dependency_order all_decls (fun decl ->
       let input_ctx = March_errors.Errors.create () in
       let input_tc  = { !tc_env with errors = input_ctx } in
       let new_tc    = March_typecheck.Typecheck.check_decl input_tc decl in
-      if not (March_errors.Errors.has_errors input_ctx) then begin
+      if March_errors.Errors.has_errors input_ctx then
+        Some (fun () -> List.iter print_diag (March_errors.Errors.sorted input_ctx))
+      else begin
         (try
           env    := March_eval.Eval.eval_decl !env decl;
           March_eval.Eval.install_global_tail !env;
-          tc_env := { new_tc with errors = March_errors.Errors.create () };
+          tc_env := register_module_impls
+              { new_tc with errors = March_errors.Errors.create () } [ decl ];
           (* Register DMod functions in the JIT dylib so ORC can resolve
              module-qualified names (Counter.create etc.) in later fragments.
              Uses input_tc (the env before the DMod) to avoid double-definition. *)
@@ -596,10 +626,9 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                 Printf.eprintf "jit: module registration: %s\n%!" (Printexc.to_string exn))
            | _ -> ())
         with exn ->
-          Printf.eprintf "runtime error loading %s: %s\n%!" path (Printexc.to_string exn))
-      end else
-        List.iter print_diag (March_errors.Errors.sorted input_ctx)
-    ) all_decls
+          Printf.eprintf "runtime error loading %s: %s\n%!" path (Printexc.to_string exn));
+        None
+      end)
   in
 
   let parse_file path =
@@ -626,7 +655,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
       | None -> None
       | Some desugared ->
         let (import_errs, extra_decls, _user_files) =
-          March_resolver.Resolver.resolve_imports ~auto_discover:false ~source_file:path desugared in
+          March_resolver.Resolver.resolve_imports ~source_file:path desugared in
         List.iter (fun (_, span, msg) ->
           Printf.eprintf "%s:%d: import error: %s\n%!"
             span.March_ast.Ast.file span.March_ast.Ast.start_line msg
@@ -1475,27 +1504,30 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
   in
 
   let tui_load_decls_list path all_decls =
-    List.iter (fun decl ->
+    load_in_dependency_order all_decls (fun decl ->
       let input_ctx = March_errors.Errors.create () in
       let input_tc  = { !tc_env with errors = input_ctx } in
       let new_tc    = March_typecheck.Typecheck.check_decl input_tc decl in
-      if not (March_errors.Errors.has_errors input_ctx) then begin
+      if March_errors.Errors.has_errors input_ctx then
+        Some (fun () ->
+          List.iter (fun (d : March_errors.Errors.diagnostic) ->
+            add_line Notty.A.(fg red)
+              (Printf.sprintf "error: %s" d.message)
+          ) (March_errors.Errors.sorted input_ctx))
+      else begin
         (try
           env := March_eval.Eval.eval_decl !env decl;
           March_eval.Eval.install_global_tail !env;
-          tc_env := { new_tc with errors = March_errors.Errors.create () };
+          tc_env := register_module_impls
+              { new_tc with errors = March_errors.Errors.create () } [ decl ];
           (match jit_ctx, decl with
            | Some jit, March_ast.Ast.DMod _ ->
              (try March_jit.Repl_jit.register_module_decl jit ~tc_env:input_tc decl
               with _ -> ())
            | _ -> ())
-        with _ -> ())
-      end else
-        List.iter (fun (d : March_errors.Errors.diagnostic) ->
-          add_line Notty.A.(fg red)
-            (Printf.sprintf "error: %s" d.message)
-        ) (March_errors.Errors.sorted input_ctx)
-    ) all_decls;
+        with _ -> ());
+        None
+      end);
     ignore path
   in
 
@@ -1521,7 +1553,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
       | None -> None
       | Some desugared ->
         let (_, extra_decls, _) =
-          March_resolver.Resolver.resolve_imports ~auto_discover:false ~source_file:path desugared in
+          March_resolver.Resolver.resolve_imports ~source_file:path desugared in
         Some (desugared, extra_decls))
   in
 
@@ -2270,7 +2302,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                | None -> ()
                | Some desugared ->
                  let (_, extra_decls, _) =
-                   March_resolver.Resolver.resolve_imports ~auto_discover:false ~source_file:path desugared in
+                   March_resolver.Resolver.resolve_imports ~source_file:path desugared in
                  let file_mod =
                    March_ast.Ast.DMod (
                      desugared.March_ast.Ast.mod_name,
@@ -2278,23 +2310,9 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                      desugared.March_ast.Ast.mod_decls,
                      March_ast.Ast.dummy_span)
                  in
-                 let all_decls = extra_decls @ [file_mod] in
-                 List.iter (fun decl ->
-                   let input_ctx = March_errors.Errors.create () in
-                   let input_tc  = { !tc_env with errors = input_ctx } in
-                   let new_tc    = March_typecheck.Typecheck.check_decl input_tc decl in
-                   if not (March_errors.Errors.has_errors input_ctx) then begin
-                     (try
-                       env := March_eval.Eval.eval_decl !env decl;
-                       March_eval.Eval.install_global_tail !env;
-                       tc_env := { new_tc with errors = March_errors.Errors.create () }
-                     with _ -> ())
-                   end else
-                     List.iter (fun (d : March_errors.Errors.diagnostic) ->
-                       add_line Notty.A.(fg red)
-                         (Printf.sprintf "error: %s" d.message)
-                     ) (March_errors.Errors.sorted input_ctx)
-                 ) all_decls;
+                 (* The same loader as the first load: dependency order,
+                    module impls registered. *)
+                 tui_load_decls_list path (extra_decls @ [file_mod]);
                  add_line Notty.A.(fg green) (Printf.sprintf "reloaded %s" path))))
         | src when (let t = String.trim src in
                       (String.length t >= 8 && String.sub t 0 8 = ":inspect")

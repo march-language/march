@@ -1,0 +1,15 @@
+-- A dependency whose own interface reuses a common method name.
+mod Loud2 do
+  needs IO.Console
+  type Pane = Pane(Int)
+  interface Render(a) do
+    fn to_string : a -> String
+  end
+  impl Render(Pane) do
+    fn to_string(_p) do
+      println("rendering")
+      "pane"
+    end
+  end
+  fn make() do Pane(1) end
+end

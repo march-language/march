@@ -1,0 +1,24 @@
+-- DEP: relay deps/relay IO.FileRead("/srv/")
+-- DEP: gate deps/gate none
+-- A transitive dependency reached by direct calls from a granted one runs
+-- under that grant (design §10): `relay` is granted, `gate` is not, and
+-- `gate`'s probe, reached through `relay`, is refused by the grant to
+-- `relay`. The app calling `gate` directly is not limited by `relay`'s grant.
+mod GrantTransitiveInherits do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn through_relay(p : String) : String do
+    Relay.via_gate(p)
+  end
+
+  fn direct(p : String) : String do
+    Gate.check_path(p)
+  end
+
+  fn main() do
+    println(through_relay("/srv/x"))
+    println(through_relay("/etc/hosts"))
+    println(direct("/etc/hosts"))
+  end
+end

@@ -88,12 +88,12 @@ case $f1034 of
   $Tuple2($f1035, $f1036) -> dec_rc $f1034;
 let rest : '_ = $f1036 in
 let ms : '_ = $f1035 in
-let $t1031 : '_ = let $t1030 : '_ = let $rc_143 : '_ = string_join(ms, ",") in
+let $t1031 : '_ = let $t1030 : '_ = let $rc_147 : '_ = string_join(ms, ",") in
 dec_rc ms;
-$rc_143 in
-let $rc_142 : '_ = ++("methods=", $t1030) in
+$rc_147 in
+let $rc_146 : '_ = ++("methods=", $t1030) in
 dec_rc $t1030;
-$rc_142 in
+$rc_146 in
 let $t1032 : ('_, '_) = ($t1031, rest) in
 alloc Ok($t1032)
   _ -> dec_rc $f1034;
@@ -109,14 +109,14 @@ alloc Err($t1041)
 fn List.max_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f1747, $f1748) -> let r : '_ = $f1748 in
-let x : '_ = $f1747 in
-let $t1746 : '_ = >(x, m) in
-case $t1746 of
-  True() -> dec_rc $t1746;
+  Cons($f1822, $f1823) -> let r : '_ = $f1823 in
+let x : '_ = $f1822 in
+let $t1821 : '_ = >(x, m) in
+case $t1821 of
+  True() -> dec_rc $t1821;
 inc_rc x;
 List.max_onto(r, x)
-  _ -> dec_rc $t1746;
+  _ -> dec_rc $t1821;
 List.max_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
 
@@ -125,8 +125,8 @@ fn List.maximum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1209, 18, 55);
 panic("List.maximum_int: empty list")
-  Cons($f1740, $f1741) -> let t : '_ = $f1741 in
-let h : '_ = $f1740 in
+  Cons($f1815, $f1816) -> let t : '_ = $f1816 in
+let h : '_ = $f1815 in
 inc_rc h;
 List.max_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
@@ -135,14 +135,14 @@ List.max_onto(t, h)
 fn List.min_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f1734, $f1735) -> let r : '_ = $f1735 in
-let x : '_ = $f1734 in
-let $t1733 : '_ = <(x, m) in
-case $t1733 of
-  True() -> dec_rc $t1733;
+  Cons($f1809, $f1810) -> let r : '_ = $f1810 in
+let x : '_ = $f1809 in
+let $t1808 : '_ = <(x, m) in
+case $t1808 of
+  True() -> dec_rc $t1808;
 inc_rc x;
 List.min_onto(r, x)
-  _ -> dec_rc $t1733;
+  _ -> dec_rc $t1808;
 List.min_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
 
@@ -151,8 +151,8 @@ fn List.minimum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1186, 18, 55);
 panic("List.minimum_int: empty list")
-  Cons($f1727, $f1728) -> let t : '_ = $f1728 in
-let h : '_ = $f1727 in
+  Cons($f1802, $f1803) -> let t : '_ = $f1803 in
+let h : '_ = $f1802 in
 inc_rc h;
 List.min_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
@@ -165,11 +165,11 @@ fn List.product_int(xs : List(Int)) : Int =
 fn List.product_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f1721, $f1722) -> let t : '_ = $f1722 in
-let x : '_ = $f1721 in
-let $t1720 : '_ = inc_rc x;
+  Cons($f1796, $f1797) -> let t : '_ = $f1797 in
+let x : '_ = $f1796 in
+let $t1795 : '_ = inc_rc x;
 *(acc, x) in
-List.product_onto(t, $t1720)
+List.product_onto(t, $t1795)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.range
@@ -226,15 +226,15 @@ List.range_step_go$dps(next, stop, step, $trmc7)
 
 ## List.spawn_allowed
 fn List.spawn_allowed() : Bool =
-  let $t1378 : '_ = Authority.check("IO.Spawn", "") in
-case $t1378 of
-  Ok($f1379) -> dec_rc $t1378;
-dec_rc $f1379;
+  let $t1453 : '_ = Authority.check("IO.Spawn", "") in
+case $t1453 of
+  Ok($f1454) -> dec_rc $t1453;
+dec_rc $f1454;
 true
-  Err($f1380) -> dec_rc $t1378;
-dec_rc $f1380;
+  Err($f1455) -> dec_rc $t1453;
+dec_rc $f1455;
 false
-  _ -> dec_rc $t1378;
+  _ -> dec_rc $t1453;
 panic("non-exhaustive pattern match")
 
 ## List.sum_int
@@ -245,11 +245,11 @@ fn List.sum_int(xs : List(Int)) : Int =
 fn List.sum_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f1714, $f1715) -> let t : '_ = $f1715 in
-let x : '_ = $f1714 in
-let $t1713 : '_ = inc_rc x;
+  Cons($f1789, $f1790) -> let t : '_ = $f1790 in
+let x : '_ = $f1789 in
+let $t1788 : '_ = inc_rc x;
 +(acc, x) in
-List.sum_onto(t, $t1713)
+List.sum_onto(t, $t1788)
   _ -> panic("non-exhaustive pattern match")
 
 ## ascending
@@ -324,20 +324,20 @@ call_ptr go$dps($t6, $trmc4)
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t1772 : String = let $t1771 : List(Int) = ascending(0, 5) in
-let $rc_141 : String = List.sum_int($t1771) in
-dec_rc $t1771;
-$rc_141 in
-let $rc_140 : () = println($t1772) in
-dec_rc $t1772;
-$rc_140;
-let $t1774 : String = let $t1773 : List(Int) = squares(5) in
-let $rc_139 : String = List.sum_int($t1773) in
-dec_rc $t1773;
-$rc_139 in
-let $rc_138 : () = println($t1774) in
-dec_rc $t1774;
-$rc_138
+  let $t1847 : String = let $t1846 : List(Int) = ascending(0, 5) in
+let $rc_145 : String = List.sum_int($t1846) in
+dec_rc $t1846;
+$rc_145 in
+let $rc_144 : () = println($t1847) in
+dec_rc $t1847;
+$rc_144;
+let $t1849 : String = let $t1848 : List(Int) = squares(5) in
+let $rc_143 : String = List.sum_int($t1848) in
+dec_rc $t1848;
+$rc_143 in
+let $rc_142 : () = println($t1849) in
+dec_rc $t1849;
+$rc_142
 
 ## squares
 fn squares(n : Int) : List(Int) =

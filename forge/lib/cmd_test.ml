@@ -154,7 +154,13 @@ let invoke_march_interp ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="
     [lib_path_env] is prefixed with the resolved toolchain's PATH (project
     .march-version pin, else global) — same as [Cmd_build.lib_path_env] —
     so the bare `march` invoked below resolves to the pinned version instead
-    of whatever `march` happens to be ambient on PATH. *)
+    of whatever `march` happens to be ambient on PATH.
+
+    The fourth element is the prefix that goes before [MARCH_LIB_PATH=]: the
+    toolchain's PATH entry and, when the project grants a dep in the test
+    scope, [MARCH_DEP_GRANTS] (see {!Cmd_build.dep_grants_env}).  A caller
+    that rebuilds MARCH_LIB_PATH (test/ appended, or src/) puts it in front,
+    so the grants hold there too. *)
 let project_env proj =
   let lib_dir    = Filename.concat proj.Project.root "lib" in
   let config_dir = Filename.concat proj.Project.root "config" in
@@ -183,8 +189,11 @@ let project_env proj =
     @ (if Sys.file_exists config_dir then [config_dir] else [])
   in
   let toolchain_pfx = match Toolchain.path_prefix () with Ok p -> p | Error _ -> "" in
+  let env_pfx =
+    toolchain_pfx
+    ^ Cmd_build.dep_grants_env ~scope:test_scope_deps ~lib_paths:all_lib_paths proj in
   let lib_path_env =
-    Printf.sprintf "%sMARCH_LIB_PATH=%s " toolchain_pfx (String.concat ":" all_lib_paths) in
+    Printf.sprintf "%sMARCH_LIB_PATH=%s " env_pfx (String.concat ":" all_lib_paths) in
   (* Test binary goes in .march/build/test/ — same CAS root as forge build. *)
   let test_build_dir =
     Filename.concat proj.Project.root
@@ -192,7 +201,7 @@ let project_env proj =
   in
   Project.mkdir_p test_build_dir;
   let output = Filename.concat test_build_dir (proj.Project.name ^ "_test") in
-  (lib_path_env, output, all_lib_paths, toolchain_pfx)
+  (lib_path_env, output, all_lib_paths, env_pfx)
 
 (** [--reflection-parity] (refinement reflection §9.2, D16, opt-in): the
     parity net over the project's reflected functions.  Each source file of
@@ -338,7 +347,7 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
             proj with
     | Error e -> Error e
     | Ok () ->
-    let (lib_path_env, output, all_lib_paths, toolchain_pfx) = project_env proj in
+    let (lib_path_env, output, all_lib_paths, env_pfx) = project_env proj in
     let with_parity r =
       match r with
       | Ok () when reflection_parity ->
@@ -386,7 +395,7 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
                   different record shape then fails to unify.
                   Use the full computed path (deps + every lib/ subdirectory)
                   so modules grouped into subfolders resolve. *)
-               toolchain_pfx
+               env_pfx
                (String.concat ":" all_lib_paths)
                test_dir
         else lib_path_env

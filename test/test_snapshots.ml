@@ -239,7 +239,9 @@ let lower_framed src =
   let tir, restricts_kept =
     March_tir.Auth_rt.restricts tir ~sites:March_tir.Lower.restrict_sites in
   let tir, frames_kept = March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
-  March_tir.Auth_rt.captures tir ~has_frames:(frames_kept || restricts_kept) ~repl:false
+  let tir, grants_kept = March_tir.Auth_rt.grants tir ~tbl:March_tir.Lower.fn_grant_tbl in
+  March_tir.Auth_rt.captures tir ~has_frames:(frames_kept || restricts_kept || grants_kept)
+    ~repl:false
 
 let dump_post_lower src =
   render_module (verified "tir-lower" (lower_framed src))

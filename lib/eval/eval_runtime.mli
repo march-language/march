@@ -82,6 +82,11 @@ val cap_nil : value
 val cap_slot : value ref
 val with_actor_authority : value -> (unit -> 'a) -> 'a
 
+(** ocap phase 6: the authority an actor of this definition is spawned under (the
+    spawner's, intersected with the grant for a granted package's actor).
+    [Eval] installs it; the default is the spawner's authority. *)
+val spawn_authority_hook : (March_ast.Ast.actor_def -> value) ref
+
 type actor_inst = {
   ai_name : string;
   ai_def : March_ast.Ast.actor_def;

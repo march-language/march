@@ -590,6 +590,52 @@ let test_unscoped () =
         [ ("", "layers 0 raw 0\n"); ("MARCH_GRANT=IO.Console", "layers 1 raw 1\n") ] outs)
     (run_modes ~src:unscoped_src ~envs:[ ""; "MARCH_GRANT=IO.Console" ])
 
+(* ocap phase 6: a dependency grant's frame (Authority.enter_grant) is not
+   pushed again while the same grant (limit and text) is anywhere in the
+   layer list, so recursion in and out of a granted package keeps the list
+   bounded; any other grant is pushed. Every runtime gives the same answer. *)
+let grant_src = {|mod GrantFixture do
+  needs IO
+  fn show(r : Result((), CapError)) : String do
+    match r do
+    Ok(_) -> "ok"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+  fn n() : String do int_to_string(List.length(cap_layers())) end
+  fn main() needs IO.Console do
+    let n0 = n()
+    let r1 = Authority.enter_grant(Authority.grant_layer("weather", "IO.Console"))
+    let n1 = n()
+    let r2 = Authority.enter_fn(Authority.frame_layer("Weather.get", "IO"))
+    let r3 = Authority.enter_fn(Authority.frame_layer("App.cb", "IO.Console, IO.Clock"))
+    let n3 = n()
+    let r4 = Authority.enter_grant(Authority.grant_layer("weather", "IO.Console"))
+    let n4 = n()
+    let clock = show(Authority.check("IO.Clock", ""))
+    let r5 = Authority.enter_grant(Authority.grant_layer("weather", "IO.Clock"))
+    let n5 = n()
+    cap_restore(r5)
+    cap_restore(r4)
+    let n4b = n()
+    cap_restore(r3)
+    cap_restore(r2)
+    cap_restore(r1)
+    println(n0 ++ " " ++ n1 ++ " " ++ n3 ++ " " ++ n4 ++ " " ++ n5 ++ " " ++ n4b ++ " " ++ n())
+    println(clock)
+    println(show(Authority.check("IO.Clock", "")))
+  end
+end
+|}
+
+let test_enter_grant () =
+  List.iter (fun (mode, outs) ->
+      List.iter (fun got ->
+          Alcotest.(check string) mode
+            "0 1 3 3 4 3 0\nIO.Clock refused by the grant to package weather (IO.Console)\nok\n" got)
+        outs)
+    (run_modes ~src:grant_src ~envs:[ "" ])
+
 (* A relative target is resolved against the current directory (cap_cwd)
    in every runtime.  The fixture's cwd is a
    fresh temp dir, so the frame's scope is built from it at run time. *)
@@ -1020,6 +1066,7 @@ let tests =
         Alcotest.test_case "an unscoped launch with no grant sets nothing" `Quick
           test_unscoped;
         Alcotest.test_case "relative targets resolve against the cwd" `Quick test_cwd;
+        Alcotest.test_case "enter_grant pushes a grant once" `Quick test_enter_grant;
         Alcotest.test_case "an unreadable cwd refuses a relative target" `Quick
           test_gone_cwd ] );
     ( "launch_entry",

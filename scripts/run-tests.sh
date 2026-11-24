@@ -17,7 +17,8 @@
 #
 # Suites: compiler, eval, codegen, stdlib, stdlib_march, test_jit, lsp, utf16,
 # errors (the golden rendered-diagnostic corpus, test/errors/),
-# jsonrpc, incremental, query_cli, refinecheck.  The first four are
+# jsonrpc, incremental, query_cli, refinecheck, dep_grants (the dependency-grants
+# loader, test/run_dep_grants.exe).  The first four are
 # test/run_<name>.exe; stdlib_march is test/test_stdlib_march.exe, which runs
 # the .march test files under test/stdlib/; test_jit is test/test_jit.exe,
 # which drives the REPL JIT / `march --jit` as subprocesses of a freshly built
@@ -114,7 +115,7 @@ fi
 # live under lsp/test/, not test/, so the exe path is per-runner from here on.
 ALL_RUNNERS=(run_compiler run_eval run_codegen run_stdlib test_stdlib_march test_jit
              test_lsp test_utf16 test_jsonrpc test_incremental test_query_cli test_refinecheck
-             run_errors run_test_reports run_cap_conformance run_authority)
+             run_errors run_test_reports run_cap_conformance run_authority run_dep_grants)
 # Suites whose executable is lsp/test/<name>.exe rather than test/<name>.exe.
 LSP_RUNNERS=(test_lsp test_utf16 test_jsonrpc test_incremental test_query_cli)
 # Runners excluded from the DEFAULT (no suite names given) set under -q; see
@@ -207,6 +208,10 @@ for r in "${RUNNERS[@]}"; do
   # fail with Unix.ENOENT on create_process, which reads like a broken server
   # rather than a missing build target.
   [[ "$r" == "test_jsonrpc" ]] && BUILD_TARGETS+=("lsp/bin/main.exe")
+  # run_dep_grants' "forge" group runs the real forge (`forge build` of a
+  # granted project); its dune stanza depends on it, building the exe alone
+  # does not.
+  [[ "$r" == "run_dep_grants" ]] && BUILD_TARGETS+=("forge/bin/main.exe")
 done
 if [[ -n "${MARCH_TEST_SKIP_BUILD:-}" ]]; then
   echo "(skipped: MARCH_TEST_SKIP_BUILD set)"

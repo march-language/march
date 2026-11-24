@@ -21,3 +21,13 @@ is checked at compile time by kind only (`cap_restrict`, the `Restrict_block` bo
 (`ByRestrict`), not reported. Run the same literal-target checks over the block's own body and
 the direct calls it reaches, against the restrict's scopes, and report them naming the restrict
 (`the restrict at <file>:<line>`). A computed restrict stays run-time only (design §8).
+
+**Built for dependency grants 2026-11-22 (ocap phase 6, specs/plans/2026-11-22-ocap-p6-grants-plan.md,
+Q3 and decision 14).** `lib/typecheck/scoped_literal_check.ml` is the helper this item asks
+for, written to take any scoped bound: literal hosts (a literal URL or a literal-prefix `++` at
+the network entry points, judged with `Host_scope`), literal paths (`Cap_scope.within`) and
+literal names (`Name_scope.admits`), definite violations only. Only `Typecheck.check_dep_grants`
+calls it today, reporting `dep_grant_scope`. Turning it on for a scoped function `needs` clause
+and a literal `restrict` is a call per bound point with its own diagnostic, plus the
+error-corpus churn of the programs it newly rejects; this item stays open for that. Its URL
+entry-point list is hand-written (`specs/todos/2026-11-23-grant-url-entry-points-hardcoded.md`).

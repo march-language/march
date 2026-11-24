@@ -1,0 +1,9 @@
+-- A granted dependency defines a module the standard library defines.
+-- DEP: weather deps/dep_module_conflict_2/weather ()
+mod Main do
+  needs IO.Console
+
+  fn main() do
+    println(Csv.hello())
+  end
+end

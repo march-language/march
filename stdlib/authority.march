@@ -1251,4 +1251,95 @@ mod Authority do
     end
   end
 
+  -- ── Dependency grants (ocap phase 6) ────────────────────────────────
+  -- (at the end of the module, so no existing line moves: panic sites
+  -- carry line numbers)
+
+  doc """
+  The layer of the grant to dependency package `pkg`, whose grant (as the
+  consumer's `forge.toml` writes it, in `needs` syntax) is `text`: the text
+  parsed into scopes. The compiler validated the text, so a parse failure
+  is an internal error.
+
+  ## Examples
+
+      march> Authority.grant_layer("weather", "IO.Console")
+      Layer(ByGrant("weather"), "IO.Console", [CapEntry("IO.Console", Any)])
+  """
+  fn grant_layer(pkg : String, text : String) : Layer do
+    match parse(text) do
+    Ok(scopes) -> Layer(ByGrant(pkg), text, scopes)
+    Err(e) -> panic("internal: the grant to package " ++ pkg ++ " is not a scope list: " ++ e)
+    end
+  end
+
+  doc """
+  Enters a dependency grant's frame (`layer`, from `grant_layer`) and
+  returns the authority to restore on leaving it. Unlike `enter_fn`, the
+  layer is not pushed when the same grant (the same limit and scope text)
+  is anywhere in the current list, not only on top: intersection is
+  idempotent, so the answer is the same, and recursion in and out of a
+  granted package (which interleaves function frames) keeps the list from
+  growing.
+  """
+  @[stdlib_internal]
+  -- The result is a CapAuthRef, as for `enter_fn`.
+  fn enter_grant(layer : Layer) do
+    if has_layer(cap_layers(), layer) do cap_save()
+    else cap_push(layer) end
+  end
+
+  doc """
+  Whether `layers` holds a layer with the same limit and scope text as
+  `layer` (its parsed scopes are not compared: the text determines them).
+
+  ## Examples
+
+      march> Authority.has_layer([Authority.grant_layer("weather", "IO.Console")], Authority.grant_layer("weather", "IO.Console"))
+      true
+      march> Authority.has_layer([Authority.frame_layer("f", "IO.Console")], Authority.grant_layer("weather", "IO.Console"))
+      false
+  """
+  fn has_layer(layers : List(Layer), layer : Layer) : Bool do
+    match layers do
+    Nil -> false
+    Cons(Layer(l, t, _), rest) ->
+      match layer do
+      Layer(limit, text, _) -> if l == limit && t == text do true else has_layer(rest, layer) end
+      end
+    end
+  end
+
+  doc """
+  Refuses a call of C code (an `extern`) made under a dependency grant
+  that does not admit `IO.Foreign`: panics with `describe` of the refusal
+  (an extern returns a plain value, so its refusal cannot be an `Err`).
+  Only a grant's layer refuses: a function's `needs`, a `restrict` and the
+  launch grant leave externs to the static checks, as before. The compiler
+  puts a call of this in front of every extern call of a program built under
+  grants (lib/tir/auth_rt.ml, `grants`); the interpreter calls it before an
+  extern once a grant frame exists.
+  """
+  @[stdlib_internal]
+  fn foreign_guard() : () do
+    if cap_check_raw("IO.Foreign", "") == 0 do ()
+    else
+      match grant_refusal(cap_layers()) do
+      None -> ()
+      Some(e) -> panic("capability refused: " ++ describe(e))
+      end
+    end
+  end
+
+  -- The innermost grant layer that does not admit `IO.Foreign`.
+  pfn grant_refusal(layers : List(Layer)) : Option(CapError) do
+    match layers do
+    Nil -> None
+    Cons(Layer(ByGrant(p), text, scopes), rest) ->
+      if admits(scopes, "IO.Foreign", "", "/") do grant_refusal(rest)
+      else Some(CapError("IO.Foreign", "", ByGrant(p), text)) end
+    Cons(_, rest) -> grant_refusal(rest)
+    end
+  end
+
 end

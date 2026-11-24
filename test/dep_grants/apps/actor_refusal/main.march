@@ -1,0 +1,15 @@
+mod Main do
+  needs IO.Console, IO.FileRead, IO.Spawn
+
+  fn main() do
+    let w = spawn(Prober.Worker)
+    match Actor.call(w, Prober.ProbeReq, 5000) do
+    Ok(s) -> println(s)
+    Err(e) -> println("call failed: " ++ e)
+    end
+    match Authority.check("IO.FileRead", "/etc/hosts") do
+    Ok(_) -> println("main: allowed")
+    Err(e) -> println(Authority.describe(e))
+    end
+  end
+end
