@@ -48,8 +48,8 @@ mod CapMockSupervisedNested do
 
   fn field_pid(intro : Cap(Actor.Introspect), p, name) do
     match get_actor_field(p, name) do
-      None    -> Actor.pid_from_int(intro, -1)
-      Some(n) -> Actor.pid_from_int(intro, n)
+      None    -> Authority.must(Actor.pid_from_int(-1))
+      Some(n) -> Authority.must(Actor.pid_from_int(n))
     end
   end
 
@@ -57,7 +57,7 @@ mod CapMockSupervisedNested do
   fn leaf_of(intro : Cap(Actor.Introspect), top) do field_pid(intro, mid_of(intro, top), "l") end
 
   fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+    let intro = Authority.must(Actor.introspect())
     let outside = spawn(Top)
     mock IO.Console with { print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) } do
       let inside = spawn(Top)

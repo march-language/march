@@ -447,6 +447,8 @@ let extern_borrow_table : (string * bool list) list = [
   ("cap_restore",          [false]);
   ("cap_push",             [false]);
   ("cap_enter",            [true]);
+  (* ocap phase 7: the registry takes its own reference to the handler. *)
+  ("mock_register",        [true]);
   ("cap_launch_fail",      [true]);
   ("cap_rt_parse",         [true]);
   ("cap_rt_admits",        [true; true; true; true]);

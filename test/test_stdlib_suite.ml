@@ -1261,10 +1261,10 @@ let test_eval_pid_to_int_roundtrip () =
       on Noop() do { x: state.x } end
     end
     fn main(io : Cap(IO)) do
-      let intro = Actor.introspect(io)
+      let intro = Authority.must(Actor.introspect())
       let pa = spawn(A)
       let n = pid_to_int(pa)
-      let back = Actor.pid_from_int(intro, n)
+      let back = Authority.must(Actor.pid_from_int(n))
       (n, to_string(pa) == "Pid(" ++ int_to_string(n) ++ ")", is_alive(back))
     end
   end|} in

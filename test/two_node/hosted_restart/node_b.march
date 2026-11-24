@@ -64,13 +64,13 @@ mod HostedRestartNodeB do
 
   pfn child(intro : Cap(Actor.Introspect), sup, field : String) do
     match get_actor_field(sup, field) do
-      Some(n) -> Actor.pid_from_int(intro, n)
+      Some(n) -> Authority.must(Actor.pid_from_int(n))
       None    -> panic("hosted_restart: no child " ++ field)
     end
   end
 
   fn main(c : Cap(IO)) do
-    let intro = Actor.introspect(c)
+    let intro = Authority.must(Actor.introspect())
     println("node-b: up")
     let sup = spawn(ConsSup)
     let pc = child(intro, sup, "cons")

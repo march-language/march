@@ -15,11 +15,11 @@ mod IntrospectForwarded do
   end
 
   fn probe(c : Cap(Actor.Introspect), idx : Int) : Bool do
-    is_alive(Actor.pid_from_int(c, idx))
+    is_alive(Authority.must(Actor.pid_from_int(idx)))
   end
 
   fn main(io : Cap(IO)) do
-    let c = Actor.introspect(io)
+    let c = Authority.must(Actor.introspect())
     let pid = spawn(Counter)
     let _ = Actor.register(pid, "counter")
     let names = List.length(Actor.registered(c))

@@ -3003,7 +3003,11 @@ let rec infer_expr env (e : Ast.expr) : ty =
          "I cannot find `root_cap`", and so the inferred type below stays
          [Cap(IO)] and no cascade of unification failures follows a single
          mistake) — only naming it is refused. *)
-      if name.txt = "root_cap" && not env.root_cap_allowed then
+      (* The stdlib may name [root_cap] (ocap phase 7): the checked mints of
+         the non-IO capabilities ([Actor.introspect], [Session.attach], ...)
+         mint from it after their own [Authority.check]. *)
+      if name.txt = "root_cap" && not env.root_cap_allowed
+         && not (span_is_stdlib name.span) then
         Err.error ~code:Err.Code.root_cap_reference env.errors ~span:name.span
           (render_parts [
             MPCode "root_cap";
@@ -10299,7 +10303,7 @@ let check_restrict_reach ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (
   List.iter
     (fun (_, where, (fb : fn_bound), ro) ->
        let covered c = List.exists (fun b -> cap_subsumes b c) fb.fb_caps in
-       let outside c = cap_subsumes "IO" c && not (covered c) in
+       let outside c = March_caps.Cap_lattice.is_authority c && not (covered c) in
        let prefix = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes ro.ro_owner in
        let row_of r =
          match Hashtbl.find_opt rows (prefix ^ r) with
@@ -10382,7 +10386,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
   let violates bound (row : March_caps.Cap_rows.row) =
     (row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound))
     || List.exists
-         (fun c -> cap_subsumes "IO" c && not (List.exists (fun b -> cap_subsumes b c) bound))
+         (fun c -> March_caps.Cap_lattice.is_authority c && not (List.exists (fun b -> cap_subsumes b c) bound))
          row.March_caps.Cap_rows.caps
   in
   (* A generic impl reaches every impl of its method through the dispatch
@@ -10478,7 +10482,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
                  "help: pass the function in as a parameter or call it by name."));
        List.iter
          (fun c ->
-            if not (cap_subsumes "IO" c) || covered c then ()
+            if not (March_caps.Cap_lattice.is_authority c) || covered c then ()
             else
               let via =
                 match cap_reach_chain ~fn_refs:chain_refs env ~from:qname ~cap:c with
@@ -10879,7 +10883,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
      match List.sort_uniq String.compare (main_closure ()) with
      | [] -> ()
      | caps ->
-       let named = List.filter (fun c -> cap_subsumes "IO" c) caps in
+       let named = List.filter (fun c -> March_caps.Cap_lattice.is_authority c) caps in
        if named <> [] then
          let show_caps =
            String.concat ", " (List.map (fun c -> Printf.sprintf "`%s`" c) named)
@@ -10989,7 +10993,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
     in
     List.iter
       (fun c ->
-         if not (cap_subsumes "IO" c) then ()  (* FFI root; not this lattice *)
+         if not (March_caps.Cap_lattice.is_authority c) then ()  (* FFI root; not this lattice *)
          else if covered c then ()
          (* R1 stage D moved this behind [covered], matching
             [check_fn_grants].  While `main` could hold exactly ONE
@@ -11088,8 +11092,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                  The grant is a ceiling on the WHOLE program — declaring \
                  `needs %s` does not raise it.\n\
                  help: add a `Cap(%s)` parameter to `main` (e.g. \
-                 `fn main(…, %s)`), or widen the whole grant to `Cap(IO)`, \
-                 or remove the use."
+                 `fn main(…, %s)`)%s, or remove the use."
                 show_grant c
                 (* Renders exactly like the sibling missing-`needs`
                    diagnostic's [Cap_infer.chain_note]
@@ -11104,7 +11107,10 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                    Printf.sprintf " (reached from `main`: %s)"
                      (render_cap_chain ("main" :: chain))
                  | _ -> "")
-                c c param_hint })
+                c c param_hint
+                (* Widening to the IO root covers only a kind under IO. *)
+                (if March_caps.Cap_lattice.cap_subsumes "IO" c
+                 then ", or widen the whole grant to `Cap(IO)`" else "") })
       (List.sort_uniq String.compare closure)
 
 (* ── Per-role grants: the same walk from more roots (distributed-deploys
@@ -11782,7 +11788,7 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
     in
     (* ── Judge each grant ── *)
     let covered ks c = List.exists (fun b -> cap_subsumes b c) ks in
-    let outside ks c = cap_subsumes "IO" c && not (covered ks c) in
+    let outside ks c = March_caps.Cap_lattice.is_authority c && not (covered ks c) in
     let source_order (a : Ast.span) (b : Ast.span) =
       compare
         (a.Ast.file <> entry_file, a.Ast.file, a.Ast.start_line, a.Ast.start_col)

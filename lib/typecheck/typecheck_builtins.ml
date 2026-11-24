@@ -171,7 +171,7 @@ let span_may_name_internal (sp : Ast.span) : bool =
 
 (** Builtins only the standard library may reference, each with the
     suggestion the error gives user code instead (e.g.
-    [("pid_of_int", "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)")]).
+    [("pid_of_int", "use `Actor.pid_from_int(n)` (a checked operation under `Actor.Introspect`)")]).
 
     A call or value reference to one of these names from code outside the
     stdlib ([span_is_stdlib]) is a type error; the check is
@@ -184,8 +184,9 @@ let span_may_name_internal (sp : Ast.span) : bool =
     Populated by build step 2 of that plan (unforgeable local references,
     specs/progress/2026-09-22-dd-step02-unforgeable-references.md): the four
     reference-forging builtins, reachable from user code only through the
-    `Actor` wrappers that take a `Cap(Actor.Introspect)` minted by
-    `Actor.introspect(io)`. A ref so tests can install an entry around a
+    `Actor` wrappers, checked under the capability kind `Actor.Introspect`
+    or taking a `Cap(Actor.Introspect)` minted by `Actor.introspect()`. A ref
+    so tests can install an entry around a
     single check. *)
 let stdlib_only : (string * string) list ref = Typecheck_env.stdlib_only
 
@@ -378,6 +379,20 @@ let builtin_cap_table : (string * string) list = [
   ("actor_registered",      "IO.Registry");
 ]
 
+(** The checked stdlib operations that are no builtin's entry point (ocap
+    phase 7, design §7, §21): the mints of the non-IO capabilities and the
+    pid lookup, which once took the root [Cap(IO)] as a witness.  Each calls
+    [Authority.check] on its kind; this charges a call of it to the code that
+    makes it, so `main` must request the kind. *)
+let witness_entry_caps : (string * string) list = [
+  ("Actor.introspect",   "Actor.Introspect");
+  ("Actor.pid_from_int", "Actor.Introspect");
+  ("Actor.debug",        "Actor.Debug");
+  ("Session.attach",     "IO.Cluster");
+  ("ClusterNode.attach", "IO.Cluster");
+  ("ClusterNode.start",  "IO.Cluster");
+]
+
 (** The qualified stdlib entry points of the gated rows ([Cap_ops.gated]:
     `File.write`, `System.now_ms`, `Task.async`, ...), each with its builtin's
     capability.  Since ocap phase 4 (Task 8) user code reaches those builtins
@@ -392,6 +407,7 @@ let entry_cap_table : (string * string) list =
             if String.contains e '.' then Some (e, cap) else None) entry
       | None -> [])
     March_caps.Cap_ops.gated
+  @ witness_entry_caps
 
 (** The names a module DECLARES directly (bare [DFn]s and top-level [DLet]
     [PatVar]s) — exactly the set that wins real name resolution over a global

@@ -1816,11 +1816,10 @@ let check_main_signature (errors : Err.ctx) (decls : decl list) : unit =
      under, which would read as "everything forbidden" with no explanation. *)
   let is_cap_io_ty = function
     | Some (TyCon (n, [ TyCon (inner, []) ])) ->
+      (* Any authority kind: the IO lattice, and since ocap phase 7 the
+         root kinds outside it ([Actor.Introspect], [Actor.Debug]). *)
       n.txt = "Cap"
-      && (inner.txt = "IO"
-          || (String.length inner.txt > 3
-              && String.sub inner.txt 0 3 = "IO."
-              && List.mem_assoc inner.txt March_caps.Cap_lattice.hierarchy))
+      && (inner.txt = "IO" || March_caps.Cap_lattice.is_authority inner.txt)
     | _ -> false
   in
   List.iter (function
@@ -1864,7 +1863,7 @@ let check_main_signature (errors : Err.ctx) (decls : decl list) : unit =
              let n_caps = List.length (List.filter cap_param params) in
              Err.error ~code:Err.Code.main_signature errors ~span:clause.fc_span
                (Printf.sprintf
-                  "`main` must take zero arguments, or only arguments of type `Cap(IO)` (or narrower points of the IO lattice, e.g. `Cap(IO.Console)`) — the capabilities the runtime GRANTS the program at startup; the whole program is then held to their union.\n\
+                  "`main` must take zero arguments, or only arguments of type `Cap(IO)` (or narrower points of the IO lattice, e.g. `Cap(IO.Console)`, or `Cap(Actor.Introspect)` / `Cap(Actor.Debug)`) — the capabilities the runtime GRANTS the program at startup; the whole program is then held to their union.\n\
                    Found %d parameter%s, %d of which %s a capability.\n\
                    help: use `fn main() : () do ... end`, `fn main(cap : Cap(IO)) : () do ... end` for full IO, or e.g. `fn main(console : Cap(IO.Console), spawn : Cap(IO.Spawn)) : () do ... end` to grant exactly what the program needs."
                   n (if n = 1 then "" else "s")

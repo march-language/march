@@ -517,6 +517,7 @@ mod Authority do
     "IO.Foreign" -> "IO"
     "IO.Foreign.Blocking" -> "IO.Foreign"
     "IO.Registry" -> "IO"
+    "IO.Cluster" -> "IO"
     _ -> ""
     end
   end

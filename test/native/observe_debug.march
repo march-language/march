@@ -9,6 +9,7 @@ mod Main do
   needs IO
   needs IO.Console
   needs IO.Clock
+  needs Actor.Introspect
 
   actor W do
     state { n : Int }
@@ -57,8 +58,8 @@ mod Main do
     spin(tick(n), b)
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let _s = spawn(Sup)
     -- Children are spawned before their supervisor: the lowest pid is W.
     match Actor.list(intro) do

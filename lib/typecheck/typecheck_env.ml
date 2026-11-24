@@ -2448,7 +2448,7 @@ let unknown_ctor_hint ?need (name : string) (env : env) : string =
     consults it and [Typecheck_builtins] depends on this module. *)
 let stdlib_only_hand_written : (string * string) list =
     [ ("pid_of_int",
-       "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)");
+       "use `Actor.pid_from_int(n)` (a checked operation under `Actor.Introspect`)");
       ("actor_pid_indices", "use `Actor.list(cap)` (see `Actor.introspect`)");
       ("observe_query", "use the `Recon` module (see `Actor.introspect`)");
       ("observe_count_send", "remote sends are counted by `Node.send` itself");

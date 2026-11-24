@@ -654,7 +654,7 @@ section is the last 20 crashes (so `crash.loop` sees at most those).
 The stdlib modules `Recon` and `Diagnose` ask the same questions from March
 code, in-process, on both the interpreter and compiled code. Every function
 takes a `Cap(Actor.Introspect)`, which `main` mints from its `IO` capability
-with `Actor.introspect(io)`; a module that names the capability declares
+with `Authority.must(Actor.introspect())`; a module that names the capability declares
 `needs Actor.Introspect`. Nothing here returns a panic message.
 
 | Function | Returns |
@@ -688,7 +688,7 @@ from a task or an actor that can afford to wait, not from a hot handler.
 
 The debug-tier calls (`Actor.inspect_state`, the `Trace` module,
 `Recon.source`) take a `Cap(Actor.Debug)` instead, minted with
-`Actor.debug(io)`; see [the debug tier](#the-debug-tier-signed-requests).
+`Authority.must(Actor.debug())`; see [the debug tier](#the-debug-tier-signed-requests).
 
 A node report from `main`:
 
@@ -726,7 +726,7 @@ mod Main do
   end
 
   fn main(io : Cap(IO)) do
-    let c = Actor.introspect(io)
+    let c = Authority.must(Actor.introspect())
     let w = spawn(Worker)
     let _r = Actor.register(w, "worker")
     let _ = send(w, Work(1))
@@ -764,7 +764,7 @@ mod Main do
   end
 
   fn main(io : Cap(IO)) do
-    busiest(Actor.introspect(io))
+    busiest(Authority.must(Actor.introspect()))
   end
 end
 ```
@@ -785,7 +785,7 @@ mod Main do
   end
 
   fn main(io : Cap(IO)) do
-    let c = Actor.introspect(io)
+    let c = Authority.must(Actor.introspect())
     if check(c) do
       println("critical finding")
     else
@@ -1200,7 +1200,7 @@ with `"signer":"in-process"`.
 
 **In-process, the capability stands in for the signature.** From March code,
 `Actor.inspect_state`, the `Trace` module and `Recon.source` take a
-`Cap(Actor.Debug)` (`Actor.debug(io)`, or `debug` in the remote shell). No
+`Cap(Actor.Debug)` (`Authority.must(Actor.debug())`, or `debug` in the remote shell). No
 signature is needed, but `$MARCH_DEBUG_POLICY` must still list the verb, and
 every attempt is audited with the signer `in-process`.
 
@@ -1379,7 +1379,7 @@ actor. Nothing is recorded on the interpreter, which has no hooks yet
 
 ### Tracing from March code
 
-With the debug capability (`Actor.debug(io)`, or `debug` in the remote shell):
+With the debug capability (`Authority.must(Actor.debug())`, or `debug` in the remote shell):
 
 ```march
 match Trace.start(debug, ["Billing.charge"], Trace.MaxEvents(10)) do

@@ -519,7 +519,7 @@ let check_stdlib_only_session ~label (out, code) =
       if not (contains ~needle out) then
         Alcotest.failf "%s: expected the gate's error for %s in session output, got:\n%s"
           label name out)
-    [ ("pid_of_int", "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)");
+    [ ("pid_of_int", "use `Actor.pid_from_int(n)` (a checked operation under `Actor.Introspect`)");
       ("actor_registered", "use `Actor.registered(cap)` (see `Actor.introspect`)");
       ("actor_whereis", "use `Actor.whereis(cap, name)` (see `Actor.introspect`)") ];
   (* Nothing gated was evaluated: no forged pid, no registry listing, and

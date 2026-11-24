@@ -25,6 +25,7 @@ mod NodeSendLoopback do
   needs IO.Spawn
   needs IO.NetConnect
   needs IO.Mut
+  needs Actor.Introspect
 
   pfn encode_ping(n : Int, reply_to) : List(Int) do
     Msgpack.encode(Msgpack.array(Cons(Msgpack.int(n), Cons(GlobalPid.to_value(reply_to), Nil))))
@@ -137,7 +138,7 @@ mod NodeSendLoopback do
     end
   end
 
-  fn main(io : Cap(IO), _cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
+  fn main(io : Cap(IO), _cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut), _cap_introspect : Cap(Actor.Introspect)) do
     let listen_fd = match tcp_listen(0) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)
@@ -187,7 +188,7 @@ mod NodeSendLoopback do
     -- The reply went out with NodeSend.cast, a remote send that never reaches
     -- the local mailbox path: it is counted on the sender's msgs_out anyway
     -- (observe plan R3, `observe_count_send`).
-    match Recon.info(Actor.introspect(io), pid_to_int(ping_pid)) do
+    match Recon.info(Authority.must(Actor.introspect()), pid_to_int(ping_pid)) do
       Some(a) -> Authority.ignore(println("node-b: ping actor's sends counted: " ++ int_to_string(a.msgs_out)))
       None -> Authority.ignore(println("node-b: ping actor gone"))
     end

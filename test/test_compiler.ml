@@ -6803,7 +6803,7 @@ let test_endpoints_check_linear_in_protocols () =
     Buffer.add_string b (Printf.sprintf
       "  pfn run%d(c : Cap(IO)) : Int do\n\
       \    let t = Session.in_process_with(fn _line -> ())\n\
-      \    let s = Session.attach(c, t.ops)\n\
+      \    let s = Authority.must(Session.attach(t.ops))\n\
       \    let _ = P%d_C.chaos(s, P%d_C.register(s, 0), 1)\n\
       \    let _ = P%d_B.chaos(s, P%d_B.register(s, 0), 2)\n\
       \    let _ = P%d_A.chaos(s, P%d_A.register(s, 0), 3)\n\

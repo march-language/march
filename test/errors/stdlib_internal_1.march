@@ -1,13 +1,13 @@
--- EXPECT-ERROR: Actor.introspect
+-- EXPECT-ERROR: Actor.Introspect
 -- Unforgeable local references (2026-09-22, distributed-deploys build step 2,
 -- specs/progress/2026-09-22-dd-step02-unforgeable-references.md).
 --
 -- `pid_of_int` turns an integer anyone can write down into a Pid, so a
 -- program that holds no Pid could still message any actor. The raw builtin
 -- is now internal to the standard library (`Typecheck_builtins.stdlib_only`);
--- user code goes through `Actor.pid_from_int(c, n)`, whose
--- `c : Cap(Actor.Introspect)` only `Actor.introspect(io : Cap(IO))` mints.
--- The error names that minting function, so the fix is in the message.
+-- user code goes through `Actor.pid_from_int(n)`, a checked operation under
+-- the capability kind `Actor.Introspect` (ocap phase 7). The error names it,
+-- so the fix is in the message.
 --
 -- Accept companion: accept/t291, the same program with the cap minted in
 -- `main` and forwarded.

@@ -69,7 +69,7 @@ mod CrashLoop do
     if n == 0 do
       ()
     else
-      let child = Actor.pid_from_int(intro, current_child(boss))
+      let child = Authority.must(Actor.pid_from_int(current_child(boss)))
       send(child, Poison())
       run_until_idle()
       poison_loop(intro, boss, n - 1)
@@ -77,12 +77,12 @@ mod CrashLoop do
   end
 
   fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+    let intro = Authority.must(Actor.introspect())
     let boss = spawn(Boss)
     poison_loop(intro, boss, 20)
     -- after 20 crash/restart cycles, the CURRENT child incarnation must
     -- still answer -- the process as a whole must have survived.
-    let healed = Actor.pid_from_int(intro, current_child(boss))
+    let healed = Authority.must(Actor.pid_from_int(current_child(boss)))
     match Actor.call(healed, PingReq, 5000) do
       Ok(_)  -> println("self-healed")
       Err(e) -> println("still dead: " ++ e)

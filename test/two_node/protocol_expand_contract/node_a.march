@@ -259,7 +259,7 @@ mod ProtocolSplit do
   -- deploy is verified and activated (protocol_evolve's reason).
   pfn node_a(c : Cap(IO)) : () do
     let cfg = { ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "split-secret", 1) with swim: Swim.config(500, 15000, 2) }
-    match ClusterNode.start(c, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         let host = start_host()
@@ -273,7 +273,7 @@ mod ProtocolSplit do
   pfn node_b(c : Cap(IO)) : () do
     let seed = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A")))
     let cfg = { ClusterNode.config("node-b", Authority.must(Env.require_int("MARCH_PORT_B")), "", Cons(seed, Nil), "split-secret", 1) with swim: Swim.config(500, 15000, 2) }
-    match ClusterNode.start(c, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 60000) do () else panic("node-b: never joined") end
