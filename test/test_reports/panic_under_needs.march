@@ -1,0 +1,29 @@
+-- A test that panics inside a function with `needs` must not leave that
+-- function's authority in force for the tests after it
+-- (test/run_test_reports.ml). Every test here FAILS on purpose; the second
+-- one's report shows the authority it ran under.
+mod PanicUnderNeeds do
+  needs IO.FileRead
+
+  pfn probe(target : String) : String do
+    match Authority.check("IO.FileRead", target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  pfn boom(p : String) : Int needs IO.FileRead("/srv/") do
+    panic("inside the frame: " ++ probe(p))
+  end
+
+  describe "authority" do
+    test "a panic inside a function with needs" do
+      let n = boom("/etc/hosts")
+      assert (n > 0)
+    end
+
+    test "the next test is not under that function's needs" do
+      assert (probe("/etc/hosts") == "refused")
+    end
+  end
+end

@@ -1,0 +1,51 @@
+-- `on_stop` that panics inside a function with `needs` (the on_stop catch):
+-- the panic skips that function's restore, the actor still stops, and the
+-- stopper carries on under its own authority. The actor was spawned under a
+-- frame, so the authority the catch puts back is a refcounted cell.
+mod OnStopPanicInFrame do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Spawn
+
+  fn probe(target : String) : String do
+    match Authority.check("IO.FileRead", target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn boom_inside(p : String) : Unit needs IO.Console, IO.FileRead("/srv/inner/") do
+    println("on_stop, in frame: " ++ probe(p))
+    panic("on_stop blew up")
+  end
+
+  actor Bad do
+    state { n : Int }
+    init  { n: 0 }
+    on Work(k : Int) do
+      { n: state.n + k }
+    end
+    on_stop do
+      boom_inside("/srv/x")
+    end
+  end
+
+  fn start() needs IO.Console, IO.FileRead("/srv/"), IO.Spawn do
+    spawn(Bad)
+  end
+
+  fn stop_one() : String needs IO.Console, IO.FileRead("/srv/"), IO.Spawn do
+    let p = start()
+    send(p, Work(1))
+    let stopped = Actor.stop(p, 5000)
+    "stop: " ++ bool_to_string(stopped) ++ ", dead: " ++ bool_to_string(is_alive(p) == false)
+      ++ ", then: " ++ probe("/srv/x") ++ " / " ++ probe("/etc/hosts")
+  end
+
+  fn main() do
+    println(stop_one())
+    println(stop_one())
+    println("main: " ++ probe("/etc/hosts"))
+  end
+end
