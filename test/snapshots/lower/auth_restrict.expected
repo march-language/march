@@ -10,13 +10,13 @@ fn check_read(p : String) : Result((), CapError) =
 ## main
 fn main() : () =
   quiet();
-let probe : (String) -> Result((), CapError) = let $t1251 : Layer = main$restrict0$auth_layer() in
-let $t1252 : CapAuthRef = Authority.enter_fn($t1251) in
+let probe : (String) -> Result((), CapError) = let $t1326 : Layer = main$restrict0$auth_layer() in
+let $t1327 : CapAuthRef = Authority.enter_fn($t1326) in
 let $auth_cap1 : CapAuthRef = cap_save() in
-let $t1253 : (String) -> Result((), CapError) = letrec [$lam0_main] in
+let $t1328 : (String) -> Result((), CapError) = letrec [$lam0_main] in
 $lam0_main in
-let $t1254 : Unit = cap_restore($t1252) in
-$t1253 in
+let $t1329 : Unit = cap_restore($t1327) in
+$t1328 in
 let _a : Result((), CapError) = probe("/srv/a") in
 ()
 
