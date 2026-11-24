@@ -1099,6 +1099,11 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_grant_text()" };
   (* The current directory for Authority's path checks: process_cwd's
      answer under a symbol cap_symbols does not attribute to IO.Process. *)
+  (* ocap phase 7: the mock registry (test builds only). *)
+  { march_name = "mock_register"; c_name = Some "march_mock_register"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_mock_register(ptr %h)" };
+  { march_name = "mock_lookup"; c_name = Some "march_mock_lookup"; ret_ty = Some (Tir.TVar "a");
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_mock_lookup(i64 %id)" };
   { march_name = "cap_cwd"; c_name = Some "march_cap_cwd"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_cwd()" };
   (* Authority.launch_init's launch error: the text on fd 2, exit 2. Its own
@@ -2144,6 +2149,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_cap_enter";
   PDeclare "march_cap_grant_text";
   PDeclare "march_cap_cwd";
+  PDeclare "march_mock_register";
+  PDeclare "march_mock_lookup";
   PDeclare "march_cap_launch_fail";
   PDeclare "march_cap_rt_parse";
   PDeclare "march_cap_rt_admits";

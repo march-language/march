@@ -234,6 +234,18 @@ type monitor_down_reason = Normal | Killed | Crash of string
 let cap_nil = VCon ("Nil", [])
 let cap_slot : value ref = ref cap_nil
 
+(* The mock registry (ocap phase 7; the C runtime's march_mock_register):
+   a `mock` block's handler record, named in its layer ByMock(id). Kept
+   for the life of the run, as natively. *)
+let mock_tab : value list ref = ref []
+let mock_count = ref 0
+let mock_register (h : value) : int =
+  mock_tab := h :: !mock_tab;
+  incr mock_count;
+  !mock_count - 1
+let mock_lookup (id : int) : value =
+  List.nth !mock_tab (!mock_count - 1 - id)
+
 (** [k ()] with the slot set to [auth], restored afterwards (also when [k]
     raises).  The interpreter runs every actor handler on the one OCaml
     stack, nested inside whatever is in force (a send from main, an

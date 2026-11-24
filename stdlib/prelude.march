@@ -32,7 +32,7 @@
 
 mod Prelude do
 
-  type CapLimit = ByLaunch | ByFnNeeds(String) | ByModNeeds(String) | ByRestrict(String) | ByGrant(String)
+  type CapLimit = ByLaunch | ByFnNeeds(String) | ByModNeeds(String) | ByRestrict(String) | ByGrant(String) | ByMock(Int)
   type CapError = CapError(String, String, CapLimit, String)
   derive Eq for CapLimit
   derive Eq for CapError

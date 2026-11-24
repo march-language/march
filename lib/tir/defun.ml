@@ -185,6 +185,7 @@ let builtin_names : StringSet.t =
       (* ocap phase 4 authority slot *)
       "cap_layers"; "cap_set_launch"; "cap_save"; "cap_restore"; "cap_push";
       "cap_enter"; "cap_grant_text"; "cap_cwd"; "cap_launch_fail";
+      "mock_register"; "mock_lookup";
       "cap_rt_parse"; "cap_rt_admits"; "cap_rt_subset"; "cap_rt_frame_layer";
       "cap_rt_launch_init"; "cap_rt_check_layers"; "cap_rt_check_slow";
       (* Process self-inspection builtins *)

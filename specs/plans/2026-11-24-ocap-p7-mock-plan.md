@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** draft, awaiting the owner's answers to Q1–Q8 below. No code is written until then.
+**Status:** approved by the owner 2026-11-24 with every recommended answer (Q1–Q8). PR 7a is Tasks 1–6, PR 7b is Tasks 7–9.
 
 **Goal:**
 - `mock SCOPE with HANDLER do ... end` replaces `with_cap` / `cap_impl` on IO capabilities.

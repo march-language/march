@@ -220,6 +220,8 @@ void   *march_cap_mark(void);
 void    march_cap_unwind(void *mark);
 void   *march_cap_grant_text(void);
 void   *march_cap_cwd(void);
+int64_t march_mock_register(void *handler);
+void   *march_mock_lookup(int64_t id);
 void    march_cap_launch_fail(void *text);
 void    march_cap_release(void *layers);
 

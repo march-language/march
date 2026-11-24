@@ -11200,6 +11200,7 @@ static _Atomic int march_cap_launch_set = 0;
  *   List(Layer)    Nil = tag 0 | Cons(Layer, List(Layer)) = tag 1
  *   Layer          Layer(CapLimit, String, List(CapEntry))   = tag 0
  *   CapLimit       ByLaunch = 0 | ByFnNeeds .. ByGrant(String) = 1..4
+ *                  | ByMock(Int) = 5 (a scalar field: never followed)
  *   CapEntry       CapEntry(String, Arg)                   = tag 0
  *   Arg            Any = 0 | Paths(List(String)) = 1 | Hosts(String) = 2
  *                  | Names(List(String), List(String))    = 3
@@ -11569,6 +11570,42 @@ void *march_cap_cwd(void) {
     char buf[4096];
     if (getcwd(buf, sizeof(buf)) == NULL) return march_string_lit("", 0);
     return march_string_lit(buf, (int64_t)strlen(buf));
+}
+
+/* The mock registry (ocap phase 7; test builds only). A `mock` block
+ * registers its handler record here and its authority layer names it by the
+ * returned index, ByMock(id): the layer itself stays an ordinary
+ * Authority.Layer that march_cap_release walks by tag. A handler is kept
+ * for the life of the process: closures, tasks and actors made inside the
+ * block keep reaching it after the block ends, and the registry cannot run
+ * the record's drop glue, so a registered handler is never released (a
+ * bounded cost of one record per `mock` entry, in test binaries only). */
+static pthread_mutex_t march_mock_mu = PTHREAD_MUTEX_INITIALIZER;
+static void **march_mock_tab = NULL;
+static int64_t march_mock_n = 0, march_mock_cap = 0;
+
+int64_t march_mock_register(void *handler) {
+    march_incrc(handler);
+    pthread_mutex_lock(&march_mock_mu);
+    if (march_mock_n == march_mock_cap) {
+        int64_t nc = march_mock_cap ? march_mock_cap * 2 : 16;
+        void **nt = (void **)realloc(march_mock_tab, (size_t)nc * sizeof(void *));
+        if (nt == NULL) { pthread_mutex_unlock(&march_mock_mu); abort(); }
+        march_mock_tab = nt;
+        march_mock_cap = nc;
+    }
+    int64_t id = march_mock_n++;
+    march_mock_tab[id] = handler;
+    pthread_mutex_unlock(&march_mock_mu);
+    return id;
+}
+
+void *march_mock_lookup(int64_t id) {
+    pthread_mutex_lock(&march_mock_mu);
+    void *h = (id >= 0 && id < march_mock_n) ? march_mock_tab[id] : NULL;
+    pthread_mutex_unlock(&march_mock_mu);
+    march_incrc(h);
+    return h;
 }
 
 /* Authority.launch_init's launch error (cap_launch_fail): the text verbatim

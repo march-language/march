@@ -80,6 +80,11 @@ type monitor_down_reason = Normal | Killed | Crash of string
     restored afterwards. *)
 val cap_nil : value
 val cap_slot : value ref
+
+(** The mock registry (ocap phase 7): [mock_register h] keeps a `mock`
+    block's handler record and returns its id; [mock_lookup id] reads it. *)
+val mock_register : value -> int
+val mock_lookup : int -> value
 val with_actor_authority : value -> (unit -> 'a) -> 'a
 
 (** ocap phase 6: the authority an actor of this definition is spawned under (the

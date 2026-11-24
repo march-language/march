@@ -154,6 +154,11 @@ let span_is_stdlib (sp : Ast.span) : bool =
     (lib/tir cannot be named from here; test_stdlib_only pins the two equal). *)
 let control_wiring_file = "<control>"
 
+(** The file name of the test build's generated dispatch wrappers
+    ([Io_ops_gen.dispatch_wrappers_source], injected by the driver): they read
+    the mock registry, so they may name the stdlib-only builtins. *)
+let cap_dispatch_file = "<cap-dispatch>"
+
 (** Whether a reference at [sp] may name a [@[stdlib_internal]] function: the
     stdlib's own code, or the compiler's generated control wiring. The driver
     refuses an input file named like a generated-code tag (bin/main.ml,
@@ -162,6 +167,7 @@ let control_wiring_file = "<control>"
     with the raw builtins, which ocap phase 4 gated. *)
 let span_may_name_internal (sp : Ast.span) : bool =
   span_is_stdlib sp || String.equal sp.Ast.file control_wiring_file
+  || String.equal sp.Ast.file cap_dispatch_file
 
 (** Builtins only the standard library may reference, each with the
     suggestion the error gives user code instead (e.g.
@@ -898,6 +904,12 @@ let builtin_bindings : (string * scheme) list =
        site (a `()`-typed helper) needs. Not process_exit / print_stderr:
        those are capability operations and their symbols are attributed. *)
     ("cap_launch_fail", Mono (TArrow (t_string, t_unit)));
+    (* ocap phase 7: the mock registry (runtime/march_runtime.c). A `mock`
+       block registers its handler record and names it in its authority
+       layer, ByMock(id); a test build's dispatch wrapper reads it back at
+       its kind's dictionary type. Stdlib-only (and the generated wrappers). *)
+    ("mock_register",   poly1 (fun a -> TArrow (a, t_int)));
+    ("mock_lookup",     poly1 (fun a -> TArrow (t_int, a)));
     (* peak_rss_bytes: process self-inspection (peak resident set size, in
        bytes, on both platforms). Deliberately NOT in the capability table
        below — it performs no IO and observes nothing outside this process,

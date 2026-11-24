@@ -2482,6 +2482,9 @@ let stdlib_only_hand_written : (string * string) list =
       ("cap_grant_text", "use `Authority.check(kind, target)`");
       ("cap_cwd", "use `Process.cwd()`");
       ("cap_launch_fail", "use `IO.eprintln` and `Process.exit`");
+      (* ocap phase 7: the mock registry; user code writes `mock ... with ... do`. *)
+      ("mock_register", "use a `mock SCOPE with HANDLER do ... end` block (test builds)");
+      ("mock_lookup", "use a `mock SCOPE with HANDLER do ... end` block (test builds)");
       (* DD step 12a: runs a request line through the node's own reload-socket
          dispatch; only the control plane's Agent relays operator-signed lines. *)
       ("reload_request", "use `Control.relay_line(line)` (the control plane's Agent)");
