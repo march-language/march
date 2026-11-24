@@ -1,0 +1,34 @@
+-- Interface dispatch and named functions used as values.
+mod CaptureIfaceNamed do
+  needs IO.Console, IO.FileRead
+
+  type Loud = Loud(Int)
+  type Quiet = Quiet(Int)
+
+  interface Speak(a) do
+    fn speak : a -> ()
+  end
+  impl Speak(Loud) do
+    fn speak(_x) do Authority.ignore(println("loud")) end
+  end
+  impl Speak(Quiet) do
+    fn speak(_x) do () end
+  end
+
+  pfn say(s) do Authority.ignore(println(s)) end
+
+  fn main() do
+    let f = fn v -> speak(v)
+    f(Loud(1))
+    let g = fn () -> speak(Quiet(1))
+    g()
+    let h = fn () -> List.each(["a", "b"], say)
+    h()
+    let r = fn () -> List.map(["/nonexistent/capture_iface"], File.read)
+    r()
+    let k = fn () -> List.fold_left([1, 2], 0, fn (acc, x) ->
+      let _ = say(int_to_string(x))
+      acc + x)
+    k()
+  end
+end

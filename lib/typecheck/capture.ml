@@ -42,11 +42,12 @@ type store = {
   const_why : (svar, (S.t * reason) list) Hashtbl.t;
   succ : (svar, edge list) Hashtbl.t;
   unknown_causes : (string, int) Hashtbl.t;
+  mutable unknown_at : (string * Ast.span) list;
 }
 
 let new_store () =
   { next = 0; consts = Hashtbl.create 1024; const_why = Hashtbl.create 256; succ = Hashtbl.create 1024;
-    unknown_causes = Hashtbl.create 8 }
+    unknown_causes = Hashtbl.create 8; unknown_at = [] }
 
 let add_const (st : store) ?why (v : svar) (c : S.t) : unit =
   if not (S.is_empty c) then begin
@@ -68,6 +69,7 @@ let add_edge (st : store) ?narrow ?(ground_only = false) ?why (u : svar) (v : sv
 let add_unknown (st : store) (v : svar) ~(cause : string) (sp : Ast.span) : unit =
   Hashtbl.replace st.unknown_causes cause
     (1 + Option.value ~default:0 (Hashtbl.find_opt st.unknown_causes cause));
+  st.unknown_at <- (cause, sp) :: st.unknown_at;
   if Sys.getenv_opt "MARCH_CAPTURE_DEBUG" <> None then
     Printf.eprintf "[capture] not tracked: %s at %s:%d:%d\n" cause sp.Ast.file sp.Ast.start_line sp.Ast.start_col;
   add_const st v S.unknown ~why:{ why = "not tracked: " ^ cause; rspan = sp }
@@ -167,13 +169,16 @@ type st = {
   known : (string, unit) Hashtbl.t;  (** every function key: recorded, referenced as a dispatch node, or with a body *)
   let_keys : (string, unit) Hashtbl.t;
   clauses : (string, S.t) Hashtbl.t;  (** a function's `needs` clause, scopes included *)
+  extra_bodies : (string, (string list * Ast.expr) list) Hashtbl.t;
+      (** bodies read from the declarations, for a checker entry point that
+          records none (the editor's: [check_module_with_env]) *)
   actors : (string, actor_info) Hashtbl.t;
   handler_keys : (string, unit) Hashtbl.t;
   mutable sites : raw_site list;
   annot : (Ast.span, T.t) Hashtbl.t;
   binders : (Ast.span, string * string) Hashtbl.t;  (** a `let` or pattern variable: its name, its owner *)
   fn_iface : (string, scheme list) Hashtbl.t;
-  unsound : [ `Drop_captured | `Drop_callee_effect ] option;
+  unsound : [ `Drop_callee_effect | `Drop_arg_flow | `Narrow_values ] option;
 }
 
 type ctx = {
@@ -184,6 +189,7 @@ type ctx = {
   lams : (int * svar) list;  (** enclosing function values: (depth, set), innermost first *)
   depth : int;
   auth : S.t;
+  at_module : bool;  (** walking a module-level binding's initialiser *)
 }
 
 let fresh (s : st) : svar =
@@ -261,9 +267,35 @@ let fill_hole (s : st) (h : T.hole) (t : T.t) : unit =
 let qual prefix n = if prefix = "" then n else prefix ^ "." ^ n
 
 let scan_decls (s : st) (decls : Ast.decl list) : unit =
+  let add_body key body =
+    if not (Hashtbl.mem s.env.fn_row_bodies key) then
+      Hashtbl.replace s.extra_bodies key (Option.value ~default:[] (Hashtbl.find_opt s.extra_bodies key) @ [ body ])
+  in
+  let param_name = function
+    | Ast.FPNamed p | Ast.FPDefault (p, _) -> p.Ast.param_name.Ast.txt
+    | Ast.FPPat (Ast.PatVar n) -> n.Ast.txt
+    | Ast.FPPat _ -> "_"
+  in
   let rec go prefix (ds : Ast.decl list) =
     List.iter
-      (function
+      (fun (decl : Ast.decl) ->
+         (match decl with
+          | Ast.DFn (def, _) ->
+            List.iter
+              (fun (cl : Ast.fn_clause) ->
+                 add_body (qual prefix def.Ast.fn_name.Ast.txt) (List.map param_name cl.Ast.fc_params, cl.Ast.fc_body))
+              def.Ast.fn_clauses
+          | Ast.DLet (_, { Ast.bind_pat = Ast.PatVar n; bind_expr; _ }, _) ->
+            add_body (qual prefix n.Ast.txt) ([], bind_expr)
+          | Ast.DActor (_, n, a, _) ->
+            List.iter
+              (fun (h : Ast.actor_handler) ->
+                 add_body
+                   (qual prefix n.Ast.txt ^ "_" ^ h.Ast.ah_msg.Ast.txt)
+                   (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) h.Ast.ah_params, h.Ast.ah_body))
+              (a.Ast.actor_handlers @ Option.to_list a.Ast.actor_on_stop)
+          | _ -> ());
+         match decl with
         | Ast.DMod (n, _, inner, _) -> go (qual prefix n.Ast.txt) inner
         | Ast.DLet (_, b, _) -> (
           match b.Ast.bind_pat with
@@ -284,13 +316,16 @@ let scan_decls (s : st) (decls : Ast.decl list) : unit =
         | _ -> ())
       ds
   in
-  go "" decls
+  go "" decls;
+  Hashtbl.iter (fun k _ -> Hashtbl.replace s.known k ()) s.extra_bodies
 
 let resolve (s : st) (owner : string) (name : string) : string option =
   March_caps.Cap_rows.resolve_ref ~scopes:s.env.fn_scopes s.known owner name
 
 let bodies_of (s : st) (key : string) : (string list * Ast.expr) list =
-  Option.value ~default:[] (Hashtbl.find_opt s.env.fn_row_bodies key)
+  match Hashtbl.find_opt s.env.fn_row_bodies key with
+  | Some bodies -> bodies
+  | None -> Option.value ~default:[] (Hashtbl.find_opt s.extra_bodies key)
 
 let clause_of (s : st) (key : string) : S.t option =
   match Hashtbl.find_opt s.clauses key with
@@ -726,6 +761,11 @@ and walk_inner (s : st) (c : ctx) (e : Ast.expr) : T.t =
     List.iter (fun x -> ignore (walk s c x)) es;
     let auth =
       match March_caps.Scope_expr.restrict_entries es with
+      (* A function value made by module-level code captures nothing: it
+         runs under its caller's authority, so a module-level restrict does
+         not bound it (parent design §21).  One made by a function value
+         that module-level code created does capture, when that one runs. *)
+      | Some _ when c.at_module && c.lams = [] -> c.auth
       | Some entries -> S.narrow c.auth ~by:(S.of_entries entries)
       | None -> c.auth
     in
@@ -808,7 +848,11 @@ and walk_fn_value (s : st) (c : ctx) ~(self : (Ast.name * T.t) option) ~(params 
   let bt = walk s c' body in
   List.iter (fun ((n : Ast.name), h) -> record_annot s n.Ast.span h) holes;
   add_edge s.store ~narrow:c.auth own set;
-  add_edge s.store valv set;
+  (* What arrives through a called or captured value is never narrowed: it
+     runs under its own authority (design §6.1).  [`Narrow_values] is the
+     unsound rule, kept only to show the oracle catches it. *)
+  if s.unsound = Some `Narrow_values then add_edge s.store ~narrow:c.auth valv set
+  else add_edge s.store valv set;
   let t =
     match holes with
     | [] -> T.Arrow (T.Plain, bt, set)
@@ -847,10 +891,9 @@ and use_local (s : st) (c : ctx) (n : Ast.name) (b : binding) : T.t =
        h.h_hm <- ty_at s n.Ast.span;
        fill_hole s h (of_span s n.Ast.span)
      | _ -> ());
-    if s.unsound <> Some `Drop_captured then
-      List.iter
+    List.iter
         (fun (ld, set) ->
-           if ld > depth then begin
+           if ld > depth && s.unsound <> Some `Narrow_values then begin
              let why = { why = Printf.sprintf "captures `%s`" n.Ast.txt; rspan = n.Ast.span } in
              List.iter (fun v -> add_edge s.store ~why v set) (T.held t);
              if T.has_opaque t then add_unknown s.store set ~cause:"a captured value the pass does not model" n.Ast.span
@@ -978,7 +1021,7 @@ and apply_value (s : st) (c : ctx) (ft : T.t) (args : T.t list) (sp : Ast.span) 
       r
     | T.Arrow (p, r, set), a :: rest ->
       if s.unsound <> Some `Drop_callee_effect then add_edge s.store ~why set c.valv;
-      flow s a p;
+      if s.unsound <> Some `Drop_arg_flow then flow s a p;
       if rest = [] then r else go r rest
     | T.Plain, _ -> T.Plain
     | _ ->
@@ -1005,6 +1048,17 @@ and walk_app (s : st) (c : ctx) (f : Ast.expr) (args : Ast.expr list) (sp : Ast.
     | Some key when Hashtbl.mem s.let_keys key ->
       let ft = walk_var s c n in
       apply_value s c ft ats sp ~what:(Printf.sprintf "calls `%s`" n.Ast.txt)
+    | Some "Authority.check" ->
+      (* A direct authority check is an operation of the kind it names
+         (every capability entry point of the stdlib is one).  A computed
+         kind is not tracked. *)
+      (match args with
+       | Ast.ELit (Ast.LitString kind, _) :: _ when March_caps.Cap_lattice.suggest_cap kind = None ->
+         add_const s.store c.own
+           (S.of_scopes [ { S.kind; arg = None } ])
+           ~why:{ why = Printf.sprintf "checks `%s`" kind; rspan = sp }
+       | _ -> add_unknown s.store c.own ~cause:"an authority check of a computed kind" sp);
+      T.Plain
     | Some key -> call_named s c n key args ats sp
     | None -> call_builtin s c n args ats sp)
   | _ ->
@@ -1052,7 +1106,7 @@ and call_named (s : st) (c : ctx) (n : Ast.name) (key : string) (args : Ast.expr
           List.iteri
             (fun k p ->
                match List.nth_opt ats k with
-               | Some a -> flow s a (subst s i p None)
+               | Some a -> if s.unsound <> Some `Drop_arg_flow then flow s a (subst s i p None)
                | None -> ())
             sc.sc_params;
           let r = subst s i sc.sc_result (if nargs <= List.length sc.sc_params then result_ty else None) in
@@ -1066,7 +1120,8 @@ and call_named (s : st) (c : ctx) (n : Ast.name) (key : string) (args : Ast.expr
      let pick = if pick = [] then acts else pick in
      List.iter
        (fun a ->
-          List.iteri (fun k p -> match List.nth_opt ats k with Some x -> flow s x p | None -> ()) a.a_params;
+          if s.unsound <> Some `Drop_arg_flow then
+            List.iteri (fun k p -> match List.nth_opt ats k with Some x -> flow s x p | None -> ()) a.a_params;
           add_edge s.store ~why a.a_own c.own;
           add_edge s.store ~why a.a_val c.valv;
           finish a.a_result (List.length a.a_params))
@@ -1185,7 +1240,10 @@ and charge_actor (s : st) (c : ctx) (actor : string) (sp : Ast.span) : unit =
       info.ac_handlers;
     (* `init` runs at the spawn, in the actor. *)
     let init_scope = List.map (fun p -> (p, Full)) info.ac_init_params in
-    ignore (walk s { c with owner = q; scope = init_scope @ [ ("state", Full); ("self", Full) ] } info.ac_init)
+    ignore
+      (walk s
+         { c with owner = q; scope = init_scope @ [ ("state", Full); ("self", Full) ]; at_module = false }
+         info.ac_init)
 
 and resolve_actor (s : st) (owner : string) (actor : string) : string option =
   let prefix = March_caps.Cap_rows.ref_prefix ~scopes:s.env.fn_scopes owner in
@@ -1232,7 +1290,7 @@ and state_of (s : st) (key : string) : fstate =
          in
          let c =
            { owner = key; own = a.a_own; valv = a.a_val; scope; lams = []; depth = 0;
-             auth = (if is_let then S.full else auth) }
+             auth = (if is_let then S.full else auth); at_module = is_let }
          in
          let bt = walk s c body in
          flow s bt a.a_result)
@@ -1277,10 +1335,15 @@ type site = {
 type result = {
   sites : site list;
   type_at : Ast.span -> string option;
+  hover_type_at : Ast.span -> string option;
   binders : (Ast.span * string * string) list;  (** where, name, annotated type: bindings that hold a set *)
-  fn_types : (string * string) list;
-  unknown_causes : (string * int) list;
+  fn_types : (string * string) list;  (** "fn f" or "let x", and its printed capture type *)
+  unknown_causes : (string * int) list;  (** over everything analysed, the stdlib included *)
+  unknown_at : (string * Ast.span) list;  (** each place something was not tracked, and why *)
 }
+
+let empty : result =
+  { sites = []; type_at = (fun _ -> None); hover_type_at = (fun _ -> None); binders = []; fn_types = []; unknown_causes = []; unknown_at = [] }
 
 let cmp_span (a : Ast.span) (b : Ast.span) =
   compare (a.Ast.file, a.Ast.start_line, a.Ast.start_col, a.Ast.end_line, a.Ast.end_col)
@@ -1290,7 +1353,7 @@ let analyse ?unsound ?(all = false) (env : env) (decls : Ast.decl list) : result
   let top = { f_depth = 0; f_root = 0; f_vars = []; f_members = [] } in
   let s =
     { env; d = T.decls_of env; store = new_store (); states = Hashtbl.create 256; frames = []; top;
-      hv = Hashtbl.create 64; known = Hashtbl.create 1024; let_keys = Hashtbl.create 64; clauses = Hashtbl.create 16; actors = Hashtbl.create 16;
+      hv = Hashtbl.create 64; known = Hashtbl.create 1024; let_keys = Hashtbl.create 64; clauses = Hashtbl.create 16; extra_bodies = Hashtbl.create 16; actors = Hashtbl.create 16;
       handler_keys = Hashtbl.create 32; sites = []; annot = Hashtbl.create 256; binders = Hashtbl.create 256; fn_iface = Hashtbl.create 256;
       unsound }
   in
@@ -1302,7 +1365,8 @@ let analyse ?unsound ?(all = false) (env : env) (decls : Ast.decl list) : result
     List.sort compare
       (Hashtbl.fold
          (fun k _ acc -> if all || not (Hashtbl.mem env.stdlib_fns k) then k :: acc else acc)
-         env.fn_row_bodies [])
+         env.fn_row_bodies []
+       @ Hashtbl.fold (fun k _ acc -> k :: acc) s.extra_bodies [])
   in
   List.iter (fun k -> ignore (state_of s k)) keys;
   let st = s.store in
@@ -1344,7 +1408,8 @@ let analyse ?unsound ?(all = false) (env : env) (decls : Ast.decl list) : result
   in
   (* Names for the variables a printed type is polymorphic in: a variable
      with nothing flowing into it that something printed depends on. *)
-  let printer () =
+  let saw_unknown = ref false in
+  let printer ?(unknown = "?") () =
     let names : (svar, string) Hashtbl.t = Hashtbl.create 8 in
     let name_of v =
       match Hashtbl.find_opt names v with
@@ -1357,7 +1422,10 @@ let analyse ?unsound ?(all = false) (env : env) (decls : Ast.decl list) : result
     let symbolic : (svar, unit) Hashtbl.t = Hashtbl.create 8 in
     let set v =
       let consts = get local v in
-      if S.is_unknown consts then "?"
+      if S.is_unknown consts then begin
+        saw_unknown := true;
+        unknown
+      end
       else
         let syms =
           List.filter_map
@@ -1384,8 +1452,11 @@ let analyse ?unsound ?(all = false) (env : env) (decls : Ast.decl list) : result
       (fun sc -> List.concat_map (inputs ~neg:true) sc.sc_params)
       (Option.value ~default:[] (Hashtbl.find_opt s.fn_iface owner))
   in
-  let print_ty ~(owner : string) (ty : ty) (t : T.t) : string * bool =
-    let symbolic, set = printer () in
+  let print_ty ?unknown ~(owner : string) (ty : ty) (t : T.t) : string * bool =
+    (* Each printed type names its type variables afresh (a, b, ...), so a
+       report does not depend on what was printed before it. *)
+    reset_tvar_display_names ();
+    let symbolic, set = printer ?unknown () in
     List.iter
       (fun v -> if S.is_empty (get local v) then Hashtbl.replace symbolic v ())
       (owner_inputs owner @ inputs t);
@@ -1472,6 +1543,7 @@ let analyse ?unsound ?(all = false) (env : env) (decls : Ast.decl list) : result
       (fun k ->
          match Hashtbl.find_opt s.fn_iface k with
          | Some (sc :: _) ->
+           reset_tvar_display_names ();
            let symbolic, set = printer () in
            List.iter
              (fun v -> if S.is_empty (get local v) then Hashtbl.replace symbolic v ())
@@ -1492,9 +1564,26 @@ let analyse ?unsound ?(all = false) (env : env) (decls : Ast.decl list) : result
                if carries && String.length r > 0 && r.[0] <> '(' then "(" ^ r ^ ")" else r
              | None -> "_"
            in
-           Some (k, params ^ " -> " ^ res ^ if eff = "" then "" else " needs " ^ eff)
+           if Hashtbl.mem s.handler_keys k then None
+           else if Hashtbl.mem s.let_keys k then
+             (* A module-level value: its type is its initialiser's. *)
+             Some ("let " ^ k, match sc.sc_result_ty with Some ty -> T.pp ~set ty sc.sc_result | None -> "_")
+           else Some ("fn " ^ k, params ^ " -> " ^ res ^ if eff = "" then "" else " needs " ^ eff)
          | _ -> None)
       keys
+  in
+  (* For an editor: a set the pass does not track reads as any authority,
+     which is what it is treated as, with a line saying so. *)
+  let hover_type_at (sp : Ast.span) : string option =
+    match Hashtbl.find_opt s.annot sp, Hashtbl.find_opt env.type_map sp with
+    | Some t, Some ty ->
+      let owner = match Hashtbl.find_opt s.binders sp with Some (_, o) -> o | None -> "" in
+      saw_unknown := false;
+      let annotated, any = print_ty ~unknown:"IO" ~owner ty t in
+      if not any then None
+      else if !saw_unknown then Some (annotated ^ "\n-- part of this is not tracked: it is treated as any authority")
+      else Some annotated
+    | _ -> None
   in
   let binders =
     List.sort
@@ -1503,8 +1592,9 @@ let analyse ?unsound ?(all = false) (env : env) (decls : Ast.decl list) : result
          (fun sp (name, _) acc -> match type_at sp with Some t -> (sp, name, t) :: acc | None -> acc)
          s.binders [])
   in
-  { sites; type_at; binders; fn_types;
-    unknown_causes = List.sort compare (Hashtbl.fold (fun k n acc -> (k, n) :: acc) st.unknown_causes []) }
+  { sites; type_at; hover_type_at; binders; fn_types;
+    unknown_causes = List.sort compare (Hashtbl.fold (fun k n acc -> (k, n) :: acc) st.unknown_causes []);
+    unknown_at = List.rev st.unknown_at }
 
 (* ── `march --dump-captures` ────────────────────────────────────────────── *)
 
@@ -1536,8 +1626,11 @@ let render ~(file : string) (r : result) : string =
     (fun (sp, name, t) ->
        if mine sp then Buffer.add_string b (Printf.sprintf "%-7slet %s : %s\n" (pos sp) name t))
     r.binders;
-  List.iter (fun (k, t) -> Buffer.add_string b (Printf.sprintf "fn %s : %s\n" k t)) r.fn_types;
-  List.iter (fun (cause, n) -> Buffer.add_string b (Printf.sprintf "not tracked (%d): %s\n" n cause)) r.unknown_causes;
+  List.iter (fun (k, t) -> Buffer.add_string b (Printf.sprintf "%s : %s\n" k t)) r.fn_types;
+  List.iter
+    (fun (cause, sp) ->
+       if mine sp then Buffer.add_string b (Printf.sprintf "%-7snot tracked: %s\n" (pos sp) cause))
+    (List.sort_uniq compare r.unknown_at);
   let unknown = List.length (List.filter (fun x -> x.s_set = "?") sites) in
   Buffer.add_string b
     (Printf.sprintf "%d function value%s, %d not tracked\n" (List.length sites)

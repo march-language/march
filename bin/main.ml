@@ -7468,6 +7468,7 @@ let compile filename =
            | _ -> None)
         | None -> None);
     March_eval.Eval.typed_messages := true;
+    if Capture_oracle.active () then Capture_oracle.install typecheck_env desugared.March_ast.Ast.mod_decls;
     (try
        (try March_eval.Eval.run_module desugared
         with

@@ -43,6 +43,13 @@ val narrow : t -> by:t -> t
     any other scoped element [by] relates to is kept whole.  [unknown] is
     never narrowed, and narrowing by [unknown] or [full] changes nothing. *)
 
+val admits : t -> kind:string -> target:string -> cwd:string -> bool
+(** Whether a run-time operation is inside the set: the judgement of
+    [Authority.admits] (stdlib/authority.march), as
+    test/test_authority_differential.ml states it in OCaml.  A path target
+    and a relative path scope are resolved against [cwd]; a network target
+    is [host:port]; a path scope on a host is not judged here. *)
+
 val scope_to_string : scope -> string
 val to_string : t -> string
 (** [needs] syntax, entries joined by [", "]; [""] when empty, ["?"] for

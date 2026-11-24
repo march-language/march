@@ -1,0 +1,19 @@
+8:4    lambda in `reader`  needs IO.FileRead
+         IO.FileRead  calls `File.read` (8:12)
+12:4   lambda in `scoped`  needs IO.FileRead("/srv/")
+         IO.FileRead("/srv/")  calls `File.read` (12:12)
+16:18  lambda in `main`  needs IO.Console
+         IO.Console  calls `println` (16:26)
+18:6   lambda in `main`  needs IO.FileRead("/srv/data/")
+         IO.FileRead("/srv/data/")  calls `File.read` (18:14)
+22:6   lambda in `main`  needs IO.Console
+         IO.Console  captures `outside` (22:14)
+16:8   let outside : a -> Result((), CapError) needs IO.Console
+17:8   let created : String -> Result(Result(String, FileError), CapError) needs IO.FileRead("/srv/data/")
+20:8   let returned : String -> Result(Result(String, FileError), CapError) needs IO.FileRead
+21:8   let brought : a -> Result((), CapError) needs IO.Console
+24:8   let by_clause : String -> Result(Result(String, FileError), CapError) needs IO.FileRead("/srv/")
+fn main : () -> ((String -> Result(Result(String, FileError), CapError) needs IO.FileRead("/srv/data/")), (String -> Result(Result(String, FileError), CapError) needs IO.FileRead), (a -> Result((), CapError) needs IO.Console), (String -> Result(Result(String, FileError), CapError) needs IO.FileRead("/srv/")))
+fn reader : () -> (String -> Result(Result(String, FileError), CapError) needs IO.FileRead)
+fn scoped : () -> (String -> Result(Result(String, FileError), CapError) needs IO.FileRead("/srv/"))
+5 function values, 0 not tracked

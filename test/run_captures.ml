@@ -2,4 +2,4 @@
    the set algebra, the inference tests and the golden `--dump-captures`
    corpus (test/captures/).  Its own runner: the `compiler` and `rest` CI
    shards are near their step timeout. *)
-let () = Alcotest.run "march-captures" (Test_capture_set.tests @ Test_captures.tests)
+let () = Alcotest.run "march-captures" (Test_capture_set.tests @ Test_captures.tests @ Test_capture_golden.tests @ Test_capture_oracle.tests)

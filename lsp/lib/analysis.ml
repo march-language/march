@@ -2464,6 +2464,7 @@ let analyse ~filename ~src : t =
       filename;
       doc;
       type_map         = Hashtbl.create 0;
+      captures         = lazy March_typecheck.Capture.empty;
       def_map          = Hashtbl.create 0;
       use_map          = Hashtbl.create 0;
       vars             = [];
@@ -3366,6 +3367,14 @@ let analyse ~filename ~src : t =
       @ depot_diags
     in
     { src; filename; doc; type_map; def_map; use_map;
+      captures   =
+        lazy
+          (try
+             Tc.capture_analyse final_env (Stdlib_cache.load () @ extra_decls @ desugared.Ast.mod_decls)
+           with e ->
+             if Sys.getenv_opt "MARCH_CAPTURE_DEBUG" <> None then
+               prerr_endline ("[capture] hover analysis failed: " ^ Printexc.to_string e);
+             March_typecheck.Capture.empty);
       vars       = vars_list;
       types      = Tc.StrMap.bindings final_env.Tc.types;
       ctors      = Tc.StrMap.fold (fun name cis acc ->
@@ -3817,7 +3826,7 @@ let run_tir_pass (a : t) : t =
 (* Query helpers                                                       *)
 (* ------------------------------------------------------------------ *)
 
-let ty_at (a : t) ~line ~character : Tc.ty option =
+let span_ty_at (a : t) ~line ~character : (Ast.span * Tc.ty) option =
   let is_user_span (sp : Ast.span) =
     sp.Ast.file = a.filename || sp.Ast.file = "" || sp.Ast.file = "<unknown>"
   in
@@ -3829,13 +3838,14 @@ let ty_at (a : t) ~line ~character : Tc.ty option =
   match candidates with
   | [] -> None
   | _ ->
-    let (_, ty) =
-      List.fold_left (fun (best_sp, best_ty) (sp, ty) ->
-          if Pos.span_smaller sp best_sp then (sp, ty)
-          else (best_sp, best_ty)
-        ) (List.hd candidates) (List.tl candidates)
-    in
-    Some ty
+    Some
+      (List.fold_left (fun (best_sp, best_ty) (sp, ty) ->
+           if Pos.span_smaller sp best_sp then (sp, ty)
+           else (best_sp, best_ty)
+         ) (List.hd candidates) (List.tl candidates))
+
+let ty_at (a : t) ~line ~character : Tc.ty option =
+  Option.map snd (span_ty_at a ~line ~character)
 
 (* Find the Depot schema field under the cursor, if any.
 
@@ -3866,7 +3876,15 @@ let depot_field_at (a : t) ~line ~character
 let type_at (a : t) ~line ~character : string option =
   match depot_field_at a ~line ~character with
   | Some (_, f) -> Some f.df_type
-  | None -> Option.map Tc.pp_ty (ty_at a ~line ~character)
+  | None ->
+    Option.map
+      (fun (sp, ty) ->
+         (* A value that holds a function value shows what it can reach
+            (ocap phase 8a); anything else prints exactly as before. *)
+         match (Lazy.force a.captures).March_typecheck.Capture.hover_type_at sp with
+         | Some annotated -> annotated
+         | None -> Tc.pp_ty ty)
+      (span_ty_at a ~line ~character)
 
 (* Smallest local-binder use/def span containing the cursor -> its symbol id.
    [None] means the cursor is not on a function-local binding (top-level/stdlib,

@@ -1,0 +1,23 @@
+10:11  lambda in `make`  needs IO.Console
+         IO.Console  calls `println` (10:19)
+16:32  lambda in `main`  needs IO.Console
+         IO.Console  calls `println` (16:38)
+18:16  lambda in `main`  needs IO.Console
+         IO.Console  calls `println` (18:24)
+18:36  lambda in `main`  needs IO.FileRead
+         IO.FileRead  calls `File.read` (18:55)
+18:69  lambda in `main`  captures nothing
+21:26  lambda in `main`  needs IO.Console
+         IO.Console  calls `println` (21:34)
+14:8   let c : Data.Client needs IO.Console
+15:8   let fetch : String -> Result((), CapError) needs IO.Console
+15:34  let f : String -> Result((), CapError) needs IO.Console
+16:8   let job : { name : String, run : (() -> Result((), CapError) needs IO.Console) }
+17:8   let run : () -> Result((), CapError) needs IO.Console
+18:8   let both : List((String -> Result((), CapError) needs IO.Console, IO.FileRead))
+19:8   let maybe : Option(Data.Client needs IO.Console)
+20:8   let table : Vault(a -> Result((), CapError) needs IO.Console)
+22:8   let back : Option(a -> Result((), CapError) needs IO.Console)
+fn main : () -> ((String -> Result((), CapError) needs IO.Console), (() -> Result((), CapError) needs IO.Console), List((String -> Result((), CapError) needs IO.Console, IO.FileRead)), Option(Data.Client needs IO.Console), Option(a -> Result((), CapError) needs IO.Console)) needs IO.Mut
+fn make : () -> (Data.Client needs IO.Console)
+6 function values, 0 not tracked

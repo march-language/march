@@ -128,6 +128,48 @@ let narrow e ~by =
                  else [ x ])
             xs))
 
+let admits (t : t) ~(kind : string) ~(target : string) ~(cwd : string) : bool =
+  let resolve p = if Cap_scope.is_absolute p then p else cwd ^ "/" ^ p in
+  let scope_paths (sc : string) : string list =
+    match String.split_on_char ';' sc with
+    | first :: rest ->
+      first
+      :: List.map
+           (fun o -> if String.length o > 5 && String.sub o 0 5 = "name=" then String.sub o 5 (String.length o - 5) else o)
+           rest
+    | [] -> []
+  in
+  let split_target (x : string) : string * int =
+    match String.rindex_opt x ':' with
+    | None -> (x, 0)
+    | Some i -> (
+      let h = String.sub x 0 i and p = String.sub x (i + 1) (String.length x - i - 1) in
+      match int_of_string_opt p with Some n when n >= 1 && n <= 65535 -> (h, n) | _ -> (h, 0))
+  in
+  match t with
+  | Unknown -> true
+  | Set l ->
+    List.exists
+      (fun (e : scope) ->
+         Cap_lattice.cap_subsumes e.kind kind
+         &&
+         match e.arg with
+         | None -> true
+         | Some sc ->
+           if Cap_scope.is_host_scopable kind && Cap_scope.is_host_scopable e.kind then (
+             match Host_scope.parse_decl (Some sc) with
+             | Ok d ->
+               let host, port = split_target target in
+               Host_scope.permits_host_ignoring_path [ d ] ~host ~port ~meth:None
+             | Error _ -> false)
+           else if Cap_scope.is_host_scopable e.kind then target = ""
+           else if Cap_scope.is_name_scopable kind then (
+             match Name_scope.parse sc with Ok s -> Name_scope.admits s target | Error _ -> false)
+           else if Cap_scope.is_scopable kind then
+             List.exists (fun s -> Cap_scope.within ~scope:(resolve s) (resolve target)) (scope_paths sc)
+           else false)
+      l
+
 let scope_to_string (s : scope) : string =
   let path =
     List.map

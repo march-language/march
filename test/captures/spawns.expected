@@ -1,0 +1,17 @@
+6:14   lambda in `shout`  needs IO.Console
+         IO.Console  calls `println` (6:22)
+18:16  lambda in `main`  needs IO.Console
+         IO.Console  spawns `Logger` (18:25)
+19:15  lambda in `main`  needs IO.Console, IO.Spawn
+         IO.Console  calls `Task.async` (19:24)
+         IO.Spawn  calls `Task.async` (19:24)
+19:35  lambda in `main`  needs IO.Console
+         IO.Console  calls `println` (19:44)
+20:15  lambda in `main`  needs IO.Console
+         IO.Console  calls `shout` (20:24)
+18:8   let start : () -> Pid({ n : Int }) needs IO.Console
+19:8   let work : () -> Result((Task(Result((), CapError)) needs IO.Console), CapError) needs IO.Console, IO.Spawn
+20:8   let loud : () -> Result((), CapError) needs IO.Console
+fn main : () -> ((() -> Pid({ n : Int }) needs IO.Console), (() -> Result((Task(Result((), CapError)) needs IO.Console), CapError) needs IO.Console, IO.Spawn), (() -> Result((), CapError) needs IO.Console))
+let shout : String -> Result((), CapError) needs IO.Console
+5 function values, 0 not tracked

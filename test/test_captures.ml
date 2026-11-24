@@ -261,6 +261,17 @@ let test_vault_invariant () =
   Alcotest.(check bool) "what is read back has every stored closure's set" true
     (contains (let_ty r "back") "Option((String -> () needs IO.Console, IO.FileRead))")
 
+let test_toplevel_restrict_not_narrowed () =
+  (* Found by the soundness oracle (restrict_module_level_closure_captures_nothing):
+     a module-level closure captures nothing at run time, so a module-level
+     restrict around it bounds nothing. *)
+  let r =
+    dump
+      "  let top = restrict IO.FileRead(\"/srv/\") do\n    fn p -> File.read(p)\n  end\n  let made_later = fn () -> restrict IO.FileRead(\"/srv/\") do fn q -> File.read(q) end\n  fn main() do (top, made_later) end"
+  in
+  str "made by module-level code" "IO.FileRead" (set_at r "fn p ->");
+  str "made when a module-level closure runs" "IO.FileRead(\"/srv/\")" (set_at r "fn q ->")
+
 (* ── static authority (Task 5) ──────────────────────────────────────────── *)
 
 let test_restrict () =
@@ -321,6 +332,7 @@ let tests =
         Alcotest.test_case "recursion" `Quick test_recursion;
         Alcotest.test_case "interface methods: any impl" `Quick test_iface_union;
         Alcotest.test_case "a top-level let closure" `Quick test_toplevel_let_closure;
+        Alcotest.test_case "a module-level restrict narrows nothing" `Quick test_toplevel_restrict_not_narrowed;
         Alcotest.test_case "a vault is invariant" `Quick test_vault_invariant;
         Alcotest.test_case "restrict" `Quick test_restrict;
         Alcotest.test_case "a clause narrows a lambda" `Quick test_clause_narrows_lambda;
