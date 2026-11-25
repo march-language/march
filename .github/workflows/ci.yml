@@ -209,7 +209,13 @@ jobs:
                 echo "::error::tests declared outside test/, lsp/ and forge/, which no ubuntu shard runs: $stray"
                 exit 1
               fi
-              MARCH_CI_RUNTEST_SPLIT=1 dune build @test/runtest @lsp/runtest ;;
+              # MARCH_TEST_PROCS is for run_authority, the one suite here that
+              # reads it (Test_helpers.run_groups): one process took 32 min on
+              # main and 43 on a slow runner, 23 of them alone after every other
+              # suite had finished, and the step hit 75 (PR #1322). Two, not
+              # $(nproc): the timing-sensitive stdlib end-to-end cases run
+              # beside it for the first 20 minutes.
+              MARCH_TEST_PROCS=2 MARCH_CI_RUNTEST_SPLIT=1 dune build @test/runtest @lsp/runtest ;;
             # run_errors (golden diagnostics, ~32 CPU-min) and test_jit (~10)
             # run here, not in `rest`: `rest` ran 50-58 min against this
             # step's 75 and timed out on every slow runner (November 2026);

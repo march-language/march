@@ -131,6 +131,8 @@ let js_unsupported : (string * string) list = [
   ("mock_unhandled_refused", "the JS target has no `file_exists` or `process_exit`");
   ("mock_vault", "the JS target has no tables (`vault_new`, `vault_get`) or tasks");
   ("mock_vault_open_fails", "the JS target has no tables (`vault_new`, `vault_get`)");
+  ("observer_panic_in_frame_restores", "the JS target has no tasks");
+  ("on_stop_panic_in_frame", "the JS target has no tasks");
 ]
 
 (* Fixtures the REPL mode does not run, each with the reason. *)
@@ -139,6 +141,8 @@ let repl_unsupported : (string * string) list = [
   ("actor_restart_keeps_authority", "actors: the REPL mode runs the fixtures that use no actors");
   ("restrict_actor_restricted_for_life", "actors: the REPL mode runs the fixtures that use no actors");
   ("grant_actor_restricted_for_life", "actors: the REPL mode runs the fixtures that use no actors");
+  ("observer_panic_in_frame_restores", "actors: the REPL mode runs the fixtures that use no actors");
+  ("on_stop_panic_in_frame", "actors: the REPL mode runs the fixtures that use no actors");
   ("grant_wider_launch_error",
    "the REPL requests the full authority (design §21), so no grant is wider than its request");
   ("grant_default_method",
