@@ -101,9 +101,35 @@ shard):
 Hover and query: `lsp/test/test_lsp_analysis.ml` (four cases, one of them that diagnostics do
 not force the pass) and `lsp/test/test_query_cli.ml`.
 
-## Numbers
+## Numbers (2026-11-24, Darwin arm64, 14 cores)
 
-See the PR body for the run that shipped (oracle counts, the cost table, the sweep).
+**The soundness oracle**, over `test/cap_conformance/` (76 programs, the dependency-grant
+fixtures included): 20,164 function-value calls, 3,094 checks of an admitted operation against
+the set of a running function value, 3,092 of them against a tracked set, 0 misses. The five
+fixtures in `test/captures/oracle/` each check against tracked sets, 0 misses.
+
+**The sweep.** The pass over every stdlib function (4,608 function keys): about 0.36 s. Over
+103 bench and example programs, forced on: 0.54 s in all, worst 17 ms. Over the 455
+`test/native` fixtures (by hand, six at a time): no crash, 4.5 s of pass time against 1,495 s of
+front end (0.30%), worst 0.4 s.
+
+**Cost if forced on for every build** (`scripts/capture-cost.sh -n 7`; `pass` is the pass's own
+time from `--timings`, the number to trust, since the wall-time ratios are inside the noise):
+
+| file | check, off (ms) | check, on (ms) | pass (ms) | pass, whole stdlib too (ms) |
+|---|---:|---:|---:|---:|
+| hello | 2560 | 2540 | 3 | 359 |
+| bench/list_ops | 2596 | 2571 | 4 | 360 |
+| bench/tree_transform | 2591 | 2613 | 4 | 355 |
+| bench/binary_trees | 2593 | 2590 | 4 | 351 |
+| bench/json_stream | 3745 | 3726 | 8 | 475 |
+| bench/actor_ping | 4038 | 3944 | 5 | 507 |
+| examples/http_requests | 4076 | 3902 | 8 | 488 |
+| examples/lab_app | 4687 | 5045 | 130 | 426 |
+
+So the pass over what a program reaches is 0.1% to 0.3% of a check for the small programs and
+2.8% for `lab_app`, the largest: inside the design's 5% budget (§18). In 8a no build pays it:
+the pass runs on demand.
 
 ## Decisions taken while building (the plan's rulings)
 
