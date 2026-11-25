@@ -146,9 +146,14 @@ let test_write_to_reset_peer () =
     | None -> ()
     | Some bin ->
       let port = free_port () in
+      (* Drop any MARCH_TLS_* already set: test_tls_groups, which runs in
+         this process first, leaves MARCH_TLS_ROLE=client behind (putenv),
+         and getenv answers the first entry of a duplicated name. *)
+      let inherited =
+        List.filter (fun kv -> not (String.length kv >= 10 && String.sub kv 0 10 = "MARCH_TLS_"))
+          (Array.to_list (Unix.environment ())) in
       let env extra =
-        Array.append (Unix.environment ())
-          (Array.of_list (Printf.sprintf "MARCH_TLS_PORT=%d" port :: extra)) in
+        Array.of_list (inherited @ (Printf.sprintf "MARCH_TLS_PORT=%d" port :: extra)) in
       let s_fd = Unix.openfile s_out [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o600 in
       let server = Unix.create_process_env bin [| bin |]
           (env [ "MARCH_TLS_ROLE=server"; "MARCH_TLS_CERT=" ^ cert; "MARCH_TLS_KEY=" ^ key ])
