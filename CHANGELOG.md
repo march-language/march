@@ -1350,6 +1350,9 @@ git log is authoritative for exact commits.
   authority record per such function allocated for the life of the program; a long-running
   server that catches panics under scoped functions grew by it. Compiled and JIT; the
   interpreter and the JS target were unaffected.
+- **`Csv.each_row` and `Csv.each_row_with_header` close their file when the callback
+  panics.** A caller that caught the panic lost one open file per failed call, and after
+  enough of them every open failed with "Too many open files".
 - **The native REPL keeps its authority after a panic inside a function with `needs`.** A
   panic raised in such a function left that function's `needs` in force for every later
   input, so an operation the session was allowed was refused "by function f's needs". The
