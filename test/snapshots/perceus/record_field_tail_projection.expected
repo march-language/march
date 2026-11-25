@@ -87,12 +87,12 @@ case $f1044 of
   $Tuple2($f1045, $f1046) -> dec_rc $f1044;
 let rest : '_ = $f1046 in
 let ms : '_ = $f1045 in
-let $t1041 : '_ = let $t1040 : '_ = let $rc_150 : '_ = string_join(ms, ",") in
+let $t1041 : '_ = let $t1040 : '_ = let $rc_151 : '_ = string_join(ms, ",") in
 dec_rc ms;
-$rc_150 in
-let $rc_149 : '_ = ++("methods=", $t1040) in
+$rc_151 in
+let $rc_150 : '_ = ++("methods=", $t1040) in
 dec_rc $t1040;
-$rc_149 in
+$rc_150 in
 let $t1042 : ('_, '_) = ($t1041, rest) in
 alloc Ok($t1042)
   _ -> dec_rc $f1044;
@@ -323,22 +323,22 @@ alloc List.Cons(s, $t9)
 ## main
 fn main(_c : Cap(IO.Console)) : () =
   let ms : List({ addr : String, node_id : String }) = let $t16 : { addr : String, node_id : String } = let $t13 : String = let $t12 : String = int_to_string(0) in
-let $rc_148 : '_ = ++("n", $t12) in
+let $rc_149 : '_ = ++("n", $t12) in
 dec_rc $t12;
-$rc_148 in
+$rc_149 in
 let $t15 : String = let $t14 : String = int_to_string(0) in
-let $rc_147 : '_ = ++("a", $t14) in
+let $rc_148 : '_ = ++("a", $t14) in
 dec_rc $t14;
-$rc_147 in
+$rc_148 in
 { node_id = $t13, addr = $t15 } in
 let $t17 : List({ addr : String, node_id : String }) = alloc List.Nil({ addr : String, node_id : String })() in
 alloc List.Cons($t16, $t17) in
 let $t1858 : String = let $t1857 : Int = let $t1856 : List(String) = closed(ms, "n0") in
-let $rc_146 : Int = List.length$List_String($t1856) in
+let $rc_147 : Int = List.length$List_String($t1856) in
 dec_rc $t1856;
-$rc_146 in
+$rc_147 in
 int_to_string($t1857) in
-let $rc_145 : () = println($t1858) in
+let $rc_146 : () = println($t1858) in
 dec_rc $t1858;
-$rc_145
+$rc_146
 

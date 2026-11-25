@@ -87,12 +87,12 @@ case $f1306 of
   $Tuple2($f1307, $f1308) -> dec_rc $f1306;
 let rest : '_ = $f1308 in
 let ms : '_ = $f1307 in
-let $t1303 : '_ = let $t1302 : '_ = let $rc_171 : '_ = string_join(ms, ",") in
+let $t1303 : '_ = let $t1302 : '_ = let $rc_172 : '_ = string_join(ms, ",") in
 dec_rc ms;
-$rc_171 in
-let $rc_170 : '_ = ++("methods=", $t1302) in
+$rc_172 in
+let $rc_171 : '_ = ++("methods=", $t1302) in
 dec_rc $t1302;
-$rc_170 in
+$rc_171 in
 let $t1304 : ('_, '_) = ($t1303, rest) in
 alloc Ok($t1304)
   _ -> dec_rc $f1306;
@@ -938,9 +938,9 @@ fn String.decode_go(b : Bytes, n : Int, i : Int, acc : List(Int)) : List(Int) =
   let $t279 : '_ = >=(i, n) in
 case $t279 of
   True() -> dec_rc $t279;
-let $rc_163 : '_ = List.reverse$List_Int(acc) in
+let $rc_164 : '_ = List.reverse$List_Int(acc) in
 dec_rc acc;
-$rc_163
+$rc_164
   _ -> dec_rc $t279;
 let byte : '_ = Bytes.get(b, i) in
 let $t2118 : '_ = <(byte, 128) in
@@ -954,9 +954,9 @@ let $t2121 : '_ = <(byte, 224) in
 case $t2121 of
   True() -> dec_rc $t2121;
 let $t2123 : '_ = let $t2122 : '_ = +(i, 1) in
-let $rc_164 : '_ = <($t2122, n) in
+let $rc_165 : '_ = <($t2122, n) in
 dec_rc $t2122;
-$rc_164 in
+$rc_165 in
 case $t2123 of
   True() -> dec_rc $t2123;
 let b2 : '_ = let $t2124 : '_ = +(i, 1) in
@@ -977,9 +977,9 @@ let $t2133 : '_ = <(byte, 240) in
 case $t2133 of
   True() -> dec_rc $t2133;
 let $t2135 : '_ = let $t2134 : '_ = +(i, 2) in
-let $rc_165 : '_ = <($t2134, n) in
+let $rc_166 : '_ = <($t2134, n) in
 dec_rc $t2134;
-$rc_165 in
+$rc_166 in
 case $t2135 of
   True() -> dec_rc $t2135;
 let b2 : '_ = let $t2136 : '_ = +(i, 1) in
@@ -1002,9 +1002,9 @@ let $t2148 : '_ = alloc Cons(byte, acc) in
 String.decode_go(b, n, $t2147, $t2148)
   _ -> dec_rc $t2133;
 let $t2150 : '_ = let $t2149 : '_ = +(i, 3) in
-let $rc_166 : '_ = <($t2149, n) in
+let $rc_167 : '_ = <($t2149, n) in
 dec_rc $t2149;
-$rc_166 in
+$rc_167 in
 case $t2150 of
   True() -> dec_rc $t2150;
 let b2 : '_ = let $t2151 : '_ = +(i, 1) in
@@ -1196,9 +1196,9 @@ fn String.to_codepoints(s : String) : List(Int) =
   let b : '_ = Bytes.from_string(s) in
 let $t2168 : '_ = Bytes.length(b) in
 let $t2169 : '_ = alloc Nil() in
-let $rc_167 : '_ = String.decode_go(b, $t2168, 0, $t2169) in
+let $rc_168 : '_ = String.decode_go(b, $t2168, 0, $t2169) in
 dec_rc b;
-$rc_167
+$rc_168
 
 ## String.to_float
 fn String.to_float(s : '_) : '_ =
@@ -1268,9 +1268,9 @@ fn main(_cap_console : Cap(IO.Console)) : () =
   let pair : (String, String) = ("hello", "world") in
 let $t2175 : String = let $t2174 : Int = process_pairs(pair, 3, 0) in
 int_to_string($t2174) in
-let $rc_169 : () = println($t2175) in
+let $rc_170 : () = println($t2175) in
 dec_rc $t2175;
-$rc_169
+$rc_170
 
 ## process_pairs
 fn process_pairs(pair : (String, String), n : Int, acc : Int) : Int =
@@ -1292,7 +1292,7 @@ let x : String = $f1 in
 x
   _ -> dec_rc pair;
 panic("non-exhaustive pattern match") in
-let $rc_168 : Int = String.byte_size(a) in
+let $rc_169 : Int = String.byte_size(a) in
 dec_rc a;
-$rc_168
+$rc_169
 
