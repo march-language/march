@@ -1456,6 +1456,40 @@ let test_repl_panic_continues () =
     [ {|panic("boom")|}; "1 + 1"; {|let p = panic("in let")|};
       "let q = 7"; "q + 1" ]
 
+(* The guard above caught the panic but left the authority slot as the panic
+   found it: after a panic inside a function with a `needs` clause, every
+   later input ran under that function's needs. The interpreter REPL puts the
+   launch authority back (its frames restore on the way out); so must this
+   one. specs/progress/2026-11-24-repl-jit-panic-leaves-frame-authority.md *)
+let panic_authority_session =
+  [ "fn probe(t : String) : String do\n\
+    \  match Authority.check(\"IO.FileRead\", t) do\n\
+    \  Ok(_) -> \"allowed \" ++ t\n\
+    \  Err(e) -> Authority.describe(e)\n\
+    \  end\n\
+     end";
+    "fn boom(p : String) : Int needs IO.FileRead(\"/srv/\") do\n\
+    \  panic(\"boom \" ++ probe(p))\n\
+     end";
+    {|probe("/etc/hosts")|}; {|boom("/etc/hosts")|}; {|probe("/etc/hosts")|};
+    {|probe("/etc/passwd")|} ]
+
+let panic_authority_present =
+  [ "runtime error: panic: boom IO.FileRead", "the panic, raised inside the frame";
+    {|= "allowed /etc/passwd"|}, "the launch authority after the panic" ]
+let panic_authority_absent =
+  [ {|= "IO.FileRead|}, "an input answered under the panicked function's needs" ]
+
+let test_repl_panic_restores_authority_jit () =
+  run_quirk_session ~label:"panic authority (JIT)" ~env_prefix:""
+    ~present:panic_authority_present ~absent:panic_authority_absent
+    panic_authority_session
+
+let test_repl_panic_restores_authority_interp () =
+  check_quirk_session ~label:"panic authority (interpreter mode)"
+    ~present:panic_authority_present ~absent:panic_authority_absent
+    (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" panic_authority_session)
+
 (* ── Negative Ints in a tagged slot (2026-10-14) ───────────────────────
    specs/progress/2026-10-14-repl-jit-negative-tagged-int.md.
 
@@ -1742,6 +1776,10 @@ let () =
         test_repl_non_ascii_interp;
       Alcotest.test_case "a panic does not end the session (JIT)" `Slow
         test_repl_panic_continues;
+      Alcotest.test_case "a panic inside a frame leaves the launch authority (JIT)" `Slow
+        test_repl_panic_restores_authority_jit;
+      Alcotest.test_case "a panic inside a frame leaves the launch authority (interpreter)"
+        `Quick test_repl_panic_restores_authority_interp;
       Alcotest.test_case "negative Ints in List/Option/tuple slots print (JIT)"
         `Slow test_repl_negative_ints_jit;
       Alcotest.test_case "negative Ints in List/Option/tuple slots print (interpreter)"
