@@ -41,7 +41,7 @@ mod CertUpdateReplayB do
       Ok(x) -> x
       Err(e) -> panic(e)
     end
-    match ClusterNode.start(c, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         Authority.ignore(println(me() ++ ": up"))

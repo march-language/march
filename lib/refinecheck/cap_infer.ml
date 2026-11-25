@@ -222,6 +222,7 @@ let direct_callees (e : A.expr) : string list =
       go scrut; List.iter (fun (br : A.branch) -> go br.A.branch_body) arms
     | A.EIf (c, t, f, _) -> go c; go t; go f
     | A.ERestrict (es, b, _) -> List.iter go es; go b
+    | A.EMock (es, h, b, _) -> List.iter go (es @ [ h ]); go b
     | A.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
     | A.ELam (_, body, _) -> go body
     | A.EPipe (a, b, _) | A.ESend (a, b, _) -> go a; go b

@@ -1,15 +1,14 @@
 mod CapMockActor do
-  -- Capability mocking reaching an ACTOR handler.
+  -- A mock reaching an ACTOR handler (ocap phase 7).
   --
-  -- The handler is entered from the scheduler, not from an elaborated caller,
-  -- and the dispatch function's arity is frozen because the actor record holds
-  -- it as `$d_dispatch`. So the capability cannot be threaded in as a
-  -- parameter; it is captured at the SPAWN site onto the actor's runtime
-  -- metadata and read back by the dispatch.
+  -- The handler is entered from the scheduler, not from a call inside the
+  -- block. An actor runs under the authority current at its spawn, and the
+  -- mock is a layer of that authority, so an actor spawned inside a `mock`
+  -- keeps the mock for life.
   --
   -- Two actors, and which one is mocked is the whole test. `outside` is
-  -- spawned before the mock exists; `inside` is spawned within `with_cap`.
-  -- `outside` is then sent its message AFTER the `with_cap` block has closed,
+  -- spawned before the mock exists; `inside` is spawned within the `mock`.
+  -- `outside` is then sent its message AFTER the `mock` block has closed,
   -- so a global or dynamically-scoped capability slot would leave it unmocked
   -- for the wrong reason. Capturing per-actor at spawn is what makes the
   -- answer depend on where each actor was created rather than on when it runs.
@@ -24,15 +23,13 @@ mod CapMockActor do
     end
   end
 
-  fn main(c : Cap(IO.Console)) do
+  fn main() do
     let outside = spawn(Logger)
-    let mock = cap_impl(c, { cap_ops_empty(c) with
-      print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) })
-    with_cap(mock, fn _ -> do
+    mock IO.Console with { print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) } do
       let inside = spawn(Logger)
       send(inside, Say("in"))
       run_until_idle()
-    end)
+    end
     send(outside, Say("out"))
     run_until_idle()
   end

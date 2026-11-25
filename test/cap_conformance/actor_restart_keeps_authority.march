@@ -65,21 +65,20 @@ mod ActorRestartKeepsAuthority do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
     let boss = start()
     let c1 = child_of(boss)
-    println("first: " ++ ask(Actor.pid_from_int(intro, c1)))
-    send(Actor.pid_from_int(intro, c1), Poison())
+    println("first: " ++ ask(Authority.must(Actor.pid_from_int(c1))))
+    send(Authority.must(Actor.pid_from_int(c1)), Poison())
     run_until_idle()
     let c2 = child_of(boss)
     println("restarted: " ++ bool_to_string(c2 != c1))
-    println("after crash: " ++ ask(Actor.pid_from_int(intro, c2)))
-    kill(Actor.pid_from_int(intro, c2))
+    println("after crash: " ++ ask(Authority.must(Actor.pid_from_int(c2))))
+    kill(Authority.must(Actor.pid_from_int(c2)))
     run_until_idle()
     let c3 = child_of(boss)
     println("restarted again: " ++ bool_to_string(c3 != c2))
-    println("after kill: " ++ ask(Actor.pid_from_int(intro, c3)))
+    println("after kill: " ++ ask(Authority.must(Actor.pid_from_int(c3))))
     println("main: " ++ verdict(File.exists("/etc/hosts")))
   end
 end

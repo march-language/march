@@ -1,6 +1,7 @@
 mod Main do
   needs IO
   needs IO.Console
+  needs Actor.Introspect
 
   actor Counter do
     state { n : Int }
@@ -8,8 +9,8 @@ mod Main do
     on Bump() do { n: state.n + 1 } end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let a = spawn(Counter)
     println("register a: " ++ bool_to_string(Actor.register(a, "worker")))
     println("listed before kill: " ++ bool_to_string(List.member(Actor.registered(intro), "worker")))

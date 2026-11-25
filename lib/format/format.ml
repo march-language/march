@@ -476,7 +476,7 @@ let is_stmt_form = function
 let rec level_of e =
   if March_ast.Bounded_pred.view e <> None then lv_expr else
   match e with
-  | EIf _ | ERestrict _ | EMatch _ | ECond _ | ELam _ | EAssert _ | EProof _ -> lv_expr
+  | EIf _ | ERestrict _ | EMock _ | EMatch _ | ECond _ | ELam _ | EAssert _ | EProof _ -> lv_expr
   | EPipe _ -> lv_pipe
   | EBlock ([x], _) -> level_of x
   | EApp (EVar { txt = "++"; _ }, [_; _], _) when try_collect_interp e <> None -> lv_atom
@@ -519,6 +519,7 @@ let children e =
   | EProof (p, _) -> proof_children p
   | EIf (c, t, f, _) -> [c; t; f]
   | ERestrict (es, b, _) -> es @ [b]
+  | EMock (es, h, b, _) -> (es @ [ h ]) @ [b]
   | ECond (arms, _) -> List.concat_map (fun (c, b) -> [c; b]) arms
   | EPipe (a, b, _) | ESend (a, b, _) -> [a; b]
   | ELetQ (_, r, c, _) | ELetStar (_, r, c, _) -> [r; c]
@@ -715,6 +716,12 @@ and render_raw ind e =
     else
       Printf.sprintf "restrict %s do %s end"
         (String.concat ", " (List.map (r lv_pipe) es)) (r lv_expr b)
+  | EMock (es, h, b, _)         ->
+    if needs_break b || needs_break h || List.exists needs_break es then
+      sub_block ind (fun cx -> emit_mock_lines cx es h b)
+    else
+      Printf.sprintf "mock %s with %s do %s end"
+        (String.concat ", " (List.map (r lv_pipe) es)) (r lv_pipe h) (r lv_expr b)
   | EPipe (a, b, _)             -> Printf.sprintf "%s |> %s" (r lv_pipe a) (r lv_or b)
   | EAnnot (x, t, _)            -> Printf.sprintf "(%s : %s)" (r lv_pipe x) (fmt_ty t)
   | EHole (None, _)             -> "?"
@@ -785,6 +792,9 @@ and emit_stmt ctx e =
 
   | ERestrict (es, b, _) ->
     emit_restrict ctx es b
+
+  | EMock (es, h, b, _) ->
+    emit_mock ctx es h b
 
   | EPipe _ ->
     emit_pipe_chain ctx e
@@ -1045,6 +1055,16 @@ and emit_restrict ctx es body =
 and emit_restrict_lines ctx es body =
   line ctx (Printf.sprintf "restrict %s do"
     (String.concat ", " (List.map (render ctx.indent lv_pipe) es)));
+  indented ctx (fun () -> emit_body ctx body);
+  line ctx "end"
+
+(* A mock is always written on lines: its handler is usually a record. *)
+and emit_mock ctx es h body = emit_mock_lines ctx es h body
+
+and emit_mock_lines ctx es h body =
+  line ctx (Printf.sprintf "mock %s with %s do"
+    (String.concat ", " (List.map (render ctx.indent lv_pipe) es))
+    (render ctx.indent lv_pipe h));
   indented ctx (fun () -> emit_body ctx body);
   line ctx "end"
 

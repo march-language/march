@@ -9,6 +9,7 @@ mod Main do
   needs IO
   needs IO.Console
   needs IO.Clock
+  needs Actor.Debug
 
   type Shape = Circle(Int) | Box(Int, Int)
 
@@ -78,8 +79,8 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let d = Actor.debug(io)
+  fn main(io : Cap(IO), _cap_debug : Cap(Actor.Debug)) do
+    let d = Authority.must(Actor.debug())
     -- rendering, and FIFO: the request queues behind the three Incs
     let c = spawn(Counter)
     let _ = send(c, Inc(1))

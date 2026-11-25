@@ -1,0 +1,25 @@
+-- TEST
+-- GRANT: IO.Console
+-- A mock admits the operations it covers whatever the launch grants
+-- (design §12): launched with the console only, the program reads a file
+-- inside a `mock IO.FileRead` whose handler takes `file_read`. Outside the
+-- block the same read is refused by the launch grant.
+mod MockAdmitsHandled do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn read(p : String) : String do
+    match File.read(p) do
+    Ok(Ok(s)) -> "read " ++ s
+    Ok(Err(_)) -> "real read failed"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main() do
+    println(read("/fixtures/a.txt"))
+    mock IO.FileRead with { file_read: Some(fn p -> Ok("<" ++ p ++ ">")) } do
+      println(read("/fixtures/a.txt"))
+    end
+  end
+end

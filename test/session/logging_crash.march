@@ -70,7 +70,7 @@ mod LoggingCrash do
   fn main(c : Cap(IO)) do
     IO.puts("-- round 1: C is alive")
     let t1 = Session.in_process_with(fn line -> Authority.ignore(IO.puts("transport: " ++ line)))
-    let s1 = Session.attach(c, t1.ops)
+    let s1 = Authority.must(Session.attach(t1.ops))
     let i1 = Logging_I.register(s1, 0)
     let c1 = Logging_C.register(s1, 0)
     let l1 = Logging_L.register(s1, 0)
@@ -80,7 +80,7 @@ mod LoggingCrash do
     t1.drain(())
     IO.puts("-- round 2: C has crashed")
     let t2 = Session.in_process_with(fn line -> Authority.ignore(IO.puts("transport: " ++ line)))
-    let s2 = Session.attach(c, t2.ops)
+    let s2 = Authority.must(Session.attach(t2.ops))
     let i2 = Logging_I.register(s2, 0)
     let l2 = Logging_L.register(s2, 0)
     t2.crash(Logging_Msg.role_C(), "connection lost")

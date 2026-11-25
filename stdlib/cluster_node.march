@@ -2752,16 +2752,20 @@ mod ClusterNode do
   proof cap Live with ClusterOps
 
   doc """
-  Attach a cluster dictionary. With `start`, the only way to obtain a
-  `Cap(ClusterNode.Live)`; this one is the test seam: a test builds `ops`
-  (usually `{ ClusterNode.ops_stub(id) with members: ..., subscribe: ... }`)
-  and hands the cap to code written against a real node.
+  Attach a cluster dictionary, or `Err(CapError(...))` when the current
+  authority does not hold the capability kind `IO.Cluster`. With `start`,
+  the only way to obtain a `Cap(ClusterNode.Live)`; this one is the test
+  seam: a test builds `ops` (usually
+  `{ ClusterNode.ops_stub(id) with members: ..., subscribe: ... }`) and hands
+  the cap to code written against a real node.
   """
-  fn attach(io : Cap(IO), ops : ClusterOps) : Cap(ClusterNode.Live) do
+  fn attach(ops : ClusterOps) : Result(Cap(ClusterNode.Live), CapError) do
+    let? _ = Authority.check("IO.Cluster", "")
     -- `attach_session` is filled in here and nowhere else, over whatever the
-    -- caller put in the field: it is the one use of the root capability a
-    -- node keeps (see `with_session` below), so it must come from [io].
-    cap_impl(mint_cap(io), { ops with attach_session: fn sops -> Session.attach(io, sops) })
+    -- caller put in the field: it is the one power over sessions a node
+    -- keeps (see `with_session` below). The closure is made here, after the
+    -- check, so it carries the attaching code's authority wherever it goes.
+    Ok(cap_impl(mint_cap(root_cap), { ops with attach_session: fn sops -> Authority.must(Session.attach(sops)) }))
   end
 
   pfn unsupported(op : String) do
@@ -3285,11 +3289,25 @@ mod ClusterNode do
   Start a node: listen on `cfg.listen_port`, begin SWIM, dial the seeds.
   Returns at once -- a node that reaches no seed runs as a cluster of one
   and keeps redialling them (use `subscribe` or `await_members` to wait for
-  peers). Err only if the listen socket cannot be opened. The node is a
-  `Cap(ClusterNode.Live)` minted from [io]; pass it on to everything that
-  uses the cluster.
+  peers). Err if the listen socket cannot be opened, or (with
+  `Authority.describe` of the refusal) when the current authority does not
+  hold the capability kind `IO.Cluster`. The node is a
+  `Cap(ClusterNode.Live)`; pass it on to everything that uses the cluster.
   """
-  fn start(io : Cap(IO), cfg : CnConfig) : Result(Cap(ClusterNode.Live), String) do
+  fn start(cfg : CnConfig) : Result(Cap(ClusterNode.Live), String) do
+    match Authority.check("IO.Cluster", "") do
+    Err(e) -> Err(Authority.describe(e))
+    Ok(_) ->
+      match start_checked(cfg) do
+        Err(e) -> Err(e)
+        Ok(h) -> attach(ops_of(h)) |> Result.map_err(Authority.describe)
+      end
+    end
+  end
+
+  -- Binds the node and starts its loops; `start` mints the Cap(ClusterNode.Live)
+  -- (a private function may not).
+  pfn start_checked(cfg : CnConfig) : Result(CnHandle, String) do
     match tcp_listen(cfg.listen_port) do
       Err(e) -> Err("cluster_node: listen on " ++ int_to_string(cfg.listen_port) ++ ": " ++ e)
       Ok(listen_fd) ->
@@ -3354,7 +3372,7 @@ mod ClusterNode do
         -- and reported by peer (the hook is process-wide; other nodes'
         -- fds are not in our links).
         let _ = NetKernel.on_frame_rejected(fn (fd, n) -> on_bad_frame(h, fd, n))
-        Ok(attach(io, ops_of(h)))
+        Ok(h)
     end
   end
 
@@ -3366,8 +3384,8 @@ mod ClusterNode do
 
   doc """
   Run [body] with a session attached on this node's authority: the
-  `Cap(Session.Live)` that `Session.attach(io, sops)` would give, without the
-  root capability.
+  `Cap(Session.Live)` that `Session.attach(sops)` would give, without the
+  capability kind `IO.Cluster`.
 
   A node was started (or attached) by a holder of `Cap(IO)`, and it keeps that
   one power: to say a session's transport is attached. The session runners use

@@ -176,6 +176,7 @@ let rec mentions_panic (e : A.expr) : bool =
   | A.ELet (b, _) -> mentions_panic b.A.bind_expr
   | A.EIf (c, t, f, _) -> mentions_panic c || mentions_panic t || mentions_panic f
   | A.ERestrict (es, b, _) -> List.exists mentions_panic es || mentions_panic b
+  | A.EMock (es, h, b, _) -> List.exists mentions_panic (es @ [ h ]) || mentions_panic b
   | A.EMatch (s, brs, _) ->
     mentions_panic s
     || List.exists (fun (br : A.branch) -> mentions_panic br.A.branch_body) brs
@@ -213,6 +214,7 @@ let rec handles_empty_nonfatally (param : string) (e : A.expr) : bool =
   | A.ELet (b, _) -> sub b.A.bind_expr
   | A.EIf (c, t, f, _) -> sub c || sub t || sub f
   | A.ERestrict (es, b, _) -> List.exists sub es || sub b
+  | A.EMock (es, h, b, _) -> List.exists sub (es @ [ h ]) || sub b
   | A.EApp (f, args, _) -> sub f || List.exists sub args
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) -> sub e
   | A.ELam (_, b, _) | A.ELetFn (_, _, _, b, _) -> sub b
@@ -312,6 +314,7 @@ let rec calls_name (name : string) (e : A.expr) : bool =
   | A.ELet (b, _) -> calls_name name b.A.bind_expr
   | A.EIf (c, t, f, _) -> calls_name name c || calls_name name t || calls_name name f
   | A.ERestrict (es, b, _) -> List.exists (calls_name name) es || calls_name name b
+  | A.EMock (es, h, b, _) -> List.exists (calls_name name) (es @ [ h ]) || calls_name name b
   | A.EMatch (s, brs, _) ->
     calls_name name s
     || List.exists (fun (br : A.branch) -> calls_name name br.A.branch_body) brs
@@ -413,6 +416,7 @@ let rec calls_target ~defined ~(caller : string list) ~(target : string) (e : A.
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.EIf (c, t, f, _) -> go c || go t || go f
   | A.ERestrict (es, b, _) -> List.exists go es || go b
+  | A.EMock (es, h, b, _) -> List.exists go (es @ [ h ]) || go b
   | A.EMatch (s, brs, _) -> go s || List.exists (fun (br : A.branch) -> go br.A.branch_body) brs
   | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> any es
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) -> go e
@@ -695,6 +699,7 @@ let rec instrument_at (site : A.span) (mk : A.expr -> A.expr option) (e : A.expr
       | A.ELet (b, sp) -> A.ELet ({ b with A.bind_expr = go b.A.bind_expr }, sp)
       | A.EIf (c, t, f, sp) -> A.EIf (go c, go t, go f, sp)
       | A.ERestrict (es, b, sp) -> A.ERestrict (List.map go es, go b, sp)
+      | A.EMock (es, h, b, sp) -> A.EMock (List.map go es, go h, go b, sp)
       | A.EMatch (sc, brs, sp) ->
         A.EMatch (go sc, List.map (fun (br : A.branch) -> { br with A.branch_body = go br.A.branch_body }) brs, sp)
       | A.ETuple (es, sp) -> A.ETuple (List.map go es, sp)

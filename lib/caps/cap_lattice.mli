@@ -20,6 +20,12 @@ val cap_ancestors : string -> string list
     to) [child]. E.g., [cap_subsumes "IO" "IO.FileRead" = true]. *)
 val cap_subsumes : string -> string -> bool
 
+(** [is_authority c]: [c] is a node of the capability lattice ([IO] and
+    below, [Actor.Introspect], [Actor.Debug]): authority that `needs`,
+    `restrict`, grants and `main`'s request bound, as opposed to an FFI root
+    or a proof capability. *)
+val is_authority : string -> bool
+
 (** [normalize caps] drops any cap in [caps] that is already subsumed by
     another cap in the list (e.g. ["IO"; "IO.FileRead"] -> ["IO"]).  Preserves
     the relative order of the caps that remain. *)

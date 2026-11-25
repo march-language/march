@@ -62,7 +62,7 @@ mod CertOkA do
       Err(e) -> panic(e)
     end
     println(me() ++ ": mode " ++ ClusterAuth.mode_name(cfg.auth))
-    match ClusterNode.start(c, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         println(me() ++ ": up")

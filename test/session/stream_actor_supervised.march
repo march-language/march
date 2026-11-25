@@ -169,17 +169,17 @@ mod StreamActorSupervised do
 
   fn child(intro : Cap(Actor.Introspect), sup, field : String) do
     match get_actor_field(sup, field) do
-      Some(n) -> Actor.pid_from_int(intro, n)
+      Some(n) -> Authority.must(Actor.pid_from_int(n))
       None    -> panic("stream_actor_supervised: no child " ++ field)
     end
   end
 
-  fn main(c : Cap(IO)) do
-    let intro = Actor.introspect(c)
+  fn main(c : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let handlers = Authority.must(Vault.new("stream_actor_sup_handlers"))
     let pending  = Authority.must(Vault.new("stream_actor_sup_pending"))
     let t = mailbox(handlers, pending)
-    let s = Session.attach(c, t.ops)
+    let s = Authority.must(Session.attach(t.ops))
 
     let sup = spawn(EpSup)
     let pc = child(intro, sup, "cons")

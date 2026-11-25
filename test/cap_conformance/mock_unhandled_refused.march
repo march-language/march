@@ -1,0 +1,19 @@
+-- TEST
+-- GRANT: IO.Console
+-- A mock never lets a test reach the real outside world beyond its launch
+-- (ocap phase 7): inside a `mock IO.FileRead` whose handler takes only
+-- `file_read`, `File.exists` is admitted by the mock but has no handler, so
+-- it runs the real operation, checked against the authority outside the
+-- mock, which refuses it: the program stops with the refusal (a panic: the
+-- operation's own result cannot carry it).
+mod MockUnhandledRefused do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn main() do
+    mock IO.FileRead with { file_read: Some(fn _ -> Ok("x")) } do
+      let _ = File.exists("/fixtures/a.txt")
+      println("unreachable")
+    end
+  end
+end

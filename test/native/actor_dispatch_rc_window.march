@@ -81,21 +81,21 @@ mod Main do
   end
 
   fn seen_by(intro : Cap(Actor.Introspect), child) do
-    match get_actor_field(Actor.pid_from_int(intro, child), "seen") do
+    match get_actor_field(Authority.must(Actor.pid_from_int(child)), "seen") do
       None    -> -1
       Some(n) -> n
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let boss = spawn(Boss)
     let victim = current_child(boss)
     -- Minted BEFORE the reading: pid_of_int takes a reference, and `send`
     -- keeps the one it is handed
     -- (specs/progress/2026-09-14-pid-ownership-settled-send-borrows-self-owned.md), so a
     -- pid minted inside the window would read one above the true count.
-    let victim_pid = Actor.pid_from_int(intro, victim)
+    let victim_pid = Authority.must(Actor.pid_from_int(victim))
     let rc_outside = actor_rc(victim)
     println("victim is multiply owned: " ++ bool_to_string(rc_outside > 1))
 

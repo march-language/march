@@ -187,6 +187,7 @@ let iter_names (f : site -> Ast.name -> unit) (m : Ast.module_) : unit =
     | Ast.EField (e, fld, _) -> expr e; f SField fld
     | Ast.EIf (c, t, el, _) -> expr c; expr t; expr el
     | Ast.ERestrict (es, b, _) -> List.iter expr es; expr b
+    | Ast.EMock (es, h, b, _) -> List.iter expr (es @ [ h ]); expr b
     | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> expr c; expr b) arms
     | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> expr a; expr b
     | Ast.EAnnot (e, t, _) -> expr e; ty t
@@ -598,6 +599,7 @@ and iter_app_exprs (f : Ast.expr -> Ast.expr list -> Ast.span -> unit)
     | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> ex c; ex b) arms
     | Ast.EIf (c, t, el, _) -> ex c; ex t; ex el
     | Ast.ERestrict (es, b, _) -> List.iter ex es; ex b
+    | Ast.EMock (es, h, b, _) -> List.iter ex (es @ [ h ]); ex b
     | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> ex a; ex b
     | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> ex e) fs
     | Ast.ERecordUpdate (e, fs, _) -> ex e; List.iter (fun (_, e) -> ex e) fs
@@ -626,7 +628,7 @@ and span_of_expr (e : Ast.expr) : Ast.span =
   | Ast.ELam (_, _, sp) | Ast.EBlock (_, sp) | Ast.ELet (_, sp)
   | Ast.EMatch (_, _, sp) | Ast.ETuple (_, sp) | Ast.ERecord (_, sp)
   | Ast.ERecordUpdate (_, _, sp) | Ast.EField (_, _, sp) | Ast.EIf (_, _, _, sp)
-  | Ast.ERestrict (_, _, sp)
+  | Ast.ERestrict (_, _, sp) | Ast.EMock (_, _, _, sp)
   | Ast.ECond (_, sp) | Ast.EPipe (_, _, sp) | Ast.EAnnot (_, _, sp)
   | Ast.EHole (_, sp) | Ast.EAtom (_, _, sp) | Ast.ESend (_, _, sp)
   | Ast.ESpawn (_, sp) | Ast.EDbg (_, sp) | Ast.ELetFn (_, _, _, _, sp)
@@ -728,6 +730,7 @@ let unshadowed_uses (targets : string list) (e : Ast.expr) : (string * Ast.span)
           walk b br.branch_body) brs
     | Ast.EIf (c, t, el, _) -> walk bound c; walk bound t; walk bound el
     | Ast.ERestrict (es, b, _) -> List.iter (walk bound) es; walk bound b
+    | Ast.EMock (es, h, b, _) -> List.iter (walk bound) (es @ [ h ]); walk bound b
     | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> walk bound c; walk bound b) arms
     | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> walk bound a; walk bound b
     | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> walk bound e) fs

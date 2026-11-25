@@ -272,6 +272,7 @@ let rec iter_sites
         walk f ac arm.A.branch_body)
       arms
   | A.ERestrict (es, b, _) -> List.iter go es; go b
+  | A.EMock (es, h, b, _) -> List.iter go (es @ [ h ]); go b
   | A.EIf (cond, t, e, _) ->
     go cond;
     walk f { c with path = (cond, false) :: c.path } t;

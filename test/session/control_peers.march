@@ -381,7 +381,7 @@ mod ControlPeers do
   pfn session(c : Cap(IO), nc : Cap(IO.NetConnect), fw : Cap(IO.FileWrite), lv : Vault(Control.CtlLeader), ints : Vault(Int), nodes : Vault(SimNode), tally : Vault(Int), name : String) : () do
     put_int(ints, "budget", 3)
     let t = counting(tally)
-    let s = Session.attach(c, t.ops)
+    let s = Authority.must(Session.attach(t.ops))
     let _ = agent_role(s, nc, Ctl_Agent.register(s, 0), agent_ops(nodes, name))
     let _ = control_role(s, nc, fw, Ctl_Control.register(s, 0), leader_ops(lv, ints, nodes))
     t.drain(())
@@ -479,7 +479,7 @@ mod ControlPeers do
       let nodes = Authority.must(Vault.new("control_peers_chaos_nodes"))
       put_node(nodes, sim("r1", "render"))
       let t = counting(tally)
-      let s = Session.attach(c, t.ops)
+      let s = Authority.must(Session.attach(t.ops))
       let _ = agent_role(s, nc, Ctl_Agent.register(s, 0), agent_ops(nodes, "r1"))
       let _ = Ctl_Control.chaos(s, nc, fw, Ctl_Control.register(s, 0), seed, gen_order())
       t.drain(())
@@ -497,7 +497,7 @@ mod ControlPeers do
       let ints = Authority.must(Vault.new("control_peers_chaos_ints"))
       put_int(ints, "budget", 6)
       let t = counting(tally)
-      let s = Session.attach(c, t.ops)
+      let s = Authority.must(Session.attach(t.ops))
       let _ = control_role(s, nc, fw, Ctl_Control.register(s, 0), leader_ops(lv, ints, nodes))
       let _ = Ctl_Agent.chaos(s, nc, Ctl_Agent.register(s, 0), seed, gen_report(), gen_result())
       t.drain(())
@@ -513,12 +513,12 @@ mod ControlPeers do
     if seed == 30 do ()
     else
       let t = counting(tally)
-      let s = Session.attach(c, t.ops)
+      let s = Authority.must(Session.attach(t.ops))
       let _ = fetch_server(s, nc, CtlFetch_Server.register(s, 0), fn h -> artifact(h), 4)
       let _ = CtlFetch_Agent.chaos(s, nc, CtlFetch_Agent.register(s, 0), seed)
       t.drain(())
       let t2 = counting(tally)
-      let s2 = Session.attach(c, t2.ops)
+      let s2 = Authority.must(Session.attach(t2.ops))
       let _ = fetch_agent(s2, nc, CtlFetch_Agent.register(s2, 0), "h1", fn _ -> bump(got, "fetched"))
       let _ = CtlFetch_Server.chaos(s2, nc, CtlFetch_Server.register(s2, 0), seed, gen_chunk())
       t2.drain(())
@@ -536,7 +536,7 @@ mod ControlPeers do
     put_node(nodes1, sim("r1", "render"))
     let o1 = Control.order(r, head(r.steps), "r1")
     let t1 = Session.in_process()
-    let s1 = Session.attach(c, t1.ops)
+    let s1 = Authority.must(Session.attach(t1.ops))
     let _ = agent_role(s1, nc, Ctl_Agent.register(s1, 0), agent_ops(nodes1, "r1"))
     let _ = Ctl_Control.script(s1, nc, fw, Ctl_Control.register(s1, 0), [
       Ctl_Control.Expect_Hello(fn rep -> Authority.ignore(IO.puts("script: hello from " ++ rep.node ++ " at seq " ++ int_to_string(rep.seq)))),
@@ -563,7 +563,7 @@ mod ControlPeers do
     put_int(ints2, "budget", 3)
     let r1_old = sim_report(node_of(nodes2, "r1"))
     let t2 = Session.in_process()
-    let s2 = Session.attach(c, t2.ops)
+    let s2 = Authority.must(Session.attach(t2.ops))
     let _ = control_role(s2, nc, fw, Ctl_Control.register(s2, 0), leader_ops(lv2, ints2, nodes2))
     let _ = Ctl_Agent.script(s2, nc, Ctl_Agent.register(s2, 0), [
       Ctl_Agent.Send_Hello(wire_report(r1_old)),
@@ -605,17 +605,17 @@ mod ControlPeers do
 
     IO.puts("-- CtlFetch: the real roles, a known and an unknown hash")
     let t5 = Session.in_process()
-    let s5 = Session.attach(c, t5.ops)
+    let s5 = Authority.must(Session.attach(t5.ops))
     let _ = fetch_server(s5, nc, CtlFetch_Server.register(s5, 0), fn h -> artifact(h), 4)
     let _ = fetch_agent(s5, nc, CtlFetch_Agent.register(s5, 0), "h1", fn hex -> Authority.ignore(IO.puts("fetched h1: " ++ hex)))
     t5.drain(())
     let t6 = Session.in_process()
-    let s6 = Session.attach(c, t6.ops)
+    let s6 = Authority.must(Session.attach(t6.ops))
     let _ = fetch_server(s6, nc, CtlFetch_Server.register(s6, 0), fn h -> artifact(h), 4)
     let _ = fetch_agent(s6, nc, CtlFetch_Agent.register(s6, 0), "nope", fn hex -> Authority.ignore(IO.puts("fetched nope: \"" ++ hex ++ "\"")))
     t6.drain(())
     let t7 = Session.in_process()
-    let s7 = Session.attach(c, t7.ops)
+    let s7 = Authority.must(Session.attach(t7.ops))
     let _ = fetch_server(s7, nc, CtlFetch_Server.register(s7, 0), fn h -> artifact(h), 16)
     let _ = CtlFetch_Agent.script(s7, nc, CtlFetch_Agent.register(s7, 0), [
       CtlFetch_Agent.Send_Want("h1"),

@@ -7,6 +7,7 @@ mod Main do
   needs IO
   needs IO.Console
   needs IO.Clock
+  needs Actor.Debug
 
   actor Staller do
     state { n : Int }
@@ -20,8 +21,8 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let d = Actor.debug(io)
+  fn main(io : Cap(IO), _cap_debug : Cap(Actor.Debug)) do
+    let d = Authority.must(Actor.debug())
     let st = spawn(Staller)
     Actor.set_queue_limit(st, 1, 3)
     let _ = send(st, Stall())

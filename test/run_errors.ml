@@ -114,11 +114,14 @@ type result = { code : int; err : string; json : string;
    - [run]: the program is RUN (interpreted) and its stderr pinned: a
      run-time failure report (panic, run-time error, actor crash).  There is
      no JSON form, so its [.json.expected] is empty;
-   - [run-compiled]: the same, for the compiled binary's report. *)
+   - [run-compiled]: the same, for the compiled binary's report;
+   - [test]: [--check --test] / [--check-json --test], a test build (ocap
+     phase 7: what a `mock` block's own diagnostics look like). *)
 let why_copies_marker = "-- MARCH-MODE: why-copies"
 let run_marker = "-- MARCH-MODE: run"
 (* The same, compiled: what the binary prints on an unhandled failure. *)
 let compiled_marker = "-- MARCH-MODE: run-compiled"
+let test_build_marker = "-- MARCH-MODE: test"
 
 let has_sub s sub =
   let n = String.length s and m = String.length sub in
@@ -231,7 +234,9 @@ let script ~dir ~rel ~src =
       Printf.sprintf "%s %s %s" env exe rel, "true"
     else
       let h, j = if has_sub src why_copies_marker
-        then "--why-copies", "--why-copies-json" else "--check", "--check-json" in
+        then "--why-copies", "--why-copies-json"
+        else if has_sub src test_build_marker then "--check --test", "--check-json --test"
+        else "--check", "--check-json" in
       Printf.sprintf "%s %s %s %s" env exe h rel,
       Printf.sprintf "%s %s %s %s" env exe j rel in
   Printf.sprintf

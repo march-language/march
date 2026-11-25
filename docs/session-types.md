@@ -466,7 +466,7 @@ anyway, and the code that knows the real message type sits on both sides of
 it. There is no `recv`: an event-driven endpoint never blocks; delivery is the
 handler you pass to `suspend`, which is entered exactly once, in tail position.
 
-`Session.attach(io, ops)` is the only way to obtain a `Cap(Session.Live)`, and
+`Authority.must(Session.attach(ops))` is the only way to obtain a `Cap(Session.Live)`, and
 a session with nothing attached **panics** rather than silently doing nothing.
 
 An endpoint for the `Stream` protocol above, written the way a projector would
@@ -488,7 +488,7 @@ and the trace is the same on every run:
 
 ```march
 let t = Session.in_process()
-let s = Session.attach(io, t.ops)
+let s = Authority.must(Session.attach(t.ops))
 let _ = cons(s, cons_ep, 2)      -- run each role to its first suspension
 let _ = prod(s, prod_ep, 1)
 t.drain(())                      -- then deliver

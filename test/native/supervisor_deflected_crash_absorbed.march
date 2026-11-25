@@ -22,6 +22,7 @@
 mod SupervisorDeflectedCrashAbsorbed do
   needs IO
   needs IO.Console
+  needs Actor.Introspect
 
   actor Worker do
     state { count : Int }
@@ -71,8 +72,7 @@ mod SupervisorDeflectedCrashAbsorbed do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
     let sup = spawn(Sup)
     let killer = spawn(Killer)
     let lo1 = child_int(sup, "lo")
@@ -80,8 +80,8 @@ mod SupervisorDeflectedCrashAbsorbed do
 
     -- Order matters: the Killer's crash of `lo` must arrive while main is
     -- stalled inside `hi`'s restart, so queue it first and crash `hi` next.
-    send(killer, Go(Actor.pid_from_int(intro, lo1)))
-    kill(Actor.pid_from_int(intro, hi1))
+    send(killer, Go(Authority.must(Actor.pid_from_int(lo1))))
+    kill(Authority.must(Actor.pid_from_int(hi1)))
 
     -- kill() returns only once the synchronous restart -- both passes --
     -- has completed, so everything below reads settled state.
@@ -89,8 +89,8 @@ mod SupervisorDeflectedCrashAbsorbed do
     let hi2 = child_int(sup, "hi")
     println("lo restarted: " ++ bool_to_string(lo2 != lo1))
     println("hi restarted: " ++ bool_to_string(hi2 != hi1))
-    println("lo alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, lo2))))
-    println("hi alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, hi2))))
-    println("old lo dead: " ++ bool_to_string(!is_alive(Actor.pid_from_int(intro, lo1))))
+    println("lo alive: " ++ bool_to_string(is_alive(Authority.must(Actor.pid_from_int(lo2)))))
+    println("hi alive: " ++ bool_to_string(is_alive(Authority.must(Actor.pid_from_int(hi2)))))
+    println("old lo dead: " ++ bool_to_string(!is_alive(Authority.must(Actor.pid_from_int(lo1)))))
   end
 end

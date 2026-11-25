@@ -1,4 +1,4 @@
--- Process enumeration: Actor.list(c), with c minted by Actor.introspect(io).
+-- Process enumeration: Actor.list(c), with c minted by Authority.must(Actor.introspect()).
 -- specs/todos/2026-08-12-per-actor-introspection-and-alarms.md
 --
 -- docs/overload-resilience.md tells readers to poll mailbox_size(pid) to
@@ -16,6 +16,7 @@
 mod Main do
   needs IO
   needs IO.Console
+  needs Actor.Introspect
 
   actor W do
     state { n : Int }
@@ -26,8 +27,8 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let a = spawn(W)
     let b = spawn(W)
     let c = spawn(W)

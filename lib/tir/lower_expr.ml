@@ -494,6 +494,62 @@ and lower_restrict (env : env) (e : Ast.expr) (es : Ast.expr list) (body : Ast.e
         | [] -> failwith "internal compiler error: a computed restrict with no entries"
         | a :: rest -> union a rest)
 
+(** [mock es with h do body end] (ocap phase 7; test builds only): the
+    handler record is registered in the runtime's mock registry and a
+    [ByMock(id)] layer is pushed around [body]:
+
+    {v
+      let hv = <handler> in let id = mock_register(hv) in
+      let l = Authority.mock_layer(id, text) in let s = Authority.enter_fn(l) in
+      let r = <body> in cap_restore(s); r
+    v}
+
+    A record literal handler that names only some fields is the kind's
+    all-[None] record ([Io_ops_gen.ops_empty_name], generated into the test
+    build's dispatch module) updated with them.  The type checker accepted
+    only a literal scope of one mockable kind. *)
+and lower_mock (env : env) (e : Ast.expr) (es : Ast.expr list) (h : Ast.expr)
+    (body : Ast.expr) (_sp : Ast.span) : Tir.expr =
+  incr Lower_state.mock_sites;
+  let entries = match March_caps.Scope_expr.restrict_entries es with
+    | Some (_ :: _ as en) -> en
+    | _ -> failwith "internal compiler error: a mock scope that is not literal" in
+  let text, _ = literal_scope_text entries in
+  let kind = match entries with
+    | (ns, _) :: _ -> String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) ns)
+    | [] -> assert false in
+  let flds = March_typecheck.Io_ops_gen.mock_fields kind in
+  let h_ty = ty_of_expr env h in
+  let layer_ty = Tir.TCon ("Layer", []) and auth_ty = Tir.TCon ("CapAuthRef", []) in
+  let handler (k : Tir.atom -> Tir.expr) : Tir.expr =
+    match h with
+    | Ast.ERecord (given, _) when List.length given < List.length flds ->
+      let base = fresh_var h_ty in
+      let empty = { Tir.v_name = March_typecheck.Io_ops_gen.ops_empty_name kind;
+                    v_ty = Tir.TFn ([], h_ty); v_lin = Tir.Unr } in
+      let names = List.map (fun ((n : Ast.name), _) -> n.Ast.txt) given in
+      lower_atoms_k env (List.map snd given) (fun atoms ->
+          let hv = fresh_var h_ty in
+          Tir.ELet (base, Tir.EApp (empty, []),
+            Tir.ELet (hv, Tir.EUpdate (Tir.AVar base, List.combine names atoms),
+              k (Tir.AVar hv))))
+    | _ -> lower_to_atom_k env h k
+  in
+  handler (fun ha ->
+      let id = fresh_var Tir.TInt and l = fresh_var layer_ty and s = fresh_var auth_ty in
+      let r = fresh_var (ty_of_expr env e) and u = fresh_var Tir.TUnit in
+      let reg = { Tir.v_name = "mock_register"; v_ty = Tir.TFn ([ h_ty ], Tir.TInt);
+                  v_lin = Tir.Unr } in
+      Tir.ELet (id, Tir.EApp (reg, [ ha ]),
+        Tir.ELet (l, stdlib_call env "Authority.mock_layer" [ Tir.TInt; Tir.TString ] layer_ty
+                       [ Tir.AVar id; Tir.ALit (Ast.LitString text) ],
+          Tir.ELet (s, stdlib_call env Tir_names.enter_fn_name [ layer_ty ] auth_ty [ Tir.AVar l ],
+            Tir.ELet (r, lower_expr env body,
+              Tir.ELet (u, Tir.EApp ({ Tir.v_name = "cap_restore";
+                                       v_ty = Tir.TFn ([ auth_ty ], Tir.TUnit);
+                                       v_lin = Tir.Unr }, [ Tir.AVar s ]),
+                Tir.EAtom (Tir.AVar r)))))))
+
 (** Translate an AST expression to a TIR expression in ANF. *)
 and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
   match e with
@@ -794,6 +850,7 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
        lower_atoms_k env [ a; b ] (fun atoms ->
            stdlib_call env "Scope.union" [ scope_ty; scope_ty ] scope_ty atoms))
   | Ast.ERestrict (es, body, sp) -> lower_restrict env e es body sp
+  | Ast.EMock (es, h, body, sp) -> lower_mock env e es h body sp
 
   (* --- If → ECase on bool (CPS for condition) --- *)
   | Ast.EIf (cond, then_e, else_e, _) ->

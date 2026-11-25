@@ -245,9 +245,15 @@ let fresh_restrict_layer_name ~(host : string) : string =
   Hashtbl.replace _nested_ordinals (host, "$restrict") (k + 1);
   Printf.sprintf "%s$restrict%d%s" host k Tir_names.auth_layer_suffix
 
+(** The [mock] blocks lowered (ocap phase 7): any at all means closures must
+    capture the authority ([Auth_rt.captures]' [has_frames]), so a closure
+    made inside a mock keeps it.  Reset with [restrict_sites]. *)
+let mock_sites : int ref = ref 0
+
 let reset_restricts () =
   Hashtbl.reset restrict_sites;
-  restrict_layer_fns := []
+  restrict_layer_fns := [];
+  mock_sites := 0
 
 (** Emit a runtime panic for a non-exhaustive match that the typechecker
     missed.  Returning [LitInt 0] here would silently reinterpret a value of
