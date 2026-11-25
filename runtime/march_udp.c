@@ -860,7 +860,18 @@ void *march_udp_recv_batch(int64_t fd_arg, int64_t max_msgs, int64_t max_size, i
         if (deadline && march_now_ms() >= deadline) break;
         int w = march_sched_wait_fd(fd, 0, deadline);
         if (w == MARCH_FDWAIT_TIMEOUT) break;
-        if (w == MARCH_FDWAIT_ERROR) return udp_err_errno("udp_recv: wait", march_errno_now());
+        if (w == MARCH_FDWAIT_ERROR) {
+            int e = march_errno_now();
+            /* The wait was cancelled because the socket is being closed.  A
+             * datagram may have been queued before that: read once more, so
+             * it is returned instead of being discarded with the socket. */
+            if (e == ECANCELED) {
+                (void)udp_drain(fd, (int)max_msgs, (size_t)max_size, &acc);
+                if (acc.count > 0) break;
+                *acc.slot = NULL;
+            }
+            return udp_err_errno("udp_recv: wait", e);
+        }
     }
     *acc.slot = udp_nil();
     return udp_ok(acc.head);
