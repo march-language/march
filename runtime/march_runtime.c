@@ -11480,7 +11480,7 @@ void march_cap_restore(void *saved) {
  * authority in force (no reference taken: the slot keeps it). */
 march_cap_mark_t march_cap_mark(void) {
     march_auth_state *st = march_sched_auth_state();
-    march_cap_mark_t m = { st->auth, st->len };
+    march_cap_mark_t m = { st->auth, st->len, st->elen };
     return m;
 }
 
@@ -11497,6 +11497,9 @@ march_cap_mark_t march_cap_mark(void) {
  * goes back with a reference of its own. */
 void march_cap_unwind(march_cap_mark_t mark) {
     march_auth_state *st = march_sched_auth_state();
+    /* The handle uses the panic jumped out of (march_handle.c, "The entered
+     * stack"): left here, at every site that puts the authority back. */
+    if (__builtin_expect(st->elen > mark.handles, 0)) march_handle_unwind_to(mark.handles);
     march_cap_pop_to(st, mark.depth);
     void *cur = st->auth;
     if (cur == mark.auth) return;

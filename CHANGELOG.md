@@ -1370,6 +1370,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Closing a socket, listener or file after a caught panic inside an operation on it now
+  releases it.** A panic between the start and end of one use (caught by `try_finally`,
+  `Result.try_call`, a supervisor or a test runner) left the handle counted as in use for
+  ever, so a later close did not release the descriptor: a `Listener` kept its port bound
+  until the value was dropped. Compiled and JIT; the interpreter was unaffected.
 - **A caught panic no longer leaks the authority of the functions it unwound.** A panic
   caught (`try_finally`, `Result.try_call`, a supervised actor's crash, a failing test)
   after passing through functions with a `needs` clause or `restrict` blocks left one
