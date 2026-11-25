@@ -1,0 +1,18 @@
+first observer, in frame: IO.FileRead("/srv/x") refused by function observer_boom's needs (IO.Console, IO.FileRead("/srv/inner/"))
+second observer: "poisoned" allowed /srv/x / allowed /etc/hosts
+restarted: true
+replacement: allowed /srv/x / IO.FileRead("/etc/hosts") refused by function start's needs (IO.Console, IO.FileRead("/srv/"), IO.Spawn)
+first observer, in frame: IO.FileRead("/srv/x") refused by function observer_boom's needs (IO.Console, IO.FileRead("/srv/inner/"))
+second observer: "poisoned" allowed /srv/x / allowed /etc/hosts
+restarted: true
+replacement: allowed /srv/x / IO.FileRead("/etc/hosts") refused by function start's needs (IO.Console, IO.FileRead("/srv/"), IO.Spawn)
+first observer, in frame: IO.FileRead("/srv/x") refused by function observer_boom's needs (IO.Console, IO.FileRead("/srv/inner/"))
+second observer: "poisoned" allowed /srv/x / allowed /etc/hosts
+restarted: true
+replacement: allowed /srv/x / IO.FileRead("/etc/hosts") refused by function start's needs (IO.Console, IO.FileRead("/srv/"), IO.Spawn)
+first observer, in frame: IO.FileRead("/srv/x") refused by function observer_boom's needs (IO.Console, IO.FileRead("/srv/inner/"))
+second observer: "poisoned" allowed /srv/x / allowed /etc/hosts
+restarted: true
+replacement: allowed /srv/x / IO.FileRead("/etc/hosts") refused by function start's needs (IO.Console, IO.FileRead("/srv/"), IO.Spawn)
+main after: allowed /etc/hosts
+exit 0

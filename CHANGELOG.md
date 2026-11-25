@@ -21,6 +21,9 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Compiles are about 0.3 s faster.** Lemma erasure collected the names the program
+  mentions once per `@[lemma]` declaration, walking the whole program (stdlib included)
+  each time; it now walks it once. What gets erased is unchanged.
 - **Under dependency grants, a module name defined twice is an error.** With a grants file
   in effect, a module defined both by the app and a dependency, by two dependencies, or by a
   dependency and the standard library is `dep_module_conflict`, as is a granted library root
@@ -1352,6 +1355,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The native REPL keeps its authority after a panic inside a function with `needs`.** A
+  panic raised in such a function left that function's `needs` in force for every later
+  input, so an operation the session was allowed was refused "by function f's needs". The
+  interpreter REPL was unaffected.
 - **`march repl FILE` loads the library modules the file uses.** A preloaded file (as
   `forge interactive` and the REPL's `:load` give it) now finds the modules it names on
   `MARCH_LIB_PATH`, as a batch build does; they were "Unknown module". Its modules also load

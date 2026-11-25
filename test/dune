@@ -84,7 +84,9 @@
  (action (run %{test} -e)))
 
 ;; The run-time authority suites (ocap phase 4): every case compiles and runs
-;; programs in several runtimes, ~10-15 serial CI minutes. In run_compiler they
+;; programs in several runtimes, 32-43 serial CI minutes by November 2026 (CI
+;; sets MARCH_TEST_PROCS for the `rest` shard, which runs its groups in that
+;; many processes). In run_compiler they
 ;; took the `compiler` shard (~60 min on main) past its 75-minute step timeout,
 ;; so they are their own runner: an ordinary stanza, which CI's `rest` shard
 ;; runs beside the others under `dune runtest`. Their groups are not
