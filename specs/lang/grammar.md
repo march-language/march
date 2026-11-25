@@ -674,11 +674,12 @@ expr ::= expr_pipe
        | "with" with_binding ("," with_binding)* "do" block_body
              "else" arm_sep? branch (arm_sep branch)* "end"
        | "restrict" expr ("," expr)* "do" block_body "end"
+       | "mock" expr ("," expr)* "with" expr "do" block_body "end"
 ```
 
 (`parser.mly:1052–1109`.) These alternatives are **not** part of the
 operator precedence ladder, they're keyword-led forms distinguishable by
-their leading token (`ASSERT`/`FN`/`IF`/`MATCH`/`WITH`/`RESTRICT`), so there is no
+their leading token (`ASSERT`/`FN`/`IF`/`MATCH`/`WITH`/`RESTRICT`/`MOCK`), so there is no
 shift/reduce ambiguity between them and `expr_pipe`; menhir picks the
 alternative with the first token that matches. Two of note:
 
@@ -715,6 +716,12 @@ alternative with the first token that matches. Two of note:
   constructor in expression position is a scope expression, whose
   arguments follow the `needs_decl` scope grammar (§9.6). Semantics:
   [Capabilities, `restrict`](capabilities.md#restrict).
+- **`mock e1, ..., en with h do … end`** (`parser.mly`, the `MOCK`
+  alternatives beside `RESTRICT`) builds `EMock (entries, handler, body,
+  span)`. `mock` is a reserved lexer keyword (ocap phase 7). The entries are
+  parsed like `restrict`'s; the type checker requires them to be literal
+  scopes of one capability kind, and the whole form to be in a test build.
+  Semantics: [Capabilities, mocking an IO capability in tests](capabilities.md#mocking-an-io-capability-in-tests-mock).
 
 ### 4.2 `expr_pipe`: pipe, loosest-binding, left-associative
 

@@ -67,7 +67,7 @@ callers never have to satisfy. See [The grant](#grant).
 - [Scope values: `Scope` and `+`](#scope-values)
 - [Dependency grants: `grant` in `forge.toml`](#dep-grants)
 - [When not to use IO caps](#when-not-to-use-io-caps)
-- [Specific IO capabilities](#specific-io-capabilities): [IO.Mut](#iomut-shared-mutable-state), [IO.Registry](#ioregistry-naming-and-finding-actors), [name scopes](#name-scopes), [IO.NetConnect.TLS](#ionetconnecttls-encrypted-transport-only), [IO.Telemetry](#iotelemetry-observability-annotation), [IO.Foreign](#ioforeign--calling-unverified-c)
+- [Specific IO capabilities](#specific-io-capabilities): [IO.Mut](#iomut-shared-mutable-state), [IO.Registry](#ioregistry-naming-and-finding-actors), [IO.Cluster, Actor.Introspect and Actor.Debug](#iocluster-actorintrospect-and-actordebug), [name scopes](#name-scopes), [IO.NetConnect.TLS](#ionetconnecttls-encrypted-transport-only), [IO.Telemetry](#iotelemetry-observability-annotation), [IO.Foreign](#ioforeign--calling-unverified-c)
 
 **Behavioral caps**
 
@@ -87,7 +87,7 @@ callers never have to satisfy. See [The grant](#grant).
 **Swapping and bundling**
 
 - [Runtime dictionaries: swapping what a capability does](#runtime-dictionaries-swapping-what-a-capability-does)
-- [Mocking an IO capability in tests](#mocking-an-io-capability-in-tests)
+- [Mocking an IO capability in tests: `mock`](#mocking-an-io-capability-in-tests-mock)
 - [Advanced patterns](#advanced-patterns): specialization tags, capability environment records
 - [See also](#see-also)
 
@@ -113,7 +113,7 @@ callers never have to satisfy. See [The grant](#grant).
 | Track that a file handle is open vs closed | Typestate: `always_linear type` + `transitions` |
 | Exclude allocation/IO from a realtime callback | A specialization tag: `Tagged(DSP, Realtime)` |
 | Thread many caps without adding parameters | A capability environment record |
-| Swap what an IO operation does in a test | A runtime dictionary: `cap_impl`, `with_cap` |
+| Swap what an IO operation does in a test | A `mock` block (test builds only) |
 | Small script, just want it to work | `needs IO`; don't overthink it |
 
 ## How it fits with the rest of March
@@ -121,7 +121,7 @@ callers never have to satisfy. See [The grant](#grant).
 | Concept | Where capabilities meet it | Chapter |
 |---|---|---|
 | **Modules** | `needs` is a module declaration, and `Cap(X)` parameters are checked at every `use`. The demand-driven rule charges an importer only for the functions it references. | [Modules]({{ site.baseurl }}/docs/modules/) |
-| **Actors** | A spawned actor's handlers count against `main`'s grant; an actor never spawned costs nothing. A mock dictionary reaches an actor spawned inside `with_cap`. | [Actors]({{ site.baseurl }}/docs/actors/) |
+| **Actors** | A spawned actor's handlers count against `main`'s grant; an actor never spawned costs nothing. A `mock` reaches an actor spawned inside the block. | [Actors]({{ site.baseurl }}/docs/actors/) |
 | **Linear types** | Typestate handles are `always_linear`, so dropping or reusing one is a type error. | [Linear types]({{ site.baseurl }}/docs/linear-types/) |
 | **Refinement types** | `cap no_panic` accepts a partial function only when a refinement proves its precondition; division needs a proven non-zero divisor. | [Refinement types]({{ site.baseurl }}/docs/refinement-types/) |
 | **Choreography** | A protocol can grant each role a narrow capability; the same walk that bounds the program by `main`'s grant bounds the role's code by its line. | [Choreography]({{ site.baseurl }}/docs/choreography/#per-role-grants) |
@@ -205,10 +205,18 @@ IO
 ├── IO.Spawn            — task spawning (task_spawn, task_spawn_link, …)
 ├── IO.Mut              — shared mutable state (Vault tables)
 ├── IO.Registry         — naming and finding actors by name (Actor.register/whereis/registered)
+├── IO.Cluster          — attaching a session, starting or attaching a cluster node
 ├── IO.Telemetry        — telemetry/observability emission (declaration-only)
 └── IO.Foreign          — calling unverified C (extern blocks)
     └── IO.Foreign.Blocking — blocking extern (spawns OS thread)
+
+Actor.Introspect        — reaching actors you were not handed: Actor.introspect, Actor.pid_from_int
+Actor.Debug             — reading another actor's state: Actor.debug
 ```
+
+`Actor.Introspect` and `Actor.Debug` are roots of their own, outside `IO`: `needs IO` does
+not let a program inspect every actor's state. A program that uses them asks for them in
+`main`'s request (`fn main() : () needs IO.Console, Actor.Introspect do`).
 
 **Monotonic time is ambient.** `sys_uptime_ms` and its stdlib wrapper
 `System.monotonic_time` (milliseconds since the process started) are not gated
@@ -1377,6 +1385,37 @@ mod Pool do
 end
 ```
 
+### IO.Cluster, Actor.Introspect and Actor.Debug: the checked witness operations
+{: #iocluster-actorintrospect-and-actordebug}
+
+These kinds gate the operations that once took the root `Cap(IO)` as a witness argument
+(ocap phase 7). Each is a checked operation that returns `Result(_, CapError)` and is
+charged to the code that calls it, so `main` must request the kind:
+
+| Operation | Kind | Returns |
+|---|---|---|
+| `Actor.introspect()` | `Actor.Introspect` | `Result(Cap(Actor.Introspect), CapError)` |
+| `Actor.pid_from_int(n)` | `Actor.Introspect` | `Result(Pid(a), CapError)` |
+| `Actor.debug()` | `Actor.Debug` | `Result(Cap(Actor.Debug), CapError)` |
+| `Session.attach(ops)` | `IO.Cluster` | `Result(Cap(Session.Live), CapError)` |
+| `ClusterNode.attach(ops)` | `IO.Cluster` | `Result(Cap(ClusterNode.Live), CapError)` |
+| `ClusterNode.start(cfg)` | `IO.Cluster` | `Result(Cap(ClusterNode.Live), String)` (a refusal is its `Authority.describe`) |
+
+The capabilities they return are unchanged: holding a `Cap(Actor.Introspect)` is still the
+right to call `Actor.whereis`, `Actor.list`, the `Recon` functions and the rest without a
+further check.
+
+```march
+mod Observer do
+  needs IO.Console
+
+  fn main() : () needs IO.Console, Actor.Introspect do
+    let c = Authority.must(Actor.introspect())
+    println(int_to_string(List.length(Actor.list(c))))
+  end
+end
+```
+
 ### Name scopes on IO.Mut and IO.Registry
 {: #name-scopes}
 
@@ -2058,56 +2097,79 @@ the declaring module, with the capability fixed at the call site. A supplier
 whose result type is left polymorphic is rejected, since it could re-implement
 every capability at once.
 
-### Mocking an IO capability in tests
+### Mocking an IO capability in tests: `mock`
 
-IO capabilities have no declaring module, so the rule above has nothing to bind
-to; attaching a dictionary to one is admitted **only in a test build**. There
-is also nothing to hand-write: an IO capability's dictionary is derived from the
-compiler's own tables, one field per interceptable operation, each an `Option`
-that is `None` when not overridden. `march --emit-io-ops` prints the shapes.
+A test replaces what an IO capability does with a `mock` block:
 
 ```march
-fn main(c : Cap(IO.Console)) do
-  let mock = cap_impl(c, { cap_ops_empty(c) with
-    print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) })
-  with_cap(mock, fn _ -> code_under_test())
+mod GreeterTest do
+  needs IO.Console
+
+  test "the greeting is printed" do
+    mock IO.Console with { print_line: Some(fn s -> assert(s == "hello, ada")) } do
+      Greeter.greet("ada")
+    end
+    ()
+  end
 end
 ```
 
-`cap_ops_empty(c)` is the all-`None` base to override one field of. March
-records unify exactly, so without it every mock would have to spell out every
-operation. `with_cap(mock, fn _ -> …)` is the binding site: inside that lambda
-the mock is in force, and nowhere else.
+`mock SCOPE with HANDLER do ... end` is an expression with its body's value.
+Inside the block, every interceptable operation of the scope's capability kind
+whose target the scope admits goes to the handler instead of the outside world.
 
-The code under test needs no capability parameter and names no capability. A
-cap-requiring builtin does not take its capability as an argument (the
-requirement is checked against `needs`, not passed), so in a test build the
-compiler threads one in for you and routes the operation through the
-dictionary. Outside a test build none of this runs and the program is exactly
-what it always was.
+- **Test builds only.** `march test`, `forge test` and any build with `--test`.
+  Anywhere else a `mock` is the error
+  [`mock_outside_test`]({{ site.baseurl }}/docs/errors/mock_outside_test/).
+- **One kind per block.** The scope is written literally and names one
+  capability kind (`IO.Console`, `IO.Clock`, `IO.FileRead("/fixtures/")`, …);
+  several kinds are nested blocks
+  ([`mock_scope_invalid`]({{ site.baseurl }}/docs/errors/mock_scope_invalid/)).
+  A scoped mock covers only the targets its scope admits: under
+  `mock IO.FileRead("/fixtures/")` a read of `/fixtures/a.txt` goes to the
+  handler and a read elsewhere runs for real.
+- **The handler is the kind's operation record**: one field per interceptable
+  operation, each an `Option` that is `None` when the real operation should run.
+  `march --emit-io-ops` prints every kind's fields. A record literal in the
+  `with` position names only the fields it overrides; the rest are `None`. A
+  field the kind does not have is
+  [`mock_handler_field`]({{ site.baseurl }}/docs/errors/mock_handler_field/).
+  A zero-argument operation's field takes `()` (`unix_time_ms: Some(fn _ -> 0)`),
+  and an operation typed as a value holds the value (`process_cwd: Some("/x")`).
+- **It travels like authority.** A mock is a layer of the current authority
+  (see [Run-time authority](#run-time-authority)), so a closure,
+  task or actor created inside the block keeps the mock after the block ends,
+  and a supervisor restart keeps it too. One created outside and called inside
+  does not get it.
+- **It admits what it covers.** The block has authority for the operations its
+  scope covers whether or not the test was launched with it. An operation it
+  covers but whose field is `None` runs for real, checked against the
+  authority outside the mock; a refusal there stops the test with a panic, so
+  a mock never lets a test reach the outside world beyond its launch.
+- **`restrict` still binds.** A `restrict` inside a mock narrows as anywhere
+  else: an operation it does not admit is refused, mocked or not.
+
+**Tables.** `mock IO.Mut("sessions", prefix("cache.")) with { open: None } do`
+gives every table name the scope covers a private namespace for the life of
+the mock: the block (and what it creates) starts from an empty table, and the
+real table of that name is neither read nor written. The `open` field, when
+given, is asked by `Vault.new`, `Vault.open`, `Vault.whereis`, `ns_get` and
+`ns_drop` and can make the open fail: `Some(fn name -> Err("down"))` returns
+`Err(CapError("IO.Mut", name, ByMock(_), "down"))`.
 
 ### What cannot be intercepted
 
-Each of these costs interception, never correctness: an operation that is not
-intercepted behaves exactly as it does today.
+An operation that is not intercepted behaves exactly as it does outside a mock.
 
 | Not interceptable | Why |
 |---|---|
-| Polymorphic builtins — all of `vault_*`, so `IO.Mut` entirely | A dictionary field would need rank-2 types |
-| `println`, `random_bytes` | A program reaches these through a stdlib March function (`Prelude.println`, `Crypto.random_bytes`), not through the builtin, and the stdlib is not elaborated; `println` can be intercepted through the `print_line` it delegates to |
-| An actor whose handlers reach **more than one** capability | The capability is captured at the spawn site onto the actor's runtime metadata, and that carries one. An actor reaching two would need a record of them captured instead — additive, not yet built |
-| Functions used as values rather than called directly | Their arity cannot change |
+| `println`, `random_bytes` | A program reaches these through a stdlib March function (`Prelude.println`, `Crypto.random_bytes`), not through the builtin; `println` is intercepted through the `print_line` it delegates to |
+| The polymorphic `vault_*` operations one by one | A record field would need rank-2 types; a vault mock instead isolates the table names it covers (above) |
+| A builtin used as a value rather than called (`List.map(paths, file_read)`) | The test build routes calls of an operation to its handler, not values of it |
 
-**Actors are reached.** A handler runs on the scheduler, not under the caller
-that spawned it, so there is no parameter to thread a capability through; the
-dispatch function's arity is frozen because the actor record holds it. The
-capability is instead captured at the **spawn site** and read back by the
-dispatch, which means a mock reaches an actor spawned inside `with_cap` and
-does not reach one spawned outside it, regardless of when either actually runs.
-
-Fully mockable today: `IO.Console`, `IO.Clock`, `IO.Random`, `IO.FileRead`,
-`IO.FileWrite`, `IO.NetConnect`, `IO.NetConnect.TLS`, `IO.WebSocket`,
-`IO.Signal`, `IO.FileSystem`, `IO.Network`.
+`with_cap`, and `cap_impl` / `cap_ops_empty` on an IO capability, were retired
+in favour of `mock` (ocap phase 7). `cap_impl` remains for a program's own
+[proof capabilities](#runtime-dictionaries-swapping-what-a-capability-does).
 
 ---
 

@@ -74,7 +74,8 @@ mod Vault do
   """
   fn new(name : String) : Result(Vault(v), CapError) do
     let? _ = Authority.check("IO.Mut", name)
-    Ok(vault_new(name))
+    let? n = table_name(name)
+    Ok(vault_new(n))
   end
 
   doc """
@@ -93,9 +94,10 @@ mod Vault do
   """
   fn open(name : String) : Result(Vault(v), CapError) do
     let? _ = Authority.check("IO.Mut", name)
-    match vault_whereis(name) do
+    let? n = table_name(name)
+    match vault_whereis(n) do
     Some(t) -> Ok(t)
-    None    -> Ok(vault_new(name))
+    None    -> Ok(vault_new(n))
     end
   end
 
@@ -488,7 +490,8 @@ mod Vault do
   """
   fn whereis(name : String) : Result(Option(Vault(v)), CapError) do
     let? _ = Authority.check("IO.Mut", name)
-    Ok(vault_whereis(name))
+    let? n = table_name(name)
+    Ok(vault_whereis(n))
   end
 
   doc """
@@ -596,7 +599,8 @@ mod Vault do
   """
   fn ns_get(ns : String, key) do
     let? _ = Authority.check("IO.Mut", ns)
-    Ok(vault_ns_get(ns, key))
+    let? n = table_name(ns)
+    Ok(vault_ns_get(n, key))
   end
 
   doc """
@@ -614,9 +618,34 @@ mod Vault do
   """
   fn ns_drop(ns : String, key) : Result((), CapError) do
     let? _ = Authority.check("IO.Mut", ns)
-    match vault_whereis(ns) do
+    let? n = table_name(ns)
+    match vault_whereis(n) do
     Some(t) -> Ok(drop(t, key))
     None    -> Ok(())
+    end
+  end
+
+  -- ── Mocks (ocap phase 7) ───────────────────────────────────────────────
+  -- A table name covered by a `mock IO.Mut(...)` in force lives in that
+  -- mock's own namespace for as long as the mock does: the block (and every
+  -- closure, task and actor made in it) starts from an empty table, and the
+  -- real table of the same name is neither read nor written. The mock's
+  -- `open` hook, when given, is asked first and can make the open fail. A
+  -- name no mock covers is itself.
+  pfn table_name(name : String) : Result(String, CapError) do
+    match Authority.mock_for("IO.Mut", name) do
+    None -> Ok(name)
+    Some(id) ->
+      let h : { open : Option(String -> Result((), String)) } = mock_lookup(id)
+      let private = "$mock" ++ int_to_string(id) ++ ":" ++ name
+      match h.open do
+      None -> Ok(private)
+      Some(f) ->
+        match f(name) do
+        Ok(_) -> Ok(private)
+        Err(reason) -> Err(CapError("IO.Mut", name, ByMock(id), reason))
+        end
+      end
     end
   end
 

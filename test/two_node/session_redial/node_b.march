@@ -46,7 +46,7 @@ mod SessionRedialB do
     let base = ClusterNode.config("node-b", Authority.must(Env.require_int("MARCH_PORT_B")), "", Cons(seed, Nil), "redial-secret", 1)
     let suspect_ms = Authority.must(Env.get_int("REDIAL_SUSPECT_MS", 0))
     let cfg = if suspect_ms > 0 do { base with swim: Swim.config(500, suspect_ms, 2) } else base end
-    match ClusterNode.start(c, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         Authority.ignore(println("node-b: up"))

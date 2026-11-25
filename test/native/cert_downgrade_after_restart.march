@@ -81,7 +81,7 @@ mod CertDowngradeAfterRestart do
                   revoked: fn _ -> false }
     let cfg = { ClusterNode.config("b", 0, "", Nil, "", 1) with auth: ClusterAuth.Certified(creds) }
     println("starting node b")
-    match ClusterNode.start(io, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e) -> Authority.ignore(println("start failed: " ++ e))
       Ok(node) ->
         Authority.ignore(println("started"))

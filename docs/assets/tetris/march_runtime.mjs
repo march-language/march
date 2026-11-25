@@ -816,6 +816,17 @@ export function march_cap_grant_text() {
   return raw.trim();
 }
 
+/** The mock registry (ocap phase 7; test builds only): a `mock` block's
+ *  handler record, named in its authority layer by index. */
+const marchMockTab = [];
+export function march_mock_register(h) {
+  marchMockTab.push(h);
+  return marchMockTab.length - 1;
+}
+export function march_mock_lookup(id) {
+  return marchMockTab[Number(id)];
+}
+
 /** The current directory, for Authority's path checks; "" when it cannot be
  *  read (no `process`, or a removed directory), as in every backend:
  *  Authority then refuses a relative path target. */

@@ -1,0 +1,11 @@
+exit: 1
+-- CAPABILITY ---------- errors/mock_outside_test_1.march
+
+`mock` is only allowed in a test build (`march test`, `forge test`, or `--test`): it replaces real capability operations with a handler. [mock_outside_test]
+
+6 |     mock IO.Clock with { unix_time_ms: Some(fn _ -> 0) } do
+        ^^^^
+
+    run `march --explain mock_outside_test`
+
+

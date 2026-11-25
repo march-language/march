@@ -3,7 +3,7 @@
  ; march_parser and unix for dep_grants (ocap phase 6): a grant's scope text
  ; is parsed by the real parser, and a library root is a real path.
  (libraries march_ast march_errors march_parser unix)
- (modules cap_lattice cap_symbols cap_ops cap_scope host_scope name_scope net_dest cap_ceiling cap_surface_ty cap_rows scope_expr dep_grants capture_set))
+ (modules cap_lattice cap_symbols cap_ops cap_scope host_scope name_scope net_dest cap_ceiling cap_surface_ty cap_rows scope_expr dep_grants mock_target capture_set))
 
 ; Emitter: regenerates runtime/march_cap_lattice.{h,c} from the OCaml
 ; Cap_lattice.hierarchy source of truth.  See emit_c_table.ml for the

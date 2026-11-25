@@ -213,6 +213,33 @@ mod Foo do let x = () end
       value: (unit_expression))))
 
 ================================================================================
+Mock expression
+================================================================================
+mod Foo do let x = mock IO.Clock with { unix_time_ms: Some(f) } do 1 end end
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    (module_path
+      (type_identifier))
+    (let_declaration
+      (variable_pattern
+        (variable_pattern))
+      (mock_expression
+        (field_expression
+          (bare_constructor
+            (type_identifier))
+          (type_identifier))
+        (record_expression
+          (record_field
+            (identifier)
+            (constructor_expression
+              (type_identifier)
+              (identifier))))
+        (block_body
+          (integer))))))
+
+================================================================================
 Restrict expression
 ================================================================================
 mod Foo do let x = restrict IO.Console, tools do 1 end end

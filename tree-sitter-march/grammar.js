@@ -67,7 +67,7 @@ module.exports = grammar({
       'true', 'false',
       'when', 'linear', 'affine',
       'match',
-      'if', 'else', 'restrict',
+      'if', 'else', 'restrict', 'mock',
       'spawn',
       'actor', 'interface', 'impl', 'sig', 'extern', 'protocol', 'use',
       // `loop` is not reserved: outside a protocol it is an ordinary name
@@ -682,6 +682,7 @@ module.exports = grammar({
       $.lambda_expression,
       $.if_expression,
       $.restrict_expression,
+      $.mock_expression,
       $.match_expression,
       $.cond_expression,
       $.block_expression,
@@ -784,6 +785,14 @@ module.exports = grammar({
     // restrict e1, ..., en do body end: narrows the authority for the body.
     restrict_expression: $ => seq(
       'restrict', commaSep1(field('scope', $._expr)),
+      'do', field('body', $.block_body),
+      'end',
+    ),
+    // mock e1, ..., en with handler do body end (test builds only): the
+    // body's interceptable operations the scope covers go to the handler.
+    mock_expression: $ => seq(
+      'mock', commaSep1(field('scope', $._expr)),
+      'with', field('handler', $._expr),
       'do', field('body', $.block_body),
       'end',
     ),

@@ -370,6 +370,17 @@ let test_spawn_charged () =
   (* The task holds the function it runs (design §9.2). *)
   Alcotest.(check bool) "the task value carries the set" true (contains (let_ty r "t") "Result((Task(Result((), CapError)) needs IO.Console), CapError)")
 
+(* ocap phase 7: inside a `mock` body an operation may run a handler function
+   instead, and a closure created there keeps the mock.  The pass does not
+   model the dispatch, so such a closure is "not tracked", never a set that
+   leaves the handler out. *)
+let test_mock_not_tracked () =
+  let r =
+    dump ~flags:"--test"
+      "  fn main() do\n    mock IO.Console with { print_line: Some(fn s -> Authority.ignore(IO.write(s))) } do\n      let g = fn x -> x + 1\n      g(1)\n    end\n  end"
+  in
+  str "created inside the mock" "?" (set_at r "fn x ->")
+
 let tests =
   [ ( "captures",
       [ Alcotest.test_case "a pure lambda" `Quick test_lam_pure;
@@ -405,4 +416,5 @@ let tests =
         Alcotest.test_case "restrict" `Quick test_restrict;
         Alcotest.test_case "a clause narrows a lambda" `Quick test_clause_narrows_lambda;
         Alcotest.test_case "a named value inside a restrict" `Quick test_restrict_named_value;
-        Alcotest.test_case "spawns are charged" `Quick test_spawn_charged ] ) ]
+        Alcotest.test_case "spawns are charged" `Quick test_spawn_charged;
+        Alcotest.test_case "a function value created inside a mock is not tracked" `Quick test_mock_not_tracked ] ) ]

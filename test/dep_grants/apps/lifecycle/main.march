@@ -29,11 +29,11 @@ mod Main do
     ask("pkg-spawned", w2)
     let sup = spawn(Lifecycle.Sup)
     let c1 = child(sup)
-    ask("sup child", Actor.pid_from_int(intro, c1))
-    kill(Actor.pid_from_int(intro, c1))
+    ask("sup child", Authority.must(Actor.pid_from_int(c1)))
+    kill(Authority.must(Actor.pid_from_int(c1)))
     let c2 = child(sup)
     println("restarted: " ++ bool_to_string(c2 != c1))
-    ask("restarted child", Actor.pid_from_int(intro, c2))
+    ask("restarted child", Authority.must(Actor.pid_from_int(c2)))
     let _ = Actor.stop(w, 1000)
     run_until_idle()
     println("after actors: " ++ mine())
@@ -57,8 +57,8 @@ mod Main do
     println("after a panic in the package: " ++ mine())
   end
 
-  fn main(io : Cap(IO)) do
-    actors(Actor.introspect(io))
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    actors(Authority.must(Actor.introspect()))
     tasks()
     panics()
   end

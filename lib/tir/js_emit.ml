@@ -1197,6 +1197,10 @@ and emit_val_impl ctx expr =
         let f = "march_" ^ name in
         use_runtime ctx f;
         emit ctx (f ^ "()")
+      | ("mock_register" | "mock_lookup"), [a] ->
+        let f = "march_" ^ name in
+        use_runtime ctx f;
+        emit ctx (f ^ "("); emit_atom ctx a; emit ctx ")"
       | ("cap_set_launch" | "cap_restore" | "cap_push" | "cap_enter" | "cap_launch_fail"), [a] ->
         let f = "march_" ^ name in
         use_runtime ctx f;

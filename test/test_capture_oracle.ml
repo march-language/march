@@ -117,9 +117,12 @@ let prepare ?unsound ~(dir : string) (name : string) : string * (unit -> summary
        | Some u -> Printf.sprintf "export MARCH_CAPTURE_ORACLE_UNSOUND=%s;" u
        | None -> "unset MARCH_CAPTURE_ORACLE_UNSOUND;")
   in
+  (* `-- TEST` (test/run_cap_conformance.ml): a test build, for the programs
+     that use `mock` (ocap phase 7). *)
+  let test_build = List.exists (fun l -> String.trim l = "-- TEST") (String.split_on_char '\n' src) in
   let cmd =
-    Printf.sprintf "cd %s && %s %s %s > /dev/null 2> %s" (Filename.quote scratch) env (Filename.quote compiler_exe)
-      (Filename.quote name) (Filename.quote err)
+    Printf.sprintf "cd %s && %s %s%s %s > /dev/null 2> %s" (Filename.quote scratch) env (Filename.quote compiler_exe)
+      (if test_build then " --test" else "") (Filename.quote name) (Filename.quote err)
   in
   let read () =
     let text = read_file err in

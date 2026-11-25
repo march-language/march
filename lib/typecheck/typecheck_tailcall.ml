@@ -124,6 +124,10 @@ let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : String
     List.fold_left (fun acc a ->
       StringSet.union acc (collect_direct_fn_calls fn_names a)
     ) StringSet.empty (es @ [b])
+  | Ast.EMock (es, h, b, _) ->
+    List.fold_left (fun acc a ->
+      StringSet.union acc (collect_direct_fn_calls fn_names a)
+    ) StringSet.empty (es @ [h; b])
   | Ast.EIf (c, t, f, _) ->
     StringSet.union (collect_direct_fn_calls fn_names c)
       (StringSet.union (collect_direct_fn_calls fn_names t)
@@ -499,6 +503,11 @@ let rec check_tail_position
     | Ast.ERestrict (es, body, _) ->
       List.iter (chk false names params smaller "entry of `restrict`") es;
       chk false names params smaller "body of `restrict`" body
+    (* ── mock: the same (ocap phase 7) ── *)
+    | Ast.EMock (es, h, body, _) ->
+      List.iter (chk false names params smaller "entry of `mock`") es;
+      chk false names params smaller "handler of `mock`" h;
+      chk false names params smaller "body of `mock`" body
     | Ast.EIf (cond, then_, else_, _) ->
       chk false names params smaller "condition of `if`" cond;
       chk in_tail names params smaller ctx then_;

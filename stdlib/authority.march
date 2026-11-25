@@ -5,7 +5,7 @@
 -- Prelude so `CapError` and its constructors are bare names everywhere:
 --
 --   type CapLimit = ByLaunch | ByFnNeeds(String) | ByModNeeds(String)
---                 | ByRestrict(String) | ByGrant(String)
+--                 | ByRestrict(String) | ByGrant(String) | ByMock(Int)
 --   type CapError = CapError(kind, target, limit, limit_scope)
 --
 -- `kind` is the capability (`IO.FileRead`), `target` what the operation
@@ -72,6 +72,7 @@ mod Authority do
     ByModNeeds(m) -> "module " ++ m ++ "'s needs"
     ByRestrict(w) -> "the restrict at " ++ w
     ByGrant(p)    -> "the grant to package " ++ p
+    ByMock(_)     -> "a mock"
     end
   end
 
@@ -162,6 +163,11 @@ mod Authority do
   pfn first_refusal(kind : String, chain : List(String), target : String, cwd : String, layers : List(Layer)) : Result((), CapError) do
     match layers do
     Nil -> Ok(())
+    Cons(Layer(ByMock(_), _, scopes), rest) ->
+      -- A mock (ocap phase 7) never refuses. One that covers the operation
+      -- admits it whatever the layers outside it say: a test may mock what
+      -- it was not launched with (design §12). Layers inside it still apply.
+      if mock_covers(scopes, kind, target, cwd) do Ok(()) else first_refusal(kind, chain, target, cwd, rest) end
     Cons(Layer(limit, text, scopes), rest) ->
       if admits_in(scopes, chain, kind, target, cwd) do first_refusal(kind, chain, target, cwd, rest)
       else Err(CapError(kind, target, limit, text)) end
@@ -511,6 +517,7 @@ mod Authority do
     "IO.Foreign" -> "IO"
     "IO.Foreign.Blocking" -> "IO.Foreign"
     "IO.Registry" -> "IO"
+    "IO.Cluster" -> "IO"
     _ -> ""
     end
   end
@@ -1339,6 +1346,105 @@ mod Authority do
       if admits(scopes, "IO.Foreign", "", "/") do grant_refusal(rest)
       else Some(CapError("IO.Foreign", "", ByGrant(p), text)) end
     Cons(_, rest) -> grant_refusal(rest)
+    end
+  end
+
+  -- ── Mocks (ocap phase 7) ──────────────────────────────────────────────
+  -- `mock SCOPE with HANDLER do ... end` (test builds only) pushes a layer
+  -- `Layer(ByMock(id), text, scopes)`; `id` names the handler record in the
+  -- runtime's mock registry (`mock_register` / `mock_lookup`). Being a layer
+  -- of the current authority, it travels with every closure, task and actor
+  -- made inside the block. A mock covers an operation when one of its scope
+  -- entries is of exactly the operation's kind (a handler is per kind, so the
+  -- lattice is not consulted) and admits the target.
+
+  doc """
+  The layer of a mock whose handler is registered as `id` and whose scope
+  list is `text`. The compiler validated the text, so a parse failure is an
+  internal error.
+
+  ## Examples
+
+      march> Authority.mock_layer(0, "IO.Console")
+      Layer(ByMock(0), "IO.Console", [CapEntry("IO.Console", Any)])
+  """
+  @[stdlib_internal]
+  fn mock_layer(id : Int, text : String) : Layer do
+    match parse(text) do
+    Ok(scopes) -> Layer(ByMock(id), text, scopes)
+    Err(e) -> panic("internal: a mock scope is not a scope list: " ++ e)
+    end
+  end
+
+  doc """
+  The registry id of the innermost mock in force that covers an operation
+  of capability `kind` on `target`, if any. A mock under a `restrict` or a
+  function frame that does not admit the operation is not found: those
+  limits bind a test too. What a test build's dispatch wrapper asks before
+  each interceptable operation.
+  """
+  @[stdlib_internal]
+  fn mock_for(kind : String, target : String) : Option(Int) do
+    match cap_layers() do
+    Nil -> None
+    layers ->
+      let cwd = if path_kind(kind) && not(string_starts_with(target, "/")) do cap_cwd() else "/" end
+      mock_in(kind, kind_chain(kind), target, cwd, layers)
+    end
+  end
+
+  pfn mock_in(kind : String, chain : List(String), target : String, cwd : String, layers : List(Layer)) : Option(Int) do
+    match layers do
+    Nil -> None
+    Cons(Layer(ByMock(id), _, scopes), rest) ->
+      if mock_covers(scopes, kind, target, cwd) do Some(id) else mock_in(kind, chain, target, cwd, rest) end
+    Cons(Layer(_, _, scopes), rest) ->
+      if admits_in(scopes, chain, kind, target, cwd) do mock_in(kind, chain, target, cwd, rest) else None end
+    end
+  end
+
+  pfn mock_covers(scopes : List(CapEntry), kind : String, target : String, cwd : String) : Bool do
+    match scopes do
+    Nil -> false
+    Cons(CapEntry(k, arg), rest) ->
+      (k == kind && arg_admits(arg, kind, target, cwd)) || mock_covers(rest, kind, target, cwd)
+    end
+  end
+
+  doc """
+  `check` as if no mock were in force: the layers with every mock layer
+  removed. A test build's dispatch wrapper calls it before running the real
+  operation for one its mock's handler leaves alone (`None`), so a mock
+  never lets a test reach the outside world beyond its launch.
+
+  ## Examples
+
+      march> Authority.check_unmocked("IO.Console", "stdout")
+      Ok(())
+  """
+  fn check_unmocked(kind : String, target : String) : Result((), CapError) do
+    check_layers(kind, target, drop_mocks(cap_layers()))
+  end
+
+  pfn drop_mocks(layers : List(Layer)) : List(Layer) do
+    match layers do
+    Nil -> Nil
+    Cons(Layer(ByMock(_), _, _), rest) -> drop_mocks(rest)
+    Cons(l, rest) -> Cons(l, drop_mocks(rest))
+    end
+  end
+
+  doc """
+  What a dispatch wrapper calls before the real operation when the mock
+  covering it has no handler for that operation: nothing when the authority
+  outside the mock admits it, else a panic naming the refusal (the
+  operation's own result type cannot carry it; a test build only).
+  """
+  @[stdlib_internal]
+  fn mock_fallthrough(kind : String, target : String) : () do
+    match check_unmocked(kind, target) do
+    Ok(_) -> ()
+    Err(e) -> panic("capability refused: " ++ describe(e) ++ " (the mock in force does not handle this operation)")
     end
   end
 

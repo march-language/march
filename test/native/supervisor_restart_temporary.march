@@ -9,6 +9,7 @@
 mod Main do
   needs IO
   needs IO.Console
+  needs Actor.Introspect
 
   actor Worker do
     state { n : Int }
@@ -42,22 +43,21 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
     let sup = spawn(Sup)
     let perm1 = child_int(sup, "perm")
     let tmp1 = child_int(sup, "tmp")
 
     -- A crash does not bring a temporary child back.
-    send(Actor.pid_from_int(intro, tmp1), Poison())
+    send(Authority.must(Actor.pid_from_int(tmp1)), Poison())
     run_until_idle()
     let tmp2 = child_int(sup, "tmp")
     println("temporary crashed, slot unchanged: " ++ bool_to_string(tmp2 == tmp1))
-    println("temporary crashed, child dead: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, tmp1)) == false))
+    println("temporary crashed, child dead: " ++ bool_to_string(is_alive(Authority.must(Actor.pid_from_int(tmp1))) == false))
 
     -- And it spent none of the restart budget: the permanent child still gets
     -- the supervisor's one allowed restart.
-    kill(Actor.pid_from_int(intro, perm1))
+    kill(Authority.must(Actor.pid_from_int(perm1)))
     run_until_idle()
     let perm2 = child_int(sup, "perm")
     println("permanent respawned after: " ++ bool_to_string(perm2 != perm1))

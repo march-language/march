@@ -199,6 +199,7 @@ type ctx = {
   depth : int;
   auth : S.t;
   at_module : bool;  (** walking a module-level binding's initialiser *)
+  in_mock : bool;  (** inside a `mock` body (ocap phase 7; test builds only) *)
 }
 
 let fresh (s : st) : svar =
@@ -855,6 +856,18 @@ and walk_inner (s : st) (c : ctx) (e : Ast.expr) : T.t =
       | None -> c.auth
     in
     walk s { c with auth } body
+  | Ast.EMock (es, handler, body, sp) ->
+    (* `mock SCOPE with HANDLER do BODY end` (ocap phase 7; test builds
+       only).  Inside the body an operation the entries cover runs a handler
+       function instead, and the mock is part of the authority a closure,
+       task or actor created there keeps.  The pass does not model which
+       operation reaches which handler field: the enclosing function, and
+       every function value created in the body ([in_mock], read by
+       [walk_fn_value]), is not tracked. *)
+    List.iter (fun x -> ignore (walk s c x)) es;
+    ignore (walk s c handler);
+    add_unknown s.store c.valv ~cause:"a mock block: its handler may run in place of an operation" sp;
+    walk s { c with in_mock = true } body
   | Ast.EAnnot (ex, _, _) -> walk s c ex
   | Ast.EDbg (Some ex, _) -> walk s c ex
   | Ast.ESend (a, b, _) ->
@@ -940,6 +953,10 @@ and walk_fn_value ?(self : Ast.name option) (s : st) (c : ctx) ~(params : Ast.na
   (* What a function value creates is in the set of the one that creates it
      (design §6.1). *)
   (match c.lams with (_, outer) :: _ -> add_edge s.store set outer | [] -> ());
+  if c.in_mock then
+    add_unknown s.store set
+      ~cause:"created inside a mock block: it keeps the mock, whose handler may run in place of an operation"
+      (span_of_expr body);
   let c' = { c with act = None; own; valv; scope; lams = (depth, set) :: c.lams; depth } in
   let bt = walk s c' body in
   (match result with T.Hole h -> fill_hole s h bt | _ -> ());
@@ -1413,7 +1430,7 @@ and state_of (s : st) (key : string) : fstate =
          in
          let c =
            { owner = key; act = Some a; own = a.a_own; valv = a.a_val; scope; lams = []; depth = 0;
-             auth = (if is_let then S.full else auth); at_module = is_let }
+             auth = (if is_let then S.full else auth); at_module = is_let; in_mock = false }
          in
          let bt = walk s c body in
          flow s bt a.a_result)

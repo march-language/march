@@ -53,6 +53,8 @@ let rec calls_in_expr (acc : (string * Ast.span * Ast.span) list) (e : Ast.expr)
     calls_in_expr (calls_in_expr (calls_in_expr acc cond) then_) else_
   | Ast.ERestrict (es, body, _) ->
     calls_in_expr (List.fold_left calls_in_expr acc es) body
+  | Ast.EMock (es, h, body, _) ->
+    calls_in_expr (List.fold_left calls_in_expr acc (es @ [ h ])) body
   | Ast.ECond (arms, _) ->
     List.fold_left (fun a (ce, be) ->
       calls_in_expr (calls_in_expr a ce) be) acc arms
@@ -167,6 +169,7 @@ let builtin_candidate_calls ?(bound = []) (e : Ast.expr)
     | Ast.EField (inner, _, _) -> go' acc inner
     | Ast.EIf (c, t, f, _) -> go' (go' (go' acc c) t) f
     | Ast.ERestrict (es, body, _) -> go' (List.fold_left go' acc es) body
+    | Ast.EMock (es, h, body, _) -> go' (List.fold_left go' acc (es @ [ h ])) body
     | Ast.ECond (arms, _) ->
       List.fold_left (fun a (ce, be) -> go' (go' a ce) be) acc arms
     | Ast.EPipe (a, b, _) -> go' (go' acc a) b
@@ -243,6 +246,8 @@ let rec spawned_actor_names (acc : string list) (e : Ast.expr) : string list =
   | Ast.EField (inner, _, _) -> spawned_actor_names acc inner
   | Ast.ERestrict (es, body, _) ->
     spawned_actor_names (List.fold_left spawned_actor_names acc es) body
+  | Ast.EMock (es, h, body, _) ->
+    spawned_actor_names (List.fold_left spawned_actor_names acc (es @ [ h ])) body
   | Ast.EIf (cond, then_, else_, _) ->
     spawned_actor_names
       (spawned_actor_names (spawned_actor_names acc cond) then_) else_
@@ -354,6 +359,7 @@ let free_app_sites ?(bound = []) (e : Ast.expr) : app_site list =
     | Ast.EField (inner, _, _) -> go' acc inner
     | Ast.EIf (c, t, f, _) -> go' (go' (go' acc c) t) f
     | Ast.ERestrict (es, body, _) -> go' (List.fold_left go' acc es) body
+    | Ast.EMock (es, h, body, _) -> go' (List.fold_left go' acc (es @ [ h ])) body
     | Ast.ECond (arms, _) ->
       List.fold_left (fun a (ce, be) -> go' (go' a ce) be) acc arms
     | Ast.EPipe (a, b, _) -> go' (go' acc a) b

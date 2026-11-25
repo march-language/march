@@ -18,7 +18,7 @@ open Test_helpers
 
 module TB = March_typecheck.Typecheck_builtins
 
-let hint = "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)"
+let hint = "use `Authority.must(Actor.pid_from_int(n))` (see `Actor.introspect`)"
 
 let with_gate ?(stdlib_files = []) f =
   let saved_gate = !TB.stdlib_only and saved_files = !TB.stdlib_source_files in
@@ -391,6 +391,8 @@ let test_shipped_table () =
       (* ocap phase 4: the authority slot and the launch layers *)
       "cap_layers"; "cap_set_launch"; "cap_save"; "cap_restore"; "cap_push"; "cap_enter"; "cap_grant_text";
       "cap_cwd"; "cap_launch_fail";
+      (* ocap phase 7: the mock registry *)
+      "mock_register"; "mock_lookup";
       "reload_request";
       "handle_new"; "handle_enter"; "handle_leave"; "handle_close"; "handle_detach";
       "handle_is_closed"; "handle_aux";
@@ -409,11 +411,21 @@ let test_shipped_table () =
                                                      "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at";
                                                      "cap_check_raw";
                                                      "cap_layers"; "cap_set_launch"; "cap_save"; "cap_restore"; "cap_push"; "cap_enter"; "cap_grant_text";
-                                                     "cap_cwd"; "cap_launch_fail" ])
+                                                     "cap_cwd"; "cap_launch_fail";
+                                                     (* ocap phase 7: pid_of_int's wrapper is the checked
+                                                        Actor.pid_from_int (asserted below); the mock
+                                                        registry points at `mock` blocks *)
+                                                     "pid_of_int"; "mock_register"; "mock_lookup" ])
                              && not (List.mem name task10_raw_builtins)
                              && not (List.mem name task9_raw_builtins)
                              && not (List.mem name task8_raw_builtins))
        !TB.stdlib_only);
+  Alcotest.(check bool) "pid_of_int suggestion names Actor.pid_from_int" true
+    (contains ~needle:"`Actor.pid_from_int(n)`" (List.assoc "pid_of_int" !TB.stdlib_only));
+  List.iter (fun name ->
+      Alcotest.(check bool) (name ^ " suggestion names mock") true
+        (contains ~needle:"`mock SCOPE with HANDLER do ... end`" (List.assoc name !TB.stdlib_only)))
+    [ "mock_register"; "mock_lookup" ];
   List.iter (fun name ->
       Alcotest.(check bool) (name ^ " suggestion names Authority.check") true
         (contains ~needle:"`Authority.check(kind, target)`" (List.assoc name !TB.stdlib_only)))
@@ -425,7 +437,7 @@ let test_shipped_table () =
   (* No throwaway entry installed: the shipped table itself gates user code. *)
   Alcotest.(check bool) "user code may no longer call pid_of_int" true
     (has_error_with (typecheck caller)
-       "`pid_of_int` is internal to the standard library; use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)");
+       "`pid_of_int` is internal to the standard library; use `Actor.pid_from_int(n)` (a checked operation under `Actor.Introspect`)");
   Alcotest.(check bool) "nor actor_whereis" true
     (has_error_with (typecheck {|mod App do
   fn find(n : String) do

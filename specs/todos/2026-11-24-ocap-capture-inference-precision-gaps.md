@@ -48,3 +48,20 @@ Each one that runs a stored function value from a builtin, outside the registeri
 an entry, or better a rule derived from the builtin table. Until then a function value that
 triggers one of them can have a set that is too small. The soundness oracle
 (`MARCH_CAPTURE_ORACLE=1`) reports it when a program exercises it.
+
+## `mock` blocks and the Vault (after ocap phase 7 landed, 2026-11-25)
+
+- **`mock` is not modelled.** Inside `mock SCOPE with HANDLER do ... end` an operation the
+  entries cover runs a handler function instead, and a closure, task or actor created in the
+  body keeps the mock. The pass does not model which operation reaches which handler field, so
+  the enclosing function and every function value created in the body are "not tracked" (`?`).
+  Sound, and only in test builds. Precise version: the handler record's held sets join the set
+  of every function value created in the body, and of the enclosing function.
+- **Every function that opens a Vault is now `?`.** `Vault.new`, `Vault.whereis` and the
+  namespace reads call the private `table_name`, which reads a mock's handler with the builtin
+  `mock_lookup` and may call its `open` hook. The pass sees a call through a function value of
+  unknown origin, so `table_name` and every caller is not tracked (`test/captures/data.expected`:
+  `main ... needs IO.Mut, ?`). In a build that is not a test build no mock exists and the extra
+  `?` is pure imprecision. This must be fixed before 8b can reject anything that opens a table:
+  either give `mock_lookup` a result whose set is the mock in force (empty outside test builds),
+  or special-case the dispatch wrappers the way `logger_dispatch` is.

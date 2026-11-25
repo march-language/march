@@ -1,7 +1,7 @@
 exit: 1
 -- PROGRAM ---------------- errors/cap_root_broad_2.march
 
-`pid_of_int` is internal to the standard library; use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`). [stdlib_internal]
+`pid_of_int` is internal to the standard library; use `Actor.pid_from_int(n)` (a checked operation under `Actor.Introspect`). [stdlib_internal]
 
 43 |     match get_cap(pid_of_int(1)) do
                        ^^^^^^^^^^

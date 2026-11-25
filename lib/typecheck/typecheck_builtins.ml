@@ -154,6 +154,11 @@ let span_is_stdlib (sp : Ast.span) : bool =
     (lib/tir cannot be named from here; test_stdlib_only pins the two equal). *)
 let control_wiring_file = "<control>"
 
+(** The file name of the test build's generated dispatch wrappers
+    ([Io_ops_gen.dispatch_wrappers_source], injected by the driver): they read
+    the mock registry, so they may name the stdlib-only builtins. *)
+let cap_dispatch_file = "<cap-dispatch>"
+
 (** Whether a reference at [sp] may name a [@[stdlib_internal]] function: the
     stdlib's own code, or the compiler's generated control wiring. The driver
     refuses an input file named like a generated-code tag (bin/main.ml,
@@ -162,10 +167,11 @@ let control_wiring_file = "<control>"
     with the raw builtins, which ocap phase 4 gated. *)
 let span_may_name_internal (sp : Ast.span) : bool =
   span_is_stdlib sp || String.equal sp.Ast.file control_wiring_file
+  || String.equal sp.Ast.file cap_dispatch_file
 
 (** Builtins only the standard library may reference, each with the
     suggestion the error gives user code instead (e.g.
-    [("pid_of_int", "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)")]).
+    [("pid_of_int", "use `Actor.pid_from_int(n)` (a checked operation under `Actor.Introspect`)")]).
 
     A call or value reference to one of these names from code outside the
     stdlib ([span_is_stdlib]) is a type error; the check is
@@ -178,8 +184,9 @@ let span_may_name_internal (sp : Ast.span) : bool =
     Populated by build step 2 of that plan (unforgeable local references,
     specs/progress/2026-09-22-dd-step02-unforgeable-references.md): the four
     reference-forging builtins, reachable from user code only through the
-    `Actor` wrappers that take a `Cap(Actor.Introspect)` minted by
-    `Actor.introspect(io)`. A ref so tests can install an entry around a
+    `Actor` wrappers, checked under the capability kind `Actor.Introspect`
+    or taking a `Cap(Actor.Introspect)` minted by `Actor.introspect()`. A ref
+    so tests can install an entry around a
     single check. *)
 let stdlib_only : (string * string) list ref = Typecheck_env.stdlib_only
 
@@ -372,6 +379,20 @@ let builtin_cap_table : (string * string) list = [
   ("actor_registered",      "IO.Registry");
 ]
 
+(** The checked stdlib operations that are no builtin's entry point (ocap
+    phase 7, design §7, §21): the mints of the non-IO capabilities and the
+    pid lookup, which once took the root [Cap(IO)] as a witness.  Each calls
+    [Authority.check] on its kind; this charges a call of it to the code that
+    makes it, so `main` must request the kind. *)
+let witness_entry_caps : (string * string) list = [
+  ("Actor.introspect",   "Actor.Introspect");
+  ("Actor.pid_from_int", "Actor.Introspect");
+  ("Actor.debug",        "Actor.Debug");
+  ("Session.attach",     "IO.Cluster");
+  ("ClusterNode.attach", "IO.Cluster");
+  ("ClusterNode.start",  "IO.Cluster");
+]
+
 (** The qualified stdlib entry points of the gated rows ([Cap_ops.gated]:
     `File.write`, `System.now_ms`, `Task.async`, ...), each with its builtin's
     capability.  Since ocap phase 4 (Task 8) user code reaches those builtins
@@ -386,6 +407,7 @@ let entry_cap_table : (string * string) list =
             if String.contains e '.' then Some (e, cap) else None) entry
       | None -> [])
     March_caps.Cap_ops.gated
+  @ witness_entry_caps
 
 (** The names a module DECLARES directly (bare [DFn]s and top-level [DLet]
     [PatVar]s) — exactly the set that wins real name resolution over a global
@@ -898,6 +920,12 @@ let builtin_bindings : (string * scheme) list =
        site (a `()`-typed helper) needs. Not process_exit / print_stderr:
        those are capability operations and their symbols are attributed. *)
     ("cap_launch_fail", Mono (TArrow (t_string, t_unit)));
+    (* ocap phase 7: the mock registry (runtime/march_runtime.c). A `mock`
+       block registers its handler record and names it in its authority
+       layer, ByMock(id); a test build's dispatch wrapper reads it back at
+       its kind's dictionary type. Stdlib-only (and the generated wrappers). *)
+    ("mock_register",   poly1 (fun a -> TArrow (a, t_int)));
+    ("mock_lookup",     poly1 (fun a -> TArrow (t_int, a)));
     (* peak_rss_bytes: process self-inspection (peak resident set size, in
        bytes, on both platforms). Deliberately NOT in the capability table
        below — it performs no IO and observes nothing outside this process,

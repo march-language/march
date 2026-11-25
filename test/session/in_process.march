@@ -120,7 +120,7 @@ mod InProcess do
   fn main(c : Cap(IO)) do
     IO.puts("-- a whole session")
     let t1 = traced()
-    let s1 = Session.attach(c, t1.ops)
+    let s1 = Authority.must(Session.attach(t1.ops))
     let _ = cons(s1, Stream_Cons.register(s1, 0), 2)
     let _ = prod(s1, Stream_Prod.register(s1, 0), 1)
     t1.drain(())
@@ -128,14 +128,14 @@ mod InProcess do
 
     IO.puts("-- Prod leaves")
     let t2 = traced()
-    let s2 = Session.attach(c, t2.ops)
+    let s2 = Authority.must(Session.attach(t2.ops))
     let _ = cons(s2, Stream_Cons.register(s2, 0), 2)
     let _ = Stream_Prod.leave_send_Msg_Prod_Cons_1(s2, Stream_Prod.register(s2, 0), "nothing to send")
     t2.drain(())
 
     IO.puts("-- Prod sends bytes that do not decode")
     let t3 = traced()
-    let s3 = Session.attach(c, t3.ops)
+    let s3 = Authority.must(Session.attach(t3.ops))
     let _ = cons(s3, Stream_Cons.register(s3, 0), 2)
     let raw = Session.register(s3, 0, Stream_Msg.role_Prod())
     let _ = Session.emit(s3, raw, Stream_Msg.role_Cons(), Bytes.from_string("not a message"))
@@ -143,7 +143,7 @@ mod InProcess do
 
     IO.puts("-- C's Read is queued before L's Trigger")
     let t5 = traced()
-    let s5 = Session.attach(c, t5.ops)
+    let s5 = Authority.must(Session.attach(t5.ops))
     let i5 = Logging_I.register(s5, 0)
     let c5 = Logging_C.register(s5, 0)
     let l5 = Logging_L.register(s5, 0)
@@ -155,7 +155,7 @@ mod InProcess do
 
     IO.puts("-- C crashes before sending")
     let t4 = traced()
-    let s4 = Session.attach(c, t4.ops)
+    let s4 = Authority.must(Session.attach(t4.ops))
     -- The order the roles start in does not matter: I waits on L first, and
     -- a delivery from anyone else is parked until it does.
     let _ = role_i(s4, Logging_I.register(s4, 0))
