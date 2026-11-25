@@ -620,6 +620,50 @@ let test_spawn_cycles_no_leak () =
              (List.map (fun (a, b) -> Printf.sprintf "%s:%+d" a b)
                 (List.filteri (fun i _ -> i < 5) bad))))
 
+(* A caught panic leaves the handle uses it abandoned (handle_enter with no
+   handle_leave).  The catch sites that put the authority back also unwind
+   the green thread's stack of entered boxes to their mark.  Without it the
+   box's in-flight count never reaches zero, so close_listener sets CLOSED
+   but the release waits for a leave that cannot come, and the port stays
+   bound until the box is dropped: the second listen on it fails.
+   The interpreter keeps no in-flight count and the JS target has no
+   sockets. *)
+let handle_unwind_src = {|mod HandleUnwind do
+  needs IO.Console
+  needs IO.NetListen
+  fn strand(l : Listener) : Bool do
+    let _ = handle_enter(l, 5)
+    panic("boom")
+  end
+  fn again(port : Int) : String do
+    match Socket.listen(port) do
+    Ok(Ok(l2)) ->
+      let _ = Socket.close_listener(l2)
+      "released"
+    _ -> "still bound"
+    end
+  end
+  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetListen)) do
+    match Socket.listen(0) do
+    Ok(Ok(l)) ->
+      let port = match Socket.local_port(l) do
+        Ok(p) -> p
+        Err(_) -> 0
+      end
+      let _ = __try_call(fn _ -> strand(l))
+      let _ = try_finally(fn _ -> __try_call(fn _ -> strand(l)), fn _ -> ())
+      let _ = Socket.close_listener(l)
+      println("after a caught panic inside a use: " ++ again(port))
+    _ -> println("listen failed")
+    end
+  end
+end
+|}
+
+let test_handle_unwind () =
+  check_all ~skip:[ "js"; "interp" ] ~name:"handle_unwind" ~src:handle_unwind_src
+    [ ("", "after a caught panic inside a use: released\n") ]
+
 let tests =
   [ ( "cap_runtime_slot",
       [ Alcotest.test_case "save/push/enter/restore around cap_check_raw" `Quick test_slot;
@@ -631,6 +675,8 @@ let tests =
           test_unwind_keeps_mark;
         Alcotest.test_case "a caught panic releases what the abandoned frames saved" `Quick
           test_unwind_exact;
+        Alcotest.test_case "a caught panic leaves the handle uses it abandoned" `Quick
+          test_handle_unwind;
         Alcotest.test_case "cap_enter of the authority in force changes nothing" `Quick
           test_enter_same;
         Alcotest.test_case "the Task 10b fast paths leave nothing live" `Quick

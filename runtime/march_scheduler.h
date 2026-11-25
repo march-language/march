@@ -237,11 +237,18 @@ struct march_scheduler;
  * specs/progress/2026-09-23-proc-struct-reclamation-metas.md has the per-site survey. */
 /* A green thread's run-time authority: the value in force and the stack of
  * the ones to put back (see march_proc.auth).  [auth] is first, so a pointer
- * to the state is a pointer to the slot. */
+ * to the state is a pointer to the slot.
+ *
+ * It also carries the other thing a caught panic must unwind: the handle
+ * boxes this thread has entered and not left ([entered], each with a
+ * reference; runtime/march_handle.c).  march_cap_mark records both depths
+ * and march_cap_unwind pops both. */
 typedef struct march_auth_state {
     void     *auth;
     void    **saved;
     uint32_t  len, cap;
+    void    **entered;
+    uint32_t  elen, ecap;
 } march_auth_state;
 
 typedef struct march_proc {
