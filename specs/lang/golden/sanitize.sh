@@ -230,6 +230,9 @@ cap_curated=(
   panic_caught_mortal_mark
   panic_caught_restores_authority
   restrict_panic_caught_restores
+  panic_caught_try_call
+  on_stop_panic_in_frame
+  observer_panic_in_frame_restores
 )
 cap_files=()
 missing=()

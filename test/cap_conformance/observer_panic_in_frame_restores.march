@@ -1,0 +1,88 @@
+-- A crash observer that panics inside a function with `needs` is abandoned
+-- without running that function's restore (diag_dispatch's catch). The
+-- observer after it still runs, under the authority it was made under; the
+-- supervisor still restarts the child, which keeps the authority of its
+-- first spawn; and main is untouched.
+mod ObserverPanicInFrameRestores do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Spawn
+  needs Actor.Introspect
+
+  type ProbeReq = ProbeReq
+
+  fn probe(target : String) : String do
+    match Authority.check("IO.FileRead", target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn observer_boom(p : String) : Unit needs IO.Console, IO.FileRead("/srv/inner/") do
+    println("first observer, in frame: " ++ probe(p))
+    panic("the observer blew up")
+  end
+
+  actor Fragile do
+    state { n : Int }
+    init  { n: 0 }
+    on Probe(reply_to) do
+      Actor.reply(reply_to, probe("/srv/x") ++ " / " ++ probe("/etc/hosts"))
+      state
+    end
+    on Poison() do
+      panic("poisoned")
+    end
+  end
+
+  actor Boss do
+    state { child : Int }
+    init  { child: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 10 within 60
+      Fragile child
+    end
+  end
+
+  fn start() needs IO.Console, IO.FileRead("/srv/"), IO.Spawn do
+    spawn(Boss)
+  end
+
+  fn child_of(boss) : Int do
+    match get_actor_field(boss, "child") do
+    None -> -1
+    Some(n) -> n
+    end
+  end
+
+  -- One crash: both observers run, the child is replaced, and the
+  -- replacement answers under the authority of the first spawn.
+  fn crash_round(intro, boss) : Unit do
+    let before = child_of(boss)
+    send(Actor.pid_from_int(intro, before), Poison())
+    run_until_idle()
+    let after = child_of(boss)
+    println("restarted: " ++ bool_to_string(after != before))
+    match Actor.call(Actor.pid_from_int(intro, after), ProbeReq, 5000) do
+    Ok(s) -> Authority.ignore(println("replacement: " ++ s))
+    Err(e) -> Authority.ignore(println("call failed: " ++ e))
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
+    let _a = Diagnostics.observe_crashes(fn _r -> observer_boom("/srv/x"))
+    let _b = Diagnostics.observe_crashes(fn r ->
+      Authority.ignore(println("second observer: \"" ++ r.message ++ "\" " ++ probe("/srv/x") ++ " / " ++ probe("/etc/hosts"))))
+    let boss = start()
+    -- Several rounds: every replacement runs under the same authority cell,
+    -- so a count one too low per catch adds up until the cell is freed.
+    crash_round(intro, boss)
+    crash_round(intro, boss)
+    crash_round(intro, boss)
+    crash_round(intro, boss)
+    println("main after: " ++ probe("/etc/hosts"))
+  end
+end

@@ -1,0 +1,6 @@
+on_stop, in frame: IO.FileRead("/srv/x") refused by function boom_inside's needs (IO.Console, IO.FileRead("/srv/inner/"))
+stop: true, dead: true, then: allowed /srv/x / IO.FileRead("/etc/hosts") refused by function stop_one's needs (IO.Console, IO.FileRead("/srv/"), IO.Spawn)
+on_stop, in frame: IO.FileRead("/srv/x") refused by function boom_inside's needs (IO.Console, IO.FileRead("/srv/inner/"))
+stop: true, dead: true, then: allowed /srv/x / IO.FileRead("/etc/hosts") refused by function stop_one's needs (IO.Console, IO.FileRead("/srv/"), IO.Spawn)
+main: allowed /etc/hosts
+exit 0

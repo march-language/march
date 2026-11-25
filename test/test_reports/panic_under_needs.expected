@@ -1,0 +1,24 @@
+FAIL: "authority a panic inside a function with needs"
+-- TEST FAILURE ---- test_reports/panic_under_needs.march
+
+This test panicked: inside the frame: IO.FileRead("/etc/hosts") refused by function boom's needs (IO.FileRead("/srv/")) [test_panicked]
+
+20 |     test "a panic inside a function with needs" do
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+FAIL: "authority the next test is not under that function's needs"
+-- TEST FAILURE ---- test_reports/panic_under_needs.march
+
+The two sides of this `==` are not equal. [assert_failed]
+
+26 |       assert (probe("/etc/hosts") == "refused")
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    left `probe("/etc/hosts")`
+        "allowed /etc/hosts"
+         ^
+    right
+        "refused"
+         ^
+
+exit 1
