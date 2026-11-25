@@ -121,4 +121,8 @@ val rewrite_calls :
 val refine_field_types : Tir.expr -> Tir.expr
 val monomorphize :
   ?iface_methods:(string, (string * string) list) Hashtbl.t ->
+  ?pruned:(string, unit) Hashtbl.t ->
   Tir.tir_module -> Tir.tir_module
+(** [pruned]: the names [Dce_pre_mono.prune] removed.  Resolving one of them
+    is an internal error ([Failure]) naming the callee and the caller: it
+    means [implicit_callees] is missing an edge. *)
