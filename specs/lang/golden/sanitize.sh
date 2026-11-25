@@ -218,6 +218,31 @@ if [ ${#missing[@]} -ne 0 ]; then
   exit 2
 fi
 
+# ── Curated test/cap_conformance subset: caught panics under a frame ──────
+# A panic caught inside scoped functions is the one place the authority
+# slot's counts are adjusted by the runtime alone (march_cap_unwind): the
+# catcher puts back the cell it was entered under while the frames above it
+# never ran their restores. A count one too low there frees a cell the code
+# after the catch still runs under. test/run_cap_conformance.ml pins these
+# programs' output on every engine; this leg is what would see the free.
+# Same rules as native_curated: exits 0, needs no header (GRANT, DEP).
+cap_curated=(
+  panic_caught_mortal_mark
+  panic_caught_restores_authority
+  restrict_panic_caught_restores
+)
+cap_files=()
+missing=()
+for b in "${cap_curated[@]}"; do
+  p="$root/test/cap_conformance/$b.march"
+  if [ -f "$p" ]; then cap_files+=("$p"); else missing+=("$b"); fi
+done
+if [ ${#missing[@]} -ne 0 ]; then
+  echo "ERROR: curated test/cap_conformance fixtures no longer exist: ${missing[*]}" >&2
+  echo "Update cap_curated in $0 (a rename must not silently shrink this gate)." >&2
+  exit 2
+fi
+
 total_pass=0; total_fail=0; total_ran=0
 
 # sweep <label> <timeout-seconds> <file>...
@@ -279,11 +304,13 @@ hcr_closure_pin_leg() {
 # shards after the first: shard 1 runs them plus its two-node slice, the
 # others only their slice (see SANITIZE_TWO_NODE_SHARD below).
 if [ "${SANITIZE_TWO_NODE_ONLY:-0}" = 1 ]; then
-  echo "golden + native sweeps skipped (SANITIZE_TWO_NODE_ONLY=1)"
+  echo "golden + native + cap sweeps skipped (SANITIZE_TWO_NODE_ONLY=1)"
 else
   sweep golden 25 "$here"/*.march
   echo
   sweep native 25 "${native_files[@]}"
+  echo
+  sweep cap 25 "${cap_files[@]}"
   echo
   hcr_closure_pin_leg
 fi
