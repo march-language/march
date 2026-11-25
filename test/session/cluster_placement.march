@@ -2,7 +2,7 @@
 -- consumer written against the cluster capability only -- a toy placement
 -- that keeps each role on one Alive member and moves it when SWIM declares
 -- that member dead -- driven by a FAKE cluster dictionary attached with
--- `ClusterNode.attach(io, ops)`. The test injects `NodeDead`/`NodeUp`
+-- `Authority.must(ClusterNode.attach(ops))`. The test injects `NodeDead`/`NodeUp`
 -- through the subscribers the dictionary collected and asserts which roles
 -- moved where. No sockets, no node actor: every operation the consumer
 -- calls goes through `cap_dict`.
@@ -128,7 +128,7 @@ mod ClusterPlacement do
     Vault.set(fk.members, "n1", info("n1"))
     Vault.set(fk.members, "n2", info("n2"))
     Vault.set(fk.members, "n3", info("n3"))
-    let c = ClusterNode.attach(io, fake_ops(fk))
+    let c = Authority.must(ClusterNode.attach(fake_ops(fk)))
     Authority.ignore(println("node " ++ ClusterNode.node_id(c) ++ ", creation " ++ int_to_string(ClusterNode.creation(c))))
     let g = ClusterNode.global_pid(c, 7)
     Authority.ignore(println("global pid " ++ g.node_id ++ "/" ++ int_to_string(g.local_pid) ++ "@" ++ int_to_string(g.creation)))

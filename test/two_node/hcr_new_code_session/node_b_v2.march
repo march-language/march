@@ -152,7 +152,7 @@ mod HcrSessionB do
     let seed = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A")))
     -- The default SWIM timeouts: see node_a.march.
     let cfg = ClusterNode.config("node-b", Authority.must(Env.require_int("MARCH_PORT_B")), "", Cons(seed, Nil), "hcr-secret", 1)
-    match ClusterNode.start(c, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 60000) do () else panic("node-b: never joined") end

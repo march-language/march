@@ -110,7 +110,7 @@ mod CertOrderA do
   end
 
   fn main(c : Cap(IO)) do
-    match ClusterNode.start(c, config("node-a", "MARCH_PORT_A", "")) do
+    match ClusterNode.start(config("node-a", "MARCH_PORT_A", "")) do
       Err(e) -> panic(e)
       Ok(h) ->
         println("node-a: up")

@@ -1,0 +1,27 @@
+-- TEST
+-- A `restrict` inside a `mock` still narrows (ocap phase 7): the mock
+-- admits the clock past the layers outside it, but a layer inside it that
+-- refuses the clock refuses it. The restrict's scope is a value, so the
+-- check is the run-time one (a literal one would be refused at compile
+-- time).
+mod MockRestrictInner do
+  needs IO.Console
+  needs IO.Clock
+
+  fn stamp() : String do
+    match System.now_ms() do
+    Ok(t) -> if t == 1234 do "mocked" else "real" end
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main() do
+    let console_only : Scope = IO.Console
+    mock IO.Clock with { unix_time_ms: Some(fn _ -> 1234) } do
+      println("mock: " ++ stamp())
+      restrict console_only do
+        println("restrict inside: " ++ stamp())
+      end
+    end
+  end
+end

@@ -54,7 +54,7 @@ mod TopologyRejoinA do
   fn main(c : Cap(IO)) do
     let me = "node-a"
     let port = Authority.must(Env.require_int("MARCH_PORT_A"))
-    match ClusterNode.start(c, ClusterNode.config(me, port, "", Nil, "topo-rejoin-secret", 1)) do
+    match ClusterNode.start(ClusterNode.config(me, port, "", Nil, "topo-rejoin-secret", 1)) do
       Err(e) -> panic(e)
       Ok(h) ->
         println(me ++ ": up")

@@ -26,6 +26,7 @@
 mod Main do
   needs IO
   needs IO.Console
+  needs Actor.Introspect
 
   @[no_warn_recursion]
   fn boom(n : Int) : Int do
@@ -82,7 +83,7 @@ mod Main do
     let location_ok = match r.location do
       -- The lines of boom's panic(...) and Fragile.Later's todo(...): keep
       -- them in step if this file's lines move.
-      Some(loc) -> in_fixture(loc.file) && loc.line == (if r.message == "later" do 39 else 32 end)
+      Some(loc) -> in_fixture(loc.file) && loc.line == (if r.message == "later" do 40 else 33 end)
       None -> false
     end
     -- Fragile.Later's body may be inlined into the actor's dispatch
@@ -118,8 +119,7 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
 
     -- with_context without a crash: nested, inner first, restored after.
     let inside = Diagnostics.with_context([("outer", Diagnostics.DBool(true))], fn ->
@@ -150,12 +150,12 @@ mod Main do
 
     let boss = spawn(Boss)
     let victim = current_child(boss)
-    send(Actor.pid_from_int(intro, victim), Poison())
+    send(Authority.must(Actor.pid_from_int(victim)), Poison())
     run_until_idle()
     println("restarted: " ++ bool_to_string(current_child(boss) != victim))
     -- todo(...) goes through the prelude's todo wrapper compiled: its site
     -- survives the call.
-    send(Actor.pid_from_int(intro, current_child(boss)), Later())
+    send(Authority.must(Actor.pid_from_int(current_child(boss))), Later())
     run_until_idle()
     println("context in main after the crash: " ++ ctx_text(Diagnostics.current_context()))
 

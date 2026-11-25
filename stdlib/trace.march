@@ -43,7 +43,7 @@
 -- TRACE_START, TRACE_DRAIN and TRACE_STOP (docs/observe.md).
 --
 -- Debug tier: every function takes `Cap(Actor.Debug)` (mint it with
--- `Actor.debug(io)` in `main`; the remote shell has it pre-bound as `debug`).
+-- `Authority.must(Actor.debug())` in `main`; the remote shell has it pre-bound as `debug`).
 --
 -- R8 of specs/plans/2026-09-28-observe-recon-shell-plan.md.
 --

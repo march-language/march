@@ -1,0 +1,3 @@
+read </fixtures/a.txt>
+real read failed
+exit 0

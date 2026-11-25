@@ -92,7 +92,7 @@ mod UpgradeTraffic do
   end
 
   fn main(io : Cap(IO)) do
-    let node = match ClusterNode.start(io, Topology.config_from_env()) do
+    let node = match ClusterNode.start(Topology.config_from_env()) do
       Ok(h) -> h
       Err(e) -> Topology.start_failed(e)
     end

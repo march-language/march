@@ -8,6 +8,8 @@
 mod Main do
   needs IO
   needs IO.Console
+  needs Actor.Debug
+  needs Actor.Introspect
 
   -- Self-recursive on a branch that never runs, so the inliner leaves it
   -- alone and it keeps its dispatch slot (as in trace_boundary).
@@ -181,9 +183,8 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let d = Actor.debug(io)
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_debug : Cap(Actor.Debug), _cap_introspect : Cap(Actor.Introspect)) do
+    let d = Authority.must(Actor.debug())
     let p = spawn(Parent)
     let pi = pid_to_int(p)
 
@@ -315,7 +316,7 @@ mod Main do
       None -> 0 - 1
       Some(n) -> n
     end
-    let child_pid = Actor.pid_from_int(intro, child)
+    let child_pid = Authority.must(Actor.pid_from_int(child))
     match Trace.start_with(d, Trace.actors([Trace.Exited], [pid_to_int(x), pid_to_int(y), child]), Trace.MaxEvents(20)) do
       Err(e) -> Authority.ignore(println("exit start: " ++ err_name(e)))
       Ok(s) ->

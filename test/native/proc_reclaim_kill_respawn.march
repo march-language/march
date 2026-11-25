@@ -150,7 +150,7 @@ mod ProcReclaimKillRespawn do
   fn after_death(intro : Cap(Actor.Introspect), watcher, prev) do
     let _ = monitor(watcher, prev)
     let shown = to_string(prev)
-    let again = Actor.pid_from_int(intro, pid_to_int(prev))
+    let again = Authority.must(Actor.pid_from_int(pid_to_int(prev)))
     let _ = send(again, Tick(1))
     let _ = mailbox_size(prev)
     let _ = Actor.is_draining(prev)
@@ -160,7 +160,7 @@ mod ProcReclaimKillRespawn do
   -- Crash the supervisor's current child: a restart, immediate the first
   -- time and then delayed by the (short) backoff, while this round goes on.
   fn poison_child(intro : Cap(Actor.Introspect), boss) do
-    let c = Actor.pid_from_int(intro, child_int(boss, "c"))
+    let c = Authority.must(Actor.pid_from_int(child_int(boss, "c")))
     let _ = send(c, Poison())
     0
   end
@@ -207,8 +207,8 @@ mod ProcReclaimKillRespawn do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let watcher = spawn(Watcher)
     let first = spawn(Worker)
     let boss = spawn(Boss)

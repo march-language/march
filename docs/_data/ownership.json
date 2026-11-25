@@ -37,9 +37,9 @@
     }
   },
   "generated": {
-    "commit": "4e0560690",
+    "commit": "8c2ae792a",
     "compiler": "march 0.7.0",
-    "date": "2026-11-16",
+    "date": "2026-11-25",
     "inputs_sha256": "6b8bbe83b2b010d7540bacfb1eb80d6abfacb015b78f009a5c8abdd4da94809c"
   },
   "linear": {
@@ -203,9 +203,9 @@
         "build": 31,
         "inc_leaves": 31,
         "main": 1,
-        "plumbing": 2,
+        "plumbing": 3,
         "tasks": 0,
-        "total": 76
+        "total": 80
       },
       "excerpt": "fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) : Unit do\n  let t = build(4, 1)\n  let kept = Authority.must(Vault.new(\"trees\"))\n  Vault.set(kept, \"before\", t)\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2)))\n  ()\nend\n",
       "exit": 0,

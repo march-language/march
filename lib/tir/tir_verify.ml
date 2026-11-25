@@ -406,6 +406,9 @@ let check ~(stage : string) ?(borrow_map : Borrow.borrow_map option)
     || Hashtbl.mem unqualified name
     || Tir_names.has_runtime_prefix name
     || Builtin_table.is_builtin name
+    (* [root_cap] is an atom [Llvm_emit.emit_atom] dispatches, not a builtin
+       call; only the stdlib's checked mints name it (ocap phase 7). *)
+    || name = "root_cap"
     || known_fn name
     || emitter_arm name
     || js_only_name name

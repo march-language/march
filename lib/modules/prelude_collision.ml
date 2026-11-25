@@ -123,6 +123,7 @@ let rec free_names (bound : StrSet.t) (e : expr) : StrSet.t =
   | EField (ex, _, _) -> go ex
   | EIf (c, t, f, _) -> union_all [ go c; go t; go f ]
   | ERestrict (es, b, _) -> union_all (List.map go (es @ [ b ]))
+  | EMock (es, h, b, _) -> union_all (List.map go ((es @ [ h ]) @ [ b ]))
   | ECond (arms, _) -> union_all (List.map (fun (ce, be) -> StrSet.union (go ce) (go be)) arms)
   | EAnnot (ex, _, _) -> go ex
   | EAtom (_, args, _) -> union_all (List.map go args)

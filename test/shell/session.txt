@@ -11,7 +11,7 @@ nap()
 List.map(xs, fn x -> x * x) limit: 3
 println("hi from the shell")
 Actor.list(intro)
-let c = Actor.pid_from_int(intro, 0)
+let c = Authority.must(Actor.pid_from_int(0))
 send(c, Bump(41))
 Actor.inspect_state(debug, c, 500)
 let k = spawn(Counter)

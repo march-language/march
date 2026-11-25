@@ -476,7 +476,7 @@ let main_source ?pools (f : facts) (t : t) : string =
   add "fn main(topology_io : Cap(IO)) do\n";
   (* Only ClusterNode may hand out a Cap(ClusterNode.Live) (D35), so the
      node is started here, not by a Topology helper. *)
-  add "  let topology_node = match ClusterNode.start(topology_io, Topology.config_from_env()) do\n";
+  add "  let topology_node = match ClusterNode.start(Topology.config_from_env()) do\n";
   add "    Ok(topology_n) -> topology_n\n";
   add "    Err(topology_e) -> Topology.start_failed(topology_e)\n";
   add "  end\n";

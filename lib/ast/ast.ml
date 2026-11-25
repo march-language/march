@@ -72,6 +72,11 @@ type expr =
       (** [restrict e1, ..., en do body end]: entries, body, span of the whole
           (the [restrict] keyword's start is the span start). Each entry is an
           ordinary expression; [()] is the empty scope. *)
+  | EMock of expr list * expr * expr * span
+      (** [mock e1, ..., en with h do body end] (ocap phase 7; test builds
+          only): scope entries, handler, body, span of the whole (the [mock]
+          keyword's start is the span start). Inside [body], an interceptable
+          operation the entries cover goes to the handler record [h]. *)
   | ECond of (expr * expr) list * span     (** match do cond_arm* end — boolean chain *)
   | EPipe of expr * expr * span            (** x |> f *)
   | EAnnot of expr * ty * span             (** Type annotation *)
@@ -671,6 +676,7 @@ let show_expr = function
   | EField (_, n, _) -> Printf.sprintf "EField(_, %s, _)" n.txt
   | EIf _ -> "EIf(...)"
   | ERestrict _ -> "ERestrict(...)"
+  | EMock _ -> "EMock(...)"
   | ECond _ -> "ECond(...)"
   | EPipe _ -> "EPipe(...)"
   | EAnnot _ -> "EAnnot(...)"

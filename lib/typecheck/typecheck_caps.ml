@@ -170,6 +170,8 @@ let rec cap_annots_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
   | Ast.EField (inner, _, _) -> cap_annots_in_expr acc inner
   | Ast.ERestrict (es, b, _) ->
     List.fold_left cap_annots_in_expr acc (es @ [ b ])
+  | Ast.EMock (es, h, b, _) ->
+    List.fold_left cap_annots_in_expr acc (es @ [ h; b ])
   | Ast.EIf (cond, then_, else_, _) ->
     cap_annots_in_expr (cap_annots_in_expr (cap_annots_in_expr acc cond) then_) else_
   | Ast.ECond (arms, _) ->
@@ -381,6 +383,8 @@ let rec literal_path_uses (acc : (string * string * Ast.span) list)
     List.fold_left (fun a br -> literal_path_uses a br.Ast.branch_body) acc brs
   | Ast.ERestrict (es, b, _) ->
     List.fold_left literal_path_uses acc (es @ [ b ])
+  | Ast.EMock (es, h, b, _) ->
+    List.fold_left literal_path_uses acc (es @ [ h; b ])
   | Ast.EIf (c, t, f, _) ->
     literal_path_uses (literal_path_uses (literal_path_uses acc c) t) f
   | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) ->
@@ -530,6 +534,7 @@ let rec name_uses ?(resolve = Fun.id) (acc : name_use list) (e : Ast.expr)
   | Ast.EField (inner, _, _) -> go acc inner
   | Ast.EIf (c, t, f, _) -> go (go (go acc c) t) f
   | Ast.ERestrict (es, b, _) -> go (List.fold_left go acc es) b
+  | Ast.EMock (es, h, b, _) -> go (List.fold_left go acc (es @ [ h ])) b
   | Ast.ECond (arms, _) -> List.fold_left (fun a (c, b) -> go (go a c) b) acc arms
   | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> go (go acc a) b
   | Ast.ELetQ (_, a, b, _) | Ast.ELetStar (_, a, b, _) -> go (go acc a) b
@@ -1286,6 +1291,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          | None -> ());
         List.iter go' es;
         go' b
+      | Ast.EMock (es, h, b, _) -> List.iter go' es; go' h; go' b
       | Ast.ELam (ps, body, _) ->
         go (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps @ scope) body
       | Ast.EBlock (es, _) -> block scope es
@@ -1337,7 +1343,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
        (final review F8). *)
     let rec has (e : Ast.expr) : bool =
       match e with
-      | Ast.ERestrict _ -> true
+      | Ast.ERestrict _ | Ast.EMock _ -> true
       | Ast.EVar _ | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> false
       | Ast.ELam (_, x, _) | Ast.ELetFn (_, _, _, x, _) | Ast.EField (x, _, _)
       | Ast.EAnnot (x, _, _) | Ast.ESpawn (x, _) | Ast.EAssert (x, _) | Ast.ESigil (_, x, _)
@@ -3236,23 +3242,21 @@ let check_cap_impl_sites (env : env) : unit =
                end
              | None ->
                (* Not a proof cap — an IO capability, which has no declaring
-                  module to bind the rule to. *)
-               if !test_build then true
-               else begin
-                 err [
-                   MPText "cap_impl "; MPCode ("Cap(" ^ p ^ ")");
-                   MPText " is not allowed here: an IO capability has no declaring \
-                           module, so there is no module that owns the right to say \
-                           what it does.";
-                   MPBreak;
-                   MPText "hint: mocking an IO capability is admitted only in a test \
-                           build ("; MPCode "--test";
-                   MPText "). To swap behaviour in ordinary code, declare your own \
-                           capability with a dictionary (";
-                   MPCode "proof cap Name with Ops";
-                   MPText ") and route the operations through it." ];
-                 false
-               end
+                  module to bind the rule to.  Ocap phase 7 retired IO
+                  dictionaries: a test mocks an IO capability with a `mock`
+                  block, which needs no capability value at all. *)
+               err [
+                 MPText "cap_impl "; MPCode ("Cap(" ^ p ^ ")");
+                 MPText " is not allowed: an IO capability has no dictionary to \
+                         attach.";
+                 MPBreak;
+                 MPText "hint: in a test, mock it with a block: ";
+                 MPCode ("mock " ^ p ^ " with { ... } do ... end");
+                 MPText ". To swap behaviour in ordinary code, declare your own \
+                         capability with a dictionary (";
+                 MPCode "proof cap Name with Ops";
+                 MPText ") and route the operations through it." ];
+               false
            in
            if gate_ok then begin
              match Cap_dict_resolve.dict_ty_of_cap env p with

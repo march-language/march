@@ -880,7 +880,7 @@ let replayed = bad "sending twice on one state is a linearity error (replay)" "i
 
 let abandoned = bad "registering and never driving the session is a linearity error (abandon)" "was never used" (wrap (stream ^ {|
   fn go(c : Cap(IO)) do
-    let s = Session.attach(c, { register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _f, _h) -> e, close: fn _e -> (), fail: fn (_e, w) -> panic(w), on_cancel: fn (e, _h) -> e, leave: fn (_e, _w) -> (), on_crash: fn (e, _r, _h) -> e, suspend_at_boundary: fn (e, _f, _h) -> e, on_drain: fn (e, _h) -> e })
+    let s = Authority.must(Session.attach({ register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _f, _h) -> e, close: fn _e -> (), fail: fn (_e, w) -> panic(w), on_cancel: fn (e, _h) -> e, leave: fn (_e, _w) -> (), on_crash: fn (e, _r, _h) -> e, suspend_at_boundary: fn (e, _f, _h) -> e, on_drain: fn (e, _h) -> e }))
     let st = Stream_Prod.register(s, 0)
     ()
   end
@@ -1946,7 +1946,7 @@ let cli_role_grant_cluster_fronts =
        let with_call call =
          let src = replace_all ~needle:"  needs Session.Live\n" ~by:"  needs Session.Live\n  needs ClusterNode.Live\n  needs IO.Spawn\n" violation_src in
          let src = replace_all ~needle:"  fn main(c : Cap(IO)) do\n"
-             ~by:"  actor Host do\n    state { n : Int }\n    init { n: 0 }\n    on Ping() do state end\n  end\n  fn main(c : Cap(IO)) do\n    let node = ClusterNode.attach(c, ClusterNode.ops_stub(\"n\"))\n    let h = spawn(Host)\n" src in
+             ~by:"  actor Host do\n    state { n : Int }\n    init { n: 0 }\n    on Ping() do state end\n  end\n  fn main(c : Cap(IO)) do\n    let node = Authority.must(ClusterNode.attach(ClusterNode.ops_stub(\"n\")))\n    let h = spawn(Host)\n" src in
          replace_all
            ~needle:"Stream_Run.run_Cons(c, \"n\", \"s\", Stream_Run.addrs_from_env(), fn (s, con, st) -> cons(s, con, st))"
            ~by:call src
@@ -2452,7 +2452,7 @@ mod Mismatch do
   end
   fn main(c : Cap(IO)) do
     let t = Session.in_process()
-    let s = Session.attach(c, t.ops)
+    let s = Authority.must(Session.attach(t.ops))
     let _ = Stream_Cons.script(s, Stream_Cons.register(s, 0), [ Stream_Cons.Choose_more(true) ])
     let _ = Stream_Prod.script(s, Stream_Prod.register(s, 0), [ Stream_Prod.Send_Msg_Prod_Cons_1(1) ])
     t.drain(())
@@ -2479,7 +2479,7 @@ mod Short do
   end
   fn main(c : Cap(IO)) do
     let t = Session.in_process()
-    let s = Session.attach(c, t.ops)
+    let s = Authority.must(Session.attach(t.ops))
     let _ = Ping_B.script(s, Ping_B.register(s, 0), [ Ping_B.Expect_Msg_A_B_1(fn _ -> ()) ])
     let _ = Ping_A.script(s, Ping_A.register(s, 0), STEPS)
     t.drain(())
@@ -2717,13 +2717,13 @@ let shared_bystander_native =
   end
   fn main(io : Cap(IO)) do
     let t = Session.in_process()
-    let s = Session.attach(io, t.ops)
+    let s = Authority.must(Session.attach(t.ops))
     let _ = c(s, Three_C.register(s, 0))
     let _ = b(s, Three_B.register(s, 0))
     let _ = Three_A.close(s, Three_A.choose_go(s, Three_A.register(s, 0), 1))
     t.drain(())
     let u = Session.in_process()
-    let q = Session.attach(io, u.ops)
+    let q = Authority.must(Session.attach(u.ops))
     let _ = c(q, Three_C.register(q, 0))
     let _ = b(q, Three_B.register(q, 0))
     let _ = Three_A.close(q, Three_A.choose_halt(q, Three_A.register(q, 0), "halt"))
