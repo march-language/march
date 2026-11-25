@@ -69,7 +69,7 @@ mod HostedRestartNodeB do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main(c : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
     let intro = Authority.must(Actor.introspect())
     println("node-b: up")
     let sup = spawn(ConsSup)

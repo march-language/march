@@ -18,7 +18,7 @@ mod IntrospectForwarded do
     is_alive(Authority.must(Actor.pid_from_int(idx)))
   end
 
-  fn main(io : Cap(IO)) do
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
     let c = Authority.must(Actor.introspect())
     let pid = spawn(Counter)
     let _ = Actor.register(pid, "counter")

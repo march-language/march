@@ -204,7 +204,7 @@ mod StreamActorEventsSupervised do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main(c : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
     let intro = Authority.must(Actor.introspect())
     let handlers = Authority.must(Vault.new("stream_actor_events_sup_handlers"))
     let pending  = Authority.must(Vault.new("stream_actor_events_sup_pending"))
