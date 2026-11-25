@@ -10,6 +10,7 @@ mod Main do
   needs IO
   needs IO.Console
   needs IO.Clock
+  needs Actor.Introspect
 
   actor W do
     state { n : Int }
@@ -84,8 +85,8 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let s1 = spawn(Sup)
     let before = List.length(Actor.list(intro))
     -- Crash one supervised child of s1 (children are spawned before their

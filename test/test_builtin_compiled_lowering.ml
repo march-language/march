@@ -50,7 +50,8 @@ let special_lowerings : string list =
        interpreted has no reader outside the REPL); a first-class `tap` is a
        positioned lowering error. *)
     "tap";
-    (* cap_passing.ml: rewritten to an empty capability ops record. *)
+    (* Retired with `with_cap` (ocap phase 7): the type checker refuses every
+       use, so none reaches lowering. *)
     "cap_ops_empty";
     (* stdlib/prelude.march defines a March fn of the same name. *)
     "head"; "tail"; "is_nil" ]

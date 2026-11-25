@@ -41,9 +41,12 @@ static const march_cap_entry_t march_cap_lattice[] = {
   { "IO.Foreign", "IO" },
   { "IO.Foreign.Blocking", "IO.Foreign" },
   { "IO.Registry", "IO" },
+  { "IO.Cluster", "IO" },
+  { "Actor.Introspect", NULL },
+  { "Actor.Debug", NULL },
 };
 
-const int march_cap_lattice_size = 21;
+const int march_cap_lattice_size = 24;
 
 /* Looks up `path` in the static table; returns its parent (or NULL if
  * `path` is a root, or if `path` is not present in the table at all). */

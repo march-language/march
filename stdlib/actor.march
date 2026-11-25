@@ -65,8 +65,9 @@ mod Actor do
   -- turn an integer or a name into a Pid, which is exactly what makes a Pid
   -- an unforgeable reference otherwise: a function that holds no Pid and no
   -- `Cap(Actor.Introspect)` can talk to nobody it was not introduced to. The cap
-  -- is minted from `Cap(IO)` (the composition root holds that), so a role
-  -- body or hook under a narrower grant cannot reach these.
+  -- is minted by `introspect()`, a checked operation under the capability
+  -- kind `Actor.Introspect` (ocap phase 7), which `main` requests and a
+  -- `restrict` or a grant can withhold.
   -- Cross-node references (`GlobalPid.make`, `GlobalRegistry.lookup`) are not
   -- covered: unforgeability is a process property first.
   proof cap Introspect
@@ -74,20 +75,24 @@ mod Actor do
   -- Debug authority: the right to see what an actor holds, its state (and,
   -- over the observe socket, its queued messages), which can be anything the
   -- program keeps: tokens, personal data. A stronger gate than Introspect,
-  -- which only reveals counts and names; minted the same way, from Cap(IO).
+  -- which only reveals counts and names; minted by `debug()`, a checked
+  -- operation under the kind `Actor.Debug`.
   proof cap Debug
 
   doc """
-  Mint the debug capability from the root capability: mint it once in
-  `main` and forward it only to code that may read actor state.
+  Mint the debug capability, or `Err(CapError(...))` when the current
+  authority does not hold the capability kind `Actor.Debug`: mint it once
+  in `main` (which requests it with `needs Actor.Debug`) and forward it only
+  to code that may read actor state.
 
-      fn main(io : Cap(IO)) do
-        let d = Actor.debug(io)
+      fn main() : () needs Actor.Debug do
+        let d = Authority.must(Actor.debug())
         match Actor.inspect_state(d, pid, 1000) do ... end
       end
   """
-  fn debug(io : Cap(IO)) : Cap(Actor.Debug) do
-    mint_cap(io)
+  fn debug() : Result(Cap(Actor.Debug), CapError) do
+    let? _ = Authority.check("Actor.Debug", "")
+    Ok(mint_cap(root_cap))
   end
 
   -- Why Actor.inspect_state could not answer:
@@ -125,30 +130,35 @@ mod Actor do
   end
 
   doc """
-  Mint the introspection capability from the root capability. The only way to
-  obtain a `Cap(Actor.Introspect)`: mint it once in `main` and forward it to
-  the code that needs it.
+  Mint the introspection capability, or `Err(CapError(...))` when the
+  current authority does not hold the capability kind `Actor.Introspect`.
+  The only way to obtain a `Cap(Actor.Introspect)`: mint it once in `main`
+  (which requests it with `needs Actor.Introspect`) and forward it to the
+  code that needs it.
 
-      fn main(io : Cap(IO)) do
-        let c = Actor.introspect(io)
+      fn main() : () needs Actor.Introspect do
+        let c = Authority.must(Actor.introspect())
         match Actor.whereis(c, "counter") do ... end
       end
   """
-  fn introspect(io : Cap(IO)) : Cap(Actor.Introspect) do
-    mint_cap(io)
+  fn introspect() : Result(Cap(Actor.Introspect), CapError) do
+    let? _ = Authority.check("Actor.Introspect", "")
+    Ok(mint_cap(root_cap))
   end
 
   doc """
   Turn a spawn index (what `pid_to_int` returns, or what `get_actor_field`
-  reads out of a supervisor's state) back into a Pid. An unknown index
-  resolves to a safe already-dead sentinel, so `is_alive` on it is `false`
-  and `send` to it returns `None`.
+  reads out of a supervisor's state) back into a Pid, or
+  `Err(CapError(...))` when the current authority does not hold the
+  capability kind `Actor.Introspect`. An unknown index resolves to a safe
+  already-dead sentinel, so `is_alive` on it is `false` and `send` to it
+  returns `None`.
 
-      let c = Actor.introspect(io)
-      let p = Actor.pid_from_int(c, pid_to_int(worker))   -- the same actor as worker
+      let p = Authority.must(Actor.pid_from_int(pid_to_int(worker)))   -- the same actor as worker
   """
-  fn pid_from_int(_c : Cap(Actor.Introspect), n : Int) do
-    pid_of_int(n)
+  fn pid_from_int(n : Int) : Result(Pid(a), CapError) do
+    let? _ = Authority.check("Actor.Introspect", "")
+    Ok(pid_of_int(n))
   end
 
   doc """

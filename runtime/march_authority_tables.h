@@ -37,8 +37,9 @@ march_auth_parent_table[] = {
   { "IO.Foreign", 10, "IO", 2 },
   { "IO.Foreign.Blocking", 19, "IO.Foreign", 10 },
   { "IO.Registry", 11, "IO", 2 },
+  { "IO.Cluster", 10, "IO", 2 },
 };
-#define MARCH_AUTH_N_PARENTS 20
+#define MARCH_AUTH_N_PARENTS 21
 
 /* Capabilities that take a path scope (Cap_scope.is_scopable, not host or name). */
 static const struct { const char *kind; int len; } march_auth_path_kinds[] = {

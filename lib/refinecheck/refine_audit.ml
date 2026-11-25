@@ -95,7 +95,7 @@ let expr_span (e : A.expr) : A.span =
   | A.ERecordUpdate (_, _, sp)
   | A.EField (_, _, sp)
   | A.EIf (_, _, _, sp)
-  | A.ERestrict (_, _, sp)
+  | A.ERestrict (_, _, sp) | A.EMock (_, _, _, sp)
   | A.ECond (_, sp)
   | A.EPipe (_, _, sp)
   | A.EAnnot (_, _, sp)
@@ -242,6 +242,7 @@ let rec walk_expr (sites : site list ref) (e : A.expr) : unit =
   | A.EField (e, _, _) -> ge e
   | A.EIf (c, t, e, _) -> ge c; ge t; ge e
   | A.ERestrict (es, b, _) -> List.iter ge es; ge b
+  | A.EMock (es, h, b, _) -> List.iter ge (es @ [ h ]); ge b
   | A.ECond (arms, _) -> List.iter (fun (c, b) -> ge c; ge b) arms
   | A.EPipe (a, b, _) -> ge a; ge b
   | A.EAnnot (e, t, _) -> ge e; start sites Expr_annot t

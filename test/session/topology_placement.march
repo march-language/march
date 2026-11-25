@@ -1,5 +1,5 @@
 -- Topology.place over a FAKE cluster (D35's seam): the dictionary attached
--- with `ClusterNode.attach(io, ops)` holds the member table and the name
+-- with `Authority.must(ClusterNode.attach(ops))` holds the member table and the name
 -- registry, and the test injects NodeDead / NodeRejoined through the
 -- subscribers it collected. The offers are real `SessionNode` offers opened
 -- over the fake (their routes and names land in it). No sockets.
@@ -95,7 +95,7 @@ mod TopologyPlacement do
     List.each(["n0", "n1", "n2"], fn id -> Vault.set(fk.members, id, member(id, Membership.Alive)))
     List.each(["n1", "n2"], fn id ->
       Vault.set(fk.names, Topology.marker("Echo.Server", id), GlobalPid.make(id, 1, 1)))
-    let c = ClusterNode.attach(io, fake_ops(fk))
+    let c = Authority.must(ClusterNode.attach(fake_ops(fk)))
     let ranked = Topology.rank("Echo.Server", ["n0", "n1", "n2"])
     Authority.ignore(println("ranking: " ++ String.join(ranked, " > ")))
     Topology.place(c, [ Topology.role("Echo.Server", Topology.count(1),

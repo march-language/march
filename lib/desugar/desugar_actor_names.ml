@@ -230,6 +230,7 @@ let rename_expr tbl ~root cur =
     | EField (x, n, sp) -> EField (ex x, n, sp)
     | EIf (c, t, f, sp) -> EIf (ex c, ex t, ex f, sp)
     | ERestrict (es, b, sp) -> ERestrict (List.map ex es, ex b, sp)
+    | EMock (es, h, b, sp) -> EMock (List.map ex es, ex h, ex b, sp)
     | ECond (arms, sp) -> ECond (List.map (fun (c, b) -> (ex c, ex b)) arms, sp)
     | EPipe (l, r, sp) -> EPipe (ex l, ex r, sp)
     | EAnnot (x, t, sp) -> EAnnot (ex x, ty t, sp)

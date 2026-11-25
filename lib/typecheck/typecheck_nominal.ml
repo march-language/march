@@ -423,6 +423,7 @@ let compute ~(is_stdlib : A.span -> bool) ?(base = fun (_ : string) -> false)
       | A.EField (e, _, _) -> ex e
       | A.EIf (a, b, c, _) -> ex a; ex b; ex c
       | A.ERestrict (es, b, _) -> List.iter ex es; ex b
+      | A.EMock (es, h, b, _) -> List.iter ex (es @ [ h ]); ex b
       | A.ECond (arms, _) -> List.iter (fun (a, b) -> ex a; ex b) arms
       | A.EPipe (a, b, _) | A.ESend (a, b, _) -> ex a; ex b
       | A.EAnnot (e, t, _) -> ex e; ty sc t

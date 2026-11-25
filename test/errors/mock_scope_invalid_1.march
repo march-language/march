@@ -1,0 +1,12 @@
+-- MARCH-MODE: test
+mod ConsoleTest do
+  needs IO.Console
+  needs IO.Clock
+
+  test "two kinds in one mock" do
+    mock IO.Console, IO.Clock with { print_line: Some(fn _ -> ()) } do
+      println("hello")
+    end
+    ()
+  end
+end

@@ -1,0 +1,19 @@
+-- TEST
+-- A mock of operations typed as values (`process_cwd : String`,
+-- `process_pid : Int`) and of a zero-argument one (`unix_time_ms`), nested
+-- blocks of two kinds (ocap phase 7).
+mod MockValueOp do
+  needs IO.Console
+  needs IO.Clock
+  needs IO.Process
+
+  fn main() do
+    mock IO.Process with { process_cwd: Some("/mocked"), process_pid: Some(42) } do
+      mock IO.Clock with { unix_time_ms: Some(fn _ -> 7) } do
+        println(Authority.must(Process.cwd()))
+        println(int_to_string(Authority.must(Process.pid())))
+        println(int_to_string(Authority.must(System.now_ms())))
+      end
+    end
+  end
+end

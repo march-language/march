@@ -220,7 +220,7 @@ mod BasicSupervision do
   end
 
   fn main(io : Cap(IO)) do
-    let c = Actor.introspect(io)
+    let c = Authority.must(Actor.introspect())
     -- Spawn supervisor: it auto-starts Counter and Logger
     let sup = spawn(AppSupervisor)
 
@@ -229,7 +229,7 @@ mod BasicSupervision do
                    None    -> -1
                    Some(n) -> n
                  end
-    let c1 = Actor.pid_from_int(c, c1_int)
+    let c1 = Authority.must(Actor.pid_from_int(c1_int))
 
     println("Counter alive: " ++ bool_to_string(is_alive(c1)))
 
@@ -247,7 +247,7 @@ mod BasicSupervision do
                    None    -> -1
                    Some(n) -> n
                  end
-    let c2 = Actor.pid_from_int(c, c2_int)
+    let c2 = Authority.must(Actor.pid_from_int(c2_int))
     println("New counter PID: " ++ int_to_string(c2_int))
     println("New counter alive: " ++ bool_to_string(is_alive(c2)))
 
@@ -260,7 +260,7 @@ end
 ```
 
 Reading a child's Pid out of the supervisor's state takes a `Cap(Actor.Introspect)`,
-minted once in `main` by `Actor.introspect(io)`; see
+minted once in `main` by `Authority.must(Actor.introspect())`; see
 [Introspection is a capability](actors.md#introspection-is-a-capability).
 
 ---
@@ -683,13 +683,13 @@ mod JobProcessorV2 do
   end
 
   fn main(io : Cap(IO)) do
-    let c = Actor.introspect(io)
+    let c = Authority.must(Actor.introspect())
     let sup = spawn(JobSupervisor)
     let w_int = match get_actor_field(sup, "worker") do
                   None    -> -1
                   Some(n) -> n
                 end
-    let w = Actor.pid_from_int(c, w_int)
+    let w = Authority.must(Actor.pid_from_int(w_int))
     send(w, Process(1))
     run_until_idle()
 
@@ -700,7 +700,7 @@ mod JobProcessorV2 do
                    Some(n) -> n
                  end
     println("worker restarted, alive: "
-            ++ bool_to_string(is_alive(Actor.pid_from_int(c, w2_int))))
+            ++ bool_to_string(is_alive(Authority.must(Actor.pid_from_int(w2_int)))))
     run_until_idle()
   end
 

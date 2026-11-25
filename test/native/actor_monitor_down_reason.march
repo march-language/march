@@ -7,6 +7,7 @@
 mod ActorMonitorDownReason do
   needs IO
   needs IO.Console
+  needs Actor.Introspect
 
   -- Deliberately reuse the runtime-reserved short type/constructor name under
   -- a module qualifier.  This must use UserValues.Down.Down's ordinary tag,
@@ -164,18 +165,17 @@ mod ActorMonitorDownReason do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
     let watcher = spawn(Watcher)
     let boss = spawn(Boss)
-    let crashed = Actor.pid_from_int(intro, child_int(boss, "crashed"))
+    let crashed = Authority.must(Actor.pid_from_int(child_int(boss, "crashed")))
     monitor(watcher, crashed)
     send(crashed, Poison(crashed))
     send(crashed, UserValues.Down(7))
     send(watcher, ReadDown(crashed, "crashed"))
     run_until_idle()
 
-    let killed = Actor.pid_from_int(intro, child_int(boss, "killed"))
+    let killed = Authority.must(Actor.pid_from_int(child_int(boss, "killed")))
     Actor.set_queue_limit(watcher, 1, 1)
     monitor(watcher, killed)
     send(watcher, PrimeBounded(killed, watcher))
@@ -186,7 +186,7 @@ mod ActorMonitorDownReason do
     send(watcher, ReadLateDown(killed))
     run_until_idle()
 
-    let nulled = Actor.pid_from_int(intro, child_int(boss, "nulled"))
+    let nulled = Authority.must(Actor.pid_from_int(child_int(boss, "nulled")))
     monitor(watcher, nulled)
     send(nulled, PoisonNul())
     send(watcher, ReadNulDown(nulled))

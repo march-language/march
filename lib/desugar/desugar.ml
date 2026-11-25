@@ -746,6 +746,7 @@ let rec flatten_pred_quals (e : expr) : expr =
   | EAtom (a, args, sp)     -> EAtom (a, List.map go args, sp)
   | EIf (c, t, f, sp)       -> EIf (go c, go t, go f, sp)
   | ERestrict (es, b, sp)   -> ERestrict (List.map go es, go b, sp)
+  | EMock (es, h, b, sp)   -> EMock (List.map go es, go h, go b, sp)
   | ECond (arms, sp)        ->
     ECond (List.map (fun (c, b) -> (go c, go b)) arms, sp)
   | EAnnot (ex, ty, sp)     -> EAnnot (go ex, ty, sp)
@@ -1259,6 +1260,8 @@ let rec desugar_expr (e : expr) : expr =
     EIf (desugar_expr cond, desugar_expr t, desugar_expr f, sp)
   | ERestrict (es, b, sp) ->
     ERestrict (List.map desugar_expr es, desugar_expr b, sp)
+  | EMock (es, h, b, sp) ->
+    EMock (List.map desugar_expr es, desugar_expr h, desugar_expr b, sp)
 
   | ECond (arms, sp) ->
     ECond (List.map (fun (cond_e, body) -> (desugar_expr cond_e, desugar_expr body)) arms, sp)
@@ -1813,11 +1816,10 @@ let check_main_signature (errors : Err.ctx) (decls : decl list) : unit =
      under, which would read as "everything forbidden" with no explanation. *)
   let is_cap_io_ty = function
     | Some (TyCon (n, [ TyCon (inner, []) ])) ->
+      (* Any authority kind: the IO lattice, and since ocap phase 7 the
+         root kinds outside it ([Actor.Introspect], [Actor.Debug]). *)
       n.txt = "Cap"
-      && (inner.txt = "IO"
-          || (String.length inner.txt > 3
-              && String.sub inner.txt 0 3 = "IO."
-              && List.mem_assoc inner.txt March_caps.Cap_lattice.hierarchy))
+      && (inner.txt = "IO" || March_caps.Cap_lattice.is_authority inner.txt)
     | _ -> false
   in
   List.iter (function
@@ -1861,7 +1863,7 @@ let check_main_signature (errors : Err.ctx) (decls : decl list) : unit =
              let n_caps = List.length (List.filter cap_param params) in
              Err.error ~code:Err.Code.main_signature errors ~span:clause.fc_span
                (Printf.sprintf
-                  "`main` must take zero arguments, or only arguments of type `Cap(IO)` (or narrower points of the IO lattice, e.g. `Cap(IO.Console)`) — the capabilities the runtime GRANTS the program at startup; the whole program is then held to their union.\n\
+                  "`main` must take zero arguments, or only arguments of type `Cap(IO)` (or narrower points of the IO lattice, e.g. `Cap(IO.Console)`, or `Cap(Actor.Introspect)` / `Cap(Actor.Debug)`) — the capabilities the runtime GRANTS the program at startup; the whole program is then held to their union.\n\
                    Found %d parameter%s, %d of which %s a capability.\n\
                    help: use `fn main() : () do ... end`, `fn main(cap : Cap(IO)) : () do ... end` for full IO, or e.g. `fn main(console : Cap(IO.Console), spawn : Cap(IO.Spawn)) : () do ... end` to grant exactly what the program needs."
                   n (if n = 1 then "" else "s")
@@ -2279,6 +2281,7 @@ let make_qualifier (prefix : string) (own_names : string list) =
     | EField (ex, n, sp)        -> EField (go bound ex, n, sp)
     | EIf (c, t, f, sp)         -> EIf (go bound c, go bound t, go bound f, sp)
     | ERestrict (es, b, sp)     -> ERestrict (List.map (go bound) es, go bound b, sp)
+    | EMock (es, h, b, sp)     -> EMock (List.map (go bound) es, go bound h, go bound b, sp)
     | ECond (arms, sp)          -> ECond (List.map (fun (c, b) -> (go bound c, go bound b)) arms, sp)
     | EPipe (l, r, sp)          -> EPipe (go bound l, go bound r, sp)
     | EAnnot (ex, ty, sp)       -> EAnnot (go bound ex, ty, sp)
@@ -2482,6 +2485,7 @@ let strip_entry_self_qual ?(members_of : decl list option) (mod_name : string)
     | EField (ex, n, sp)        -> EField (rw ex, n, sp)
     | EIf (c, t, f, sp)         -> EIf (rw c, rw t, rw f, sp)
     | ERestrict (es, b, sp)     -> ERestrict (List.map rw es, rw b, sp)
+    | EMock (es, h, b, sp)     -> EMock (List.map rw es, rw h, rw b, sp)
     | ECond (arms, sp)          -> ECond (List.map (fun (c, b) -> (rw c, rw b)) arms, sp)
     | EPipe (l, r, sp)          -> EPipe (rw l, rw r, sp)
     | EAnnot (ex, ty, sp)       -> EAnnot (rw ex, ty, sp)

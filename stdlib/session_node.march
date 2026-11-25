@@ -14,7 +14,7 @@
 -- Two nodes:
 --
 --   let p = SessionNode.open(conn, "node-a", false, fn ep -> ())   -- after connect_split / accept_split
---   let s = Session.attach(io, SessionNode.ops(p))
+--   let s = Authority.must(Session.attach(SessionNode.ops(p)))
 --   ... drive the role to its first suspension ...
 --   SessionNode.serve(p)          -- deliveries, until every peer's endpoint closes
 --   SessionNode.finish(p)
@@ -2084,7 +2084,7 @@ mod SessionNode do
                   drive : Party -> Cap(Session.Live) -> Unit) : Result(Session.Outcome, RunError) do
     let p = require(p2, peers)
     let o = ops(p)
-    let s = Session.attach(io, o)
+    let s = Authority.must(Session.attach(o))
     drive(p, s)
     let _ = serve_outcome(p)
     finish_links(p)

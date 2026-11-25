@@ -8,6 +8,7 @@
 mod Main do
   needs IO
   needs IO.Console
+  needs Actor.Debug
 
   -- Self-recursive on a branch that never runs, so the inliner leaves them
   -- alone and they keep their dispatch slots.
@@ -72,8 +73,8 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let d = Actor.debug(io)
+  fn main(io : Cap(IO), _cap_debug : Cap(Actor.Debug)) do
+    let d = Authority.must(Actor.debug())
 
     -- Limits are mandatory and bounded; there is no spelling without one.
     refuse(d, "count 0", ["step"], Trace.MaxEvents(0))

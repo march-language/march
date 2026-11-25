@@ -1,0 +1,59 @@
+---
+layout: docs
+title: "mock_scope_invalid"
+permalink: /docs/errors/mock_scope_invalid/
+---
+
+# `mock_scope_invalid`: a `mock` whose scope is not one mockable capability kind
+
+A `mock` block's handler is the operation record of one capability kind:
+`mock IO.Console with { print_line: ... }` takes over printing,
+`mock IO.Clock with { unix_time_ms: ... }` the clock. So the scope must be
+written literally and name exactly one kind that has operations a handler can
+take over. This error reports a scope that names two kinds, a computed scope,
+or a kind with nothing to mock.
+
+## A program that triggers it
+
+```march
+-- MARCH-MODE: test
+mod ConsoleTest do
+  needs IO.Console
+  needs IO.Clock
+
+  test "two kinds in one mock" do
+    mock IO.Console, IO.Clock with { print_line: Some(fn _ -> ()) } do
+      println("hello")
+    end
+    ()
+  end
+end
+```
+
+## The fix
+
+Write one `mock` block per kind, nested:
+
+```march
+mod ConsoleTest do
+  needs IO.Console
+  needs IO.Clock
+
+  test "one mock per kind" do
+    mock IO.Clock with { unix_time_ms: Some(fn _ -> 0) } do
+      mock IO.Console with { print_line: Some(fn _ -> ()) } do
+        println("hello")
+      end
+    end
+    ()
+  end
+end
+```
+
+## Why the rule exists
+
+The kind decides the handler's type, so the compiler must know it at the
+block. Several entries of the same kind are fine:
+`mock IO.FileRead("/fixtures/", "/tmp/data/") with ... do`.
+
+See also: [the language reference](../capabilities.md).

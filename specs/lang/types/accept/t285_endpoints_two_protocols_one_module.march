@@ -54,13 +54,13 @@ mod Main do
 
   fn main(c : Cap(IO)) do
     let t1 = Session.in_process()
-    let s1 = Session.attach(c, t1.ops)
+    let s1 = Authority.must(Session.attach(t1.ops))
     let _ = cons(s1, Stream_Cons.register(s1, 0))
     let _ = prod(s1, Stream_Prod.register(s1, 0))
     t1.drain(())
 
     let t2 = Session.in_process()
-    let s2 = Session.attach(c, t2.ops)
+    let s2 = Authority.must(Session.attach(t2.ops))
     let _ = role_b(s2, Other_B.register(s2, 0))
     let _ = role_a(s2, Other_A.register(s2, 0))
     t2.drain(())

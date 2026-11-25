@@ -54,6 +54,7 @@ let () =
       ("end", END);
       ("if", IF);
       ("restrict", RESTRICT);
+      ("mock", MOCK);
       ("then", THEN);
       ("else", ELSE);
       ("match", MATCH);

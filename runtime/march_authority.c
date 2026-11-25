@@ -34,7 +34,8 @@
  *   Authority.Arg    Any = 0 | Paths(List(String)) = 1 | Hosts(String) = 2
  *                    | Names(List(String), List(String)) = 3
  *                    | HostAt(String, String, Bool, Int) = 4 | PathsAt(List(String)) = 5
- *   CapLimit         ByLaunch = 0 | ByFnNeeds(String) = 1 | ...
+ *   CapLimit         ByLaunch = 0 | ByFnNeeds(String) = 1 | ... | ByGrant(String) = 4
+ *                    | ByMock(Int) = 5 (its field is a scalar)
  *   CapError         CapError(String, String, CapLimit, String) = 0
  * Bool and Int fields are raw 64-bit words.  The retargeting pass falls back
  * to the March policy when a program declares a type whose short name
@@ -999,6 +1000,15 @@ static int admits_in(arena *ar, void *scopes, const chain_t *ch, sv kind, sv tar
     return 0;
 }
 
+/* Authority.mock_covers: an entry of exactly [kind] that admits [target]. */
+static int mock_covers(arena *ar, void *scopes, sv kind, sv target, sv cwd) {
+    for (void *l = scopes; v_is_cons(l); l = V_FLD(l, 1)) {
+        void *s = V_FLD(l, 0);
+        if (sv_eq(sv_m(V_FLD(s, 0)), kind) && arg_admits(ar, V_FLD(s, 1), kind, target, cwd)) return 1;
+    }
+    return 0;
+}
+
 /* The paths of a path scope (Paths / PathsAt), else NULL. */
 static void *path_list(void *a) { return (V_TAG(a) == 1 || V_TAG(a) == 5) ? V_FLD(a, 0) : NULL; }
 /* The packed spec of a host scope (Hosts / HostAt), else NULL. */
@@ -1310,6 +1320,14 @@ void *march_cap_rt_check_layers(void *kind, void *target, void *layers) {
     void *r = NULL;
     for (void *l = layers; v_is_cons(l); l = V_FLD(l, 1)) {
         void *layer = V_FLD(l, 0);
+        void *limit = V_FLD(layer, 0);
+        if (IS_HEAP_PTR(limit) && V_TAG(limit) == 5) {
+            /* ByMock(id) (ocap phase 7, test builds only): never refuses;
+             * one covering the operation (an entry of exactly this kind
+             * admitting the target) admits it whatever lies outside. */
+            if (mock_covers(&ar, V_FLD(layer, 2), k, t, cwd)) break;
+            continue;
+        }
         if (!admits_in(&ar, V_FLD(layer, 2), &ch, k, t, cwd)) {
             r = mk_refusal(kind, target, V_FLD(layer, 0), V_FLD(layer, 1));
             break;

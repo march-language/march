@@ -370,8 +370,14 @@ let wrap_expr_as_module
   { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
     mod_decls = [main_decl] }
 
+(* The REPL's request: every capability kind (ocap phase 7 added the two
+   outside IO, Actor.Introspect and Actor.Debug). *)
+let repl_request = "IO, Actor.Introspect, Actor.Debug"
+
 (** The REPL's launch (ocap phase 4, design §21): the full authority of the
-    person at the terminal, the request ["IO"] unscoped, which MARCH_GRANT /
+    person at the terminal, the request ["IO, Actor.Introspect, Actor.Debug"]
+    unscoped (every capability kind; ocap phase 7 added the two outside IO),
+    which MARCH_GRANT /
     [--grant] narrows (a malformed or too-wide grant exits 2 here, before
     the first prompt).  Both engines hold an authority, the interpreter's
     and, under the JIT, the C runtime's, so each is launched; the C side
@@ -381,7 +387,7 @@ let wrap_expr_as_module
     Returns the JIT context to keep using: [None] (the interpreter only) if
     the JIT launch fails, so no expression runs unnarrowed. *)
 let launch_repl_authority env tc_env (jit_ctx : March_jit.Repl_jit.t option) =
-  March_eval.Eval.launch_authority env ("IO", false);
+  March_eval.Eval.launch_authority env (repl_request, false);
   let grant = String.trim (Option.value (Sys.getenv_opt "MARCH_GRANT") ~default:"") in
   match jit_ctx with
   | Some jit when grant <> "" ->
@@ -391,7 +397,7 @@ let launch_repl_authority env tc_env (jit_ctx : March_jit.Repl_jit.t option) =
     let e =
       March_ast.Ast.EApp
         (March_ast.Ast.EVar { txt = "Authority.launch_init"; span = sp 1 },
-         [ March_ast.Ast.ELit (March_ast.Ast.LitString "IO", sp 2);
+         [ March_ast.Ast.ELit (March_ast.Ast.LitString repl_request, sp 2);
            March_ast.Ast.ELit (March_ast.Ast.LitBool false, sp 3) ],
          sp 4) in
     (try

@@ -636,6 +636,76 @@ let test_enter_grant () =
         outs)
     (run_modes ~src:grant_src ~envs:[ "" ])
 
+(* ocap phase 7: a mock layer (Authority.mock_layer, ByMock(id)) never
+   refuses; one covering an operation (an entry of exactly its kind that
+   admits the target) admits it past the layers outside; a restrict inside
+   it still refuses; mock_for finds the innermost covering mock unless a
+   layer inside it refuses first; check_unmocked ignores mocks.  The same in
+   the March policy (interp, JS) and the C port (jit, compiled). *)
+let mock_src = {|mod MockLayerFixture do
+  needs IO
+  fn show(r : Result((), CapError)) : String do
+    match r do
+    Ok(_) -> "ok"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+  fn opt(o : Option(Int)) : String do
+    match o do
+    Some(i) -> "some " ++ int_to_string(i)
+    None -> "none"
+    end
+  end
+  fn main() needs IO.Console do
+    let r0 = Authority.enter_fn(Authority.frame_layer("T.f", "IO.Console"))
+    let a = show(Authority.check("IO.Clock", ""))
+    let r1 = cap_push(Authority.mock_layer(7, "IO.Clock"))
+    let b = show(Authority.check("IO.Clock", ""))
+    let c = opt(Authority.mock_for("IO.Clock", ""))
+    let d = show(Authority.check_unmocked("IO.Clock", ""))
+    let e = opt(Authority.mock_for("IO.Console", "stdout"))
+    let f = show(Authority.check("IO.Console", "stdout"))
+    let r2 = cap_push(Authority.restrict_layer("t:1", "IO.Console"))
+    let g = show(Authority.check("IO.Clock", ""))
+    let h = opt(Authority.mock_for("IO.Clock", ""))
+    cap_restore(r2)
+    let r3 = cap_push(Authority.mock_layer(8, "IO.FileRead(\"/srv/\")"))
+    let i = opt(Authority.mock_for("IO.FileRead", "/srv/x"))
+    let j = opt(Authority.mock_for("IO.FileRead", "/etc/x"))
+    let k = opt(Authority.mock_for("IO.FileSystem", "/srv/x"))
+    let k2 = opt(Authority.mock_for("IO.Clock", ""))
+    let l = show(Authority.check("IO.FileRead", "/srv/x"))
+    let m = show(Authority.check("IO.FileRead", "/etc/x"))
+    cap_restore(r3)
+    cap_restore(r1)
+    let n = show(Authority.check("IO.Clock", ""))
+    cap_restore(r0)
+    println(a)
+    println(b ++ " | " ++ c ++ " | " ++ d ++ " | " ++ e ++ " | " ++ f)
+    println(g ++ " | " ++ h)
+    println(i ++ " | " ++ j ++ " | " ++ k ++ " | " ++ k2 ++ " | " ++ l ++ " | " ++ m)
+    println(n)
+    println(show(Authority.check("IO.Clock", "")))
+  end
+end
+|}
+
+let test_mock_layer () =
+  let refused = "IO.Clock refused by function T.f's needs (IO.Console)" in
+  List.iter (fun (mode, outs) ->
+      List.iter (fun got ->
+          Alcotest.(check string) mode
+            (String.concat "\n"
+               [ refused;
+                 "ok | some 7 | " ^ refused ^ " | none | ok";
+                 "IO.Clock refused by the restrict at t:1 (IO.Console) | none";
+                 "some 8 | none | none | some 7 | ok | IO.FileRead(\"/etc/x\") refused by function T.f's needs (IO.Console)";
+                 refused;
+                 "ok"; "" ])
+            got)
+        outs)
+    (run_modes ~src:mock_src ~envs:[ "" ])
+
 (* A relative target is resolved against the current directory (cap_cwd)
    in every runtime.  The fixture's cwd is a
    fresh temp dir, so the frame's scope is built from it at run time. *)
@@ -1067,6 +1137,8 @@ let tests =
           test_unscoped;
         Alcotest.test_case "relative targets resolve against the cwd" `Quick test_cwd;
         Alcotest.test_case "enter_grant pushes a grant once" `Quick test_enter_grant;
+        Alcotest.test_case "a mock layer admits what it covers and never refuses" `Quick
+          test_mock_layer;
         Alcotest.test_case "an unreadable cwd refuses a relative target" `Quick
           test_gone_cwd ] );
     ( "launch_entry",

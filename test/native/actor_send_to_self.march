@@ -88,21 +88,21 @@ mod Main do
   fn pump(intro : Cap(Actor.Introspect), idx : Int, n : Int) : () do
     if n <= 0 do ()
     else
-      send(Actor.pid_from_int(intro, idx), Lend())
-      send(Actor.pid_from_int(intro, idx), Quiet())
+      send(Authority.must(Actor.pid_from_int(idx)), Lend())
+      send(Authority.must(Actor.pid_from_int(idx)), Quiet())
       pump(intro, idx, n - 1)
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let boss = spawn(Boss)
     let victim = current_child(boss)
 
-    send(Actor.pid_from_int(intro, victim), Advance())
+    send(Authority.must(Actor.pid_from_int(victim)), Advance())
     run_until_idle()
 
-    let steps = match get_actor_field(Actor.pid_from_int(intro, victim), "steps") do
+    let steps = match get_actor_field(Authority.must(Actor.pid_from_int(victim)), "steps") do
       None    -> -1
       Some(n) -> n
     end

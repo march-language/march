@@ -1254,7 +1254,7 @@ mod Topology do
   doc """
   Report that the node could not start ([why]) and stop the program with
   status 1. The generated `main` starts the node itself --
-  `ClusterNode.start(io, Topology.config_from_env())` -- because only
+  `ClusterNode.start(Topology.config_from_env())` -- because only
   `ClusterNode` may hand out a `Cap(ClusterNode.Live)`.
   """
   fn start_failed(why : String) : a do

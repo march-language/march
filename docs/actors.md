@@ -824,7 +824,7 @@ mod Main do
   end
 
   fn main(io : Cap(IO)) do
-    let c = Actor.introspect(io)
+    let c = Authority.must(Actor.introspect())
     let pid = spawn(Counter)
     println("registered: " ++ bool_to_string(Actor.register(pid, "counter")))
     println("names: " ++ int_to_string(List.length(Actor.registered(c))))
@@ -880,7 +880,7 @@ A Pid is an unforgeable reference: code that was never handed one cannot message
 actor behind it. Four operations would break that, since each turns something anyone
 can write down (an integer, a name, nothing at all) into a Pid: `Actor.pid_from_int`,
 `Actor.whereis`, `Actor.list` and `Actor.registered`. They take a
-`Cap(Actor.Introspect)`, a proof capability that only `Actor.introspect(io : Cap(IO))`
+`Cap(Actor.Introspect)`, a proof capability that only `Authority.must(Actor.introspect())`
 mints. Mint it once in `main`, which holds the root capability, and forward it to the
 code that needs it:
 
@@ -891,13 +891,13 @@ mod Main do
 
   fn child_of(c : Cap(Actor.Introspect), sup, field : String) do
     match get_actor_field(sup, field) do
-      Some(n) -> Actor.pid_from_int(c, n)
-      None    -> Actor.pid_from_int(c, -1)
+      Some(n) -> Authority.must(Actor.pid_from_int(n))
+      None    -> Authority.must(Actor.pid_from_int(-1))
     end
   end
 
   fn main(io : Cap(IO)) do
-    let c = Actor.introspect(io)
+    let c = Authority.must(Actor.introspect())
     let sup = spawn(Sup)
     send(child_of(c, sup, "worker"), Work())
   end
@@ -914,7 +914,7 @@ module is rejected with `cap_ceiling`, and `forge fix` adds the line. The raw bu
 library; a program that calls one is rejected at typecheck time with the wrapper to use:
 
 ```
-`pid_of_int` is internal to the standard library; use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)
+`pid_of_int` is internal to the standard library; use `Authority.must(Actor.pid_from_int(n))` (see `Actor.introspect`)
 ```
 
 Because `Actor.introspect` takes `Cap(IO)`, a role body or hook under a narrower grant
@@ -1059,11 +1059,11 @@ questions and more.
 
 `Actor.inspect_state(d, pid, timeout_ms)` asks a running actor for its state, like
 Erlang's `sys:get_state`. `d` is a `Cap(Actor.Debug)`, minted from `Cap(IO)` by
-`Actor.debug(io)`; it is a separate cap from `Actor.Introspect` because it reads the
+`Authority.must(Actor.debug())`; it is a separate cap from `Actor.Introspect` because it reads the
 actor's data, not just its counters.
 
 ```march
-let d = Actor.debug(io)
+let d = Authority.must(Actor.debug())
 match Actor.inspect_state(d, counter, 100) do
   Ok(s) -> println(s)            -- { count: 3, tags: [a, b], best: Some(3) }
   Err(InspectTimeout) -> println("busy")
@@ -1220,7 +1220,7 @@ compiled programs use `supervise`.
 
 Supervision observation is an exact match on both backends: the compiled supervisor runs
 each declared child's `init` at `spawn(Sup)`, and `get_actor_field(sup, …)` +
-`Actor.pid_from_int(c, …)` (the surface way to read a supervised child's pid out of the
+`Authority.must(Actor.pid_from_int(…))` (the surface way to read a supervised child's pid out of the
 supervisor state; `c` is the `Cap(Actor.Introspect)` minted by `Actor.introspect`)
 resolve correctly compiled (a real shape-registry lookup and a safe dead-actor fallback,
 respectively, in `runtime/march_extras.c`/`runtime/march_runtime.c`).
@@ -1251,9 +1251,9 @@ diverge or crash compiled (see [Interpreted vs compiled](#interpreted-vs-compile
 | `send_checked(cap, msg)` | `→ :ok \| :error` | both | Epoch-validated send; checks revocation, epoch match, and liveness (payload is checked for non-sendable types at construction, same rule as `send`) |
 | `revoke_cap(cap)` | `→ Atom` | both | Revoke a capability; a later `send_checked` on it returns `:error` |
 | `is_cap_valid(cap)` | `→ Bool` | both | Boolean form of the epoch/revocation/liveness check |
-| `Actor.pid_from_int(c, n)` | `→ Pid` | both | Convert Int to Pid; `c : Cap(Actor.Introspect)` from `Actor.introspect(io)` (an unknown index resolves to a safe already-dead sentinel; the raw `pid_of_int` builtin is stdlib-internal) |
+| `Authority.must(Actor.pid_from_int(n))` | `→ Pid` | both | Convert Int to Pid; `c : Cap(Actor.Introspect)` from `Authority.must(Actor.introspect())` (an unknown index resolves to a safe already-dead sentinel; the raw `pid_of_int` builtin is stdlib-internal) |
 | `pid_to_int(pid)` | `→ Int` | both | The inverse: a Pid's spawn index, the `N` in its `Pid(N)` display (what `GlobalPid.make` takes for a local actor) |
-| `Actor.inspect_state(d, pid, timeout_ms)` | `→ Result(String, InspectError)` | both | The actor's state as text; `d : Cap(Actor.Debug)` from `Actor.debug(io)`; see [Reading an actor's state](#reading-an-actors-state-actorinspect_state) |
+| `Actor.inspect_state(d, pid, timeout_ms)` | `→ Result(String, InspectError)` | both | The actor's state as text; `d : Cap(Actor.Debug)` from `Authority.must(Actor.debug())`; see [Reading an actor's state](#reading-an-actors-state-actorinspect_state) |
 | `get_actor_field(pid, name)` | `→ Option(a)` | both | Read an actor's state field via the runtime shape registry |
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task. Stdlib-internal: a program calls `Task.async` (or `Task.async_steal`, `Task.async_cancellable`), which checks `IO.Spawn` first |
 | `task_await(t)` | `→ Result(a, String)` | both | Await a task (use `Task.await` instead) |

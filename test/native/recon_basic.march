@@ -7,6 +7,7 @@
 mod Main do
   needs IO
   needs IO.Console
+  needs Actor.Introspect
 
   actor W do
     state { n : Int }
@@ -44,8 +45,8 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let c = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let c = Authority.must(Actor.introspect())
     let w = spawn(W)
     let _s = spawn(Sup)
     let _r = Actor.register(w, "worker")
@@ -82,7 +83,7 @@ mod Main do
 
     -- crash a supervised child; crashes() reports it without the message
     let child = first_child(t)
-    let _ = send(Actor.pid_from_int(c, child), Boom())
+    let _ = send(Authority.must(Actor.pid_from_int(child)), Boom())
     run_until_idle()
     match Recon.crashes(c, 10) do
       Cons(cr, _) ->

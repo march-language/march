@@ -10,6 +10,7 @@
 mod Main do
   needs IO
   needs IO.Console
+  needs Actor.Introspect
 
   type GetLog = GetLog
   type LogState = { lines : List(String) }
@@ -125,8 +126,7 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
     let log = spawn(Log)
 
     println("-- unsupervised: the panic is logged, the actor still dies")
@@ -141,13 +141,13 @@ mod Main do
     println("-- supervised: the tree teardown proceeds past the panic")
     let sup = spawn(Sup)
     send(sup, SupLog(log))
-    send(Actor.pid_from_int(intro, child_int(sup, "a")), FirstLog(log))
-    send(Actor.pid_from_int(intro, child_int(sup, "b")), BadLog(log))
-    send(Actor.pid_from_int(intro, child_int(sup, "c")), LastLog(log))
+    send(Authority.must(Actor.pid_from_int(child_int(sup, "a"))), FirstLog(log))
+    send(Authority.must(Actor.pid_from_int(child_int(sup, "b"))), BadLog(log))
+    send(Authority.must(Actor.pid_from_int(child_int(sup, "c"))), LastLog(log))
     let b1 = child_int(sup, "b")
     println("stop: " ++ bool_to_string(Actor.stop(sup, 5000)))
     println("supervisor dead: " ++ bool_to_string(is_alive(sup) == false))
-    println("bad child dead: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, b1)) == false))
+    println("bad child dead: " ++ bool_to_string(is_alive(Authority.must(Actor.pid_from_int(b1))) == false))
     println("bad child not restarted: " ++ bool_to_string(child_int(sup, "b") == b1))
     dump(log)
   end

@@ -1284,6 +1284,7 @@ let rec path_diverges (e : Ast.expr) =
     (match List.rev es with last :: _ -> path_diverges last | [] -> false)
   | Ast.EIf (_, t, f, _) -> path_diverges t && path_diverges f
   | Ast.ERestrict (_, b, _) -> path_diverges b
+  | Ast.EMock (_, _, b, _) -> path_diverges b
   | Ast.EMatch (_, brs, _) ->
     brs <> [] && List.for_all (fun (br : Ast.branch) -> path_diverges br.branch_body) brs
   | Ast.ECond (arms, _) ->
@@ -3002,7 +3003,11 @@ let rec infer_expr env (e : Ast.expr) : ty =
          "I cannot find `root_cap`", and so the inferred type below stays
          [Cap(IO)] and no cascade of unification failures follows a single
          mistake) — only naming it is refused. *)
-      if name.txt = "root_cap" && not env.root_cap_allowed then
+      (* The stdlib may name [root_cap] (ocap phase 7): the checked mints of
+         the non-IO capabilities ([Actor.introspect], [Session.attach], ...)
+         mint from it after their own [Authority.check]. *)
+      if name.txt = "root_cap" && not env.root_cap_allowed
+         && not (span_is_stdlib name.span) then
         Err.error ~code:Err.Code.root_cap_reference env.errors ~span:name.span
           (render_parts [
             MPCode "root_cap";
@@ -3819,37 +3824,21 @@ let rec infer_expr env (e : Ast.expr) : ty =
        already been checked against.  In practice the argument is an annotated
        parameter, so its type is known; when it is not, say so rather than
        silently yielding an unconstrained [Option(a)]. *)
-    (* cap_ops_empty: resolves exactly like cap_dict, but yields the dictionary
-       record itself rather than an Option of it — it is the all-None BASE, not
-       a read. *)
+    (* cap_ops_empty: the all-None base of an IO capability's dictionary, for
+       the retired [with_cap] mocks.  Ocap phase 7 replaced those with [mock]
+       blocks, whose handler literal names only the fields it overrides. *)
     | Ast.EApp (Ast.EVar { txt = "cap_ops_empty"; _ }, [cap_arg], sp) ->
-      env.cap_dict_sites := sp :: !(env.cap_dict_sites);
-      let arg_ty = infer_expr env cap_arg in
-      (match repr arg_ty with
-       | TError -> TError
-       | TCon ("Cap", [inner]) ->
-         (match repr inner with
-          | TCon (p, []) ->
-            (match Cap_dict_resolve.dict_ty_of_cap env p with
-             | Some dict -> dict
-             | None ->
-               Err.error ~code:Err.Code.cap_dict_misuse env.errors ~span:sp
-                 (render_parts [
-                   MPCode ("Cap(" ^ p ^ ")");
-                   MPText " has no dictionary, so there is no base for ";
-                   MPCode "cap_ops_empty"; MPText " to produce." ]);
-               TError)
-          | _ ->
-            Err.error ~code:Err.Code.cap_dict_misuse env.errors ~span:sp
-              (render_parts [
-                MPCode "cap_ops_empty";
-                MPText " needs to know which capability it is building a base \
-                        for, but the argument's type is undetermined here." ]);
-            TError)
-       | _ ->
-         Err.error ~code:Err.Code.cap_dict_misuse env.errors ~span:sp
-           (render_parts [ MPCode "cap_ops_empty"; MPText " expects a capability." ]);
-         TError)
+      ignore (infer_expr env cap_arg);
+      Err.error ~code:Err.Code.cap_dict_misuse env.errors ~span:sp
+        (render_parts [
+          MPCode "cap_ops_empty"; MPText " was retired with ";
+          MPCode "with_cap"; MPText ".";
+          MPBreak;
+          MPText "hint: in a test, mock an IO capability with a block whose handler \
+                  names only the operations it takes over: ";
+          MPCode "mock IO.Console with { print_line: Some(f) } do ... end";
+          MPText "." ]);
+      TError
 
     | Ast.EApp (Ast.EVar { txt = "cap_dict"; _ }, [cap_arg], sp) ->
       env.cap_dict_sites := sp :: !(env.cap_dict_sites);
@@ -4886,6 +4875,87 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   ~reason:(Some (RBuiltin "Each scope of a `restrict` must be a `Scope`."))
                   t t_scope))
         es;
+      infer_expr env body
+
+    (* ── mock e1, ..., en with h do ... end (ocap phase 7) ───────────
+       Test builds only.  The entries are literal scopes of ONE capability
+       kind, which fixes the handler's type: that kind's operation record
+       ([Io_ops_gen.mock_fields]).  A record literal in the `with` position
+       may name only the fields it overrides (the rest are [None]; [Lower]
+       and the interpreter fill them in), so it is checked field by field and
+       the whole record type is recorded at its span.  The block has its
+       body's type. *)
+    | Ast.EMock (es, h, body, sp) ->
+      let kw = { sp with Ast.end_line = sp.Ast.start_line; end_col = sp.Ast.start_col + 4 } in
+      if not !test_build then
+        Err.error ~code:Err.Code.mock_outside_test env.errors ~span:kw
+          "`mock` is only allowed in a test build (`march test`, `forge test`, or \
+           `--test`): it replaces real capability operations with a handler.";
+      let kind =
+        match March_caps.Scope_expr.restrict_entries es with
+        | None ->
+          Err.error ~code:Err.Code.mock_scope_invalid env.errors ~span:kw
+            "The scope of a `mock` must be written literally, for example \
+             `mock IO.Console with ... do`: its capability kind decides the \
+             handler's type.";
+          None
+        | Some [] ->
+          Err.error ~code:Err.Code.mock_scope_invalid env.errors ~span:kw
+            "A `mock` needs a capability to mock, for example `mock IO.Clock with ... do`.";
+          None
+        | Some entries ->
+          let kinds =
+            List.sort_uniq compare
+              (List.map (fun ((ns : Ast.name list), _) ->
+                   String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) ns)) entries)
+          in
+          (match kinds with
+           | [ k ] when Io_ops_gen.mock_fields k <> [] -> Some k
+           | [ k ] ->
+             Err.error ~code:Err.Code.mock_scope_invalid env.errors ~span:kw
+               (Printf.sprintf
+                  "`%s` cannot be mocked: it has no operations a handler can take \
+                   over. These can: %s." k
+                  (String.concat ", "
+                     (List.map (Printf.sprintf "`%s`") (Io_ops_gen.mock_caps ()))));
+             None
+           | _ ->
+             Err.error ~code:Err.Code.mock_scope_invalid env.errors ~span:kw
+               (Printf.sprintf
+                  "A `mock` covers one capability kind, but this one names %s: \
+                   write one `mock` block per kind, nested."
+                  (String.concat " and " (List.map (Printf.sprintf "`%s`") kinds)));
+             None)
+      in
+      (match kind with
+       | None -> ignore (infer_expr env h)
+       | Some k ->
+         let flds = Io_ops_gen.mock_fields k in
+         (match h with
+          | Ast.ERecord (given, hsp) ->
+            List.iter
+              (fun ((n : Ast.name), ex) ->
+                 match List.assoc_opt n.Ast.txt flds with
+                 | Some fty ->
+                   check_expr env ex fty
+                     ~reason:(Some (RBuiltin
+                       (Printf.sprintf "The `%s` field of a `%s` mock handler." n.Ast.txt k)))
+                 | None ->
+                   Err.error ~code:Err.Code.mock_handler_field env.errors ~span:n.Ast.span
+                     (Printf.sprintf
+                        "The handler of a `mock %s` has no field `%s`. Its fields are: %s."
+                        k n.Ast.txt
+                        (String.concat ", "
+                           (List.map (fun (f, _) -> Printf.sprintf "`%s`" f) flds)));
+                   ignore (infer_expr env ex))
+              given;
+            Hashtbl.replace env.type_map hsp (TRecord flds)
+          | _ ->
+            let t = infer_expr env h in
+            unify env ~span:(span_of_expr h)
+              ~reason:(Some (RBuiltin
+                (Printf.sprintf "The handler of a `%s` mock is that kind's operation record." k)))
+              t (TRecord flds)));
       infer_expr env body
 
     (* ── if/do/else/end ───────────────────────────────────────────── *)
@@ -10233,7 +10303,7 @@ let check_restrict_reach ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (
   List.iter
     (fun (_, where, (fb : fn_bound), ro) ->
        let covered c = List.exists (fun b -> cap_subsumes b c) fb.fb_caps in
-       let outside c = cap_subsumes "IO" c && not (covered c) in
+       let outside c = March_caps.Cap_lattice.is_authority c && not (covered c) in
        let prefix = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes ro.ro_owner in
        let row_of r =
          match Hashtbl.find_opt rows (prefix ^ r) with
@@ -10316,7 +10386,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
   let violates bound (row : March_caps.Cap_rows.row) =
     (row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound))
     || List.exists
-         (fun c -> cap_subsumes "IO" c && not (List.exists (fun b -> cap_subsumes b c) bound))
+         (fun c -> March_caps.Cap_lattice.is_authority c && not (List.exists (fun b -> cap_subsumes b c) bound))
          row.March_caps.Cap_rows.caps
   in
   (* A generic impl reaches every impl of its method through the dispatch
@@ -10412,7 +10482,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
                  "help: pass the function in as a parameter or call it by name."));
        List.iter
          (fun c ->
-            if not (cap_subsumes "IO" c) || covered c then ()
+            if not (March_caps.Cap_lattice.is_authority c) || covered c then ()
             else
               let via =
                 match cap_reach_chain ~fn_refs:chain_refs env ~from:qname ~cap:c with
@@ -10813,7 +10883,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
      match List.sort_uniq String.compare (main_closure ()) with
      | [] -> ()
      | caps ->
-       let named = List.filter (fun c -> cap_subsumes "IO" c) caps in
+       let named = List.filter (fun c -> March_caps.Cap_lattice.is_authority c) caps in
        if named <> [] then
          let show_caps =
            String.concat ", " (List.map (fun c -> Printf.sprintf "`%s`" c) named)
@@ -10923,7 +10993,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
     in
     List.iter
       (fun c ->
-         if not (cap_subsumes "IO" c) then ()  (* FFI root; not this lattice *)
+         if not (March_caps.Cap_lattice.is_authority c) then ()  (* FFI root; not this lattice *)
          else if covered c then ()
          (* R1 stage D moved this behind [covered], matching
             [check_fn_grants].  While `main` could hold exactly ONE
@@ -11022,8 +11092,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                  The grant is a ceiling on the WHOLE program — declaring \
                  `needs %s` does not raise it.\n\
                  help: add a `Cap(%s)` parameter to `main` (e.g. \
-                 `fn main(…, %s)`), or widen the whole grant to `Cap(IO)`, \
-                 or remove the use."
+                 `fn main(…, %s)`)%s, or remove the use."
                 show_grant c
                 (* Renders exactly like the sibling missing-`needs`
                    diagnostic's [Cap_infer.chain_note]
@@ -11038,7 +11107,10 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                    Printf.sprintf " (reached from `main`: %s)"
                      (render_cap_chain ("main" :: chain))
                  | _ -> "")
-                c c param_hint })
+                c c param_hint
+                (* Widening to the IO root covers only a kind under IO. *)
+                (if March_caps.Cap_lattice.cap_subsumes "IO" c
+                 then ", or widen the whole grant to `Cap(IO)`" else "") })
       (List.sort_uniq String.compare closure)
 
 (* ── Per-role grants: the same walk from more roots (distributed-deploys
@@ -11144,6 +11216,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) : unit =
   | Ast.EField (ex, _, _) -> go ex
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
   | Ast.ERestrict (es, b, _) -> List.iter go es; go b
+  | Ast.EMock (es, h, b, _) -> List.iter go (es @ [ h ]); go b
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
   | Ast.EProof (pr, _) -> List.iter go (Ast.proof_children pr)
@@ -11715,7 +11788,7 @@ let check_dep_grants ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t)
     in
     (* ── Judge each grant ── *)
     let covered ks c = List.exists (fun b -> cap_subsumes b c) ks in
-    let outside ks c = cap_subsumes "IO" c && not (covered ks c) in
+    let outside ks c = March_caps.Cap_lattice.is_authority c && not (covered ks c) in
     let source_order (a : Ast.span) (b : Ast.span) =
       compare
         (a.Ast.file <> entry_file, a.Ast.file, a.Ast.start_line, a.Ast.start_col)
@@ -11932,6 +12005,7 @@ let rec iter_expr_scoped (f : local_scope -> Ast.expr -> unit) (scope : local_sc
   | Ast.EField (ex, _, _) -> go ex
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
   | Ast.ERestrict (es, b, _) -> List.iter go es; go b
+  | Ast.EMock (es, h, b, _) -> List.iter go (es @ [ h ]); go b
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
   | Ast.EProof (pr, _) -> List.iter go (Ast.proof_children pr)
