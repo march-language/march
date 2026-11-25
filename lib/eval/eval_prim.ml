@@ -89,6 +89,31 @@ exception Blocked_builtin of string
 
 let builtin_guard : (string -> unit) option ref = ref None
 
+(** Test instrumentation for the capture soundness oracle (ocap phase 8a,
+    test/run_captures.ml; installed by bin/capture_oracle.ml under
+    [MARCH_CAPTURE_ORACLE]).  [None], the normal state, costs one ref read on
+    a closure call and on a capability check.
+    - [co_op kind target layers]: a capability operation is being checked
+      against the layers in force, given by their scope texts;
+    - [co_enter key]: a function value begins to run; [key] is its body's
+      span (a lambda, a local fn) or the span of the name that was read as a
+      value.  [true] when the oracle tracks it, and then [co_leave] is called
+      when it returns;
+    - [co_spawned pid]: an actor was spawned by the code now running;
+    - [co_actor pid k]: run [k], a step of that actor. *)
+type capture_oracle = {
+  co_op : string -> string -> string list -> unit;
+  co_enter : March_ast.Ast.span -> bool;
+  co_leave : unit -> unit;
+  co_spawned : int -> unit;
+  co_actor : 'a. int -> (unit -> 'a) -> 'a;
+}
+
+let capture_oracle : capture_oracle option ref = ref None
+
+let oracle_actor (pid : int) (k : unit -> 'a) : 'a =
+  match !capture_oracle with None -> k () | Some o -> o.co_actor pid k
+
 (** Forward-reference hook for dispatch in comparison operators.
     Interface dispatch needs [apply] but [cmp_op] is defined before [apply].
     Set to the real [apply] after it is defined (see [apply_hook] pattern). *)

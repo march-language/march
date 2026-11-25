@@ -1,0 +1,23 @@
+-- A closure that spawns an actor or a task carries what they do, and so
+-- does the task value; a top-level let closure is a site of its own.
+mod Spawns do
+  needs IO.Console, IO.Spawn
+
+  let shout = fn s -> println(s ++ "!")
+
+  actor Logger do
+    state { n : Int }
+    init { n: 0 }
+    on Log(s) do
+      Authority.ignore(println(s))
+      { state with n: state.n + 1 }
+    end
+  end
+
+  fn main() do
+    let start = fn () -> spawn(Logger)
+    let work = fn () -> Task.async(fn () -> println("in a task"))
+    let loud = fn () -> shout("hi")
+    (start, work, loud)
+  end
+end

@@ -1,0 +1,28 @@
+-- Found in review: two modules each declare a type `T` with a constructor
+-- `A`; a value's fields are read from its own type's declaration.
+mod ReviewSameNamedTypes do
+  needs IO.Console
+  mod M2 do
+    needs IO.Console
+    type T = A(Int -> Int)
+    fn run(t : T) do
+      match t do
+        A(f) -> f(1)
+      end
+    end
+    fn mkp(_u : Int) do
+      let l = fn (_x : Int) -> match println("x") do _ -> 1 end
+      A(l)
+    end
+  end
+  mod M3 do
+    type T = A(Int)
+    fn m3() do A(2) end
+  end
+  fn main() do
+    let r = fn () -> M2.run(M2.mkp(1))
+    let _ = r()
+    let _ = M3.m3()
+    ()
+  end
+end

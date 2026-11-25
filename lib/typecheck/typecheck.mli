@@ -454,3 +454,9 @@ val check_module_full :
   ?seed_env:env -> Ast.module_ -> Err.ctx * (Ast.span, ty) Hashtbl.t * env
 val check_letq_repl : env -> Ast.pattern -> Ast.expr -> env
 val check_letstar_repl : env -> Ast.pattern -> Ast.expr -> env
+
+(** Capture inference (ocap phase 8a): every function value's inferred
+    capture set.  [decls] is the whole checked program (stdlib included).
+    Adds no diagnostic.  See [Capture]. *)
+val capture_analyse :
+  ?unsound:[ `Drop_callee_effect | `Drop_arg_flow | `Narrow_values ] -> ?all:bool -> env -> Ast.decl list -> Capture.result

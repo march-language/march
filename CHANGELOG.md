@@ -103,6 +103,17 @@ git log is authoritative for exact commits.
   in the interpreter, `--jit`, compiled code and JS; `with_cap` mocked only compiled test
   builds. New
   diagnostics `mock_outside_test`, `mock_scope_invalid` and `mock_handler_field`.
+- **Capture sets (object capabilities, phase 8a).** The compiler now infers, for every
+  function value and every value that holds one, what it can reach when called, and shows it:
+  hover and `march-lsp query type` print `say : String -> () needs IO.Console` and
+  `weather : Client needs IO.NetConnect("api.weather.com/v1/")`, and the new
+  `march --dump-captures FILE` lists every function value in a file with its set and the reason
+  for each element. A literal target gives a scoped element, a higher-order function is
+  polymorphic in what its argument carries (`needs c1`), and a closure created inside a literal
+  `restrict` or under a function's `needs` clause is narrowed by it. Nothing is written in
+  source and nothing is rejected yet: this step is inference and display only, and it changes
+  no generated code. See "Capture sets" in the capabilities chapter.
+
 - **Dependency grants (object capabilities, phase 6).** A `grant` on a dependency in
   `forge.toml` limits what its code may do, as a scope list in `needs` syntax:
   `reader = { path = "deps/reader", grant = ['IO.FileRead("/srv/data")'] }`. Every function

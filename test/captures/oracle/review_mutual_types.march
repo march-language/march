@@ -1,0 +1,25 @@
+-- Found in review: two mutually recursive declared types both hold the
+-- function value, whichever is asked about first.
+mod ReviewMutualTypes do
+  needs IO.Console
+  type A = A(B, Int -> Int)
+  type B = B(A) | BEnd
+  fn aaa(a : A) do
+    match a do
+      A(_, f) -> f(1)
+    end
+  end
+  fn zrunb(b : B) do
+    match b do
+      B(A(_, f)) -> f(1)
+      BEnd -> 0
+    end
+  end
+  fn main() do
+    let w = fn x -> match println("x") do _ -> 1 end
+    let b = B(A(BEnd, w))
+    let r = fn () -> zrunb(b)
+    let _ = r()
+    ()
+  end
+end

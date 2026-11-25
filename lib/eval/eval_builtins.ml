@@ -2897,6 +2897,14 @@ let base_env : env =
        compiled twin; the rule must match it exactly) ---- *)
   ; ("cap_check_raw", VBuiltin ("cap_check_raw", function
         | [VString _kind; VString _target] ->
+          (match !Eval_prim.capture_oracle with
+           | Some o ->
+             let rec texts = function
+               | VCon ("Cons", [ VCon (_, [ _; VString text; _ ]); rest ]) -> text :: texts rest
+               | _ -> []
+             in
+             o.co_op _kind _target (texts (cap_layers_now ()))
+           | None -> ());
           (* 0: nothing is in force (empty launch, empty slot);
              1: Authority.check walks the layers. *)
           VInt (if cap_is_empty (cap_layers_now ()) then 0 else 1)

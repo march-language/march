@@ -263,6 +263,10 @@ let () =
     "hover-types", [
       Alcotest.test_case "no type at module keyword"      `Quick test_type_at_no_position;
       Alcotest.test_case "int literal type"               `Quick test_type_at_int_literal;
+      Alcotest.test_case "a closure shows its capture set" `Quick test_hover_closure_shows_set;
+      Alcotest.test_case "a value holding a closure shows it" `Quick test_hover_client_value;
+      Alcotest.test_case "a pure value prints as before"   `Quick test_hover_pure_unchanged;
+      Alcotest.test_case "capture inference is lazy"       `Quick test_hover_captures_lazy;
       Alcotest.test_case "some type found in valid module" `Quick test_type_at_returns_string;
     ];
     "inlay-hints", [

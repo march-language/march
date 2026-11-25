@@ -573,6 +573,52 @@ let test_type_at_no_position () =
   let t   = An.type_at a ~line:0 ~character:0 in
   Alcotest.(check bool) "no type at col 0 of mod keyword" true (t = None)
 
+(* ── capture sets in hover (ocap phase 8a) ─────────────────────────────── *)
+
+let capture_src = {|mod Test do
+  needs IO.Console
+  type Client = Client(String -> Result((), CapError))
+  fn main() do
+    let load = fn s -> println(s)
+    let n = 42
+    let c = Client(load)
+    (load, n, c)
+  end
+end|}
+
+let contains_sub hay needle =
+  let n = String.length needle in
+  let rec go i = i + n <= String.length hay && (String.sub hay i n = needle || go (i + 1)) in
+  go 0
+
+let test_hover_closure_shows_set () =
+  let a = analyse capture_src in
+  let (line, col) = pos_of capture_src "load = fn" in
+  match An.type_at a ~line ~character:col with
+  | Some s -> Alcotest.(check bool) ("the closure's set is shown: " ^ s) true (contains_sub s "needs IO.Console")
+  | None -> Alcotest.fail "no type on the binding"
+
+let test_hover_client_value () =
+  let a = analyse capture_src in
+  let (line, col) = pos_of capture_src "c = Client" in
+  match An.type_at a ~line ~character:col with
+  | Some s -> Alcotest.(check bool) ("the value's type carries the set: " ^ s) true (contains_sub s "Client needs IO.Console")
+  | None -> Alcotest.fail "no type on the binding"
+
+let test_hover_pure_unchanged () =
+  let a = analyse capture_src in
+  let (line, col) = pos_of capture_src "n = 42" in
+  Alcotest.(check (option string)) "a value that holds no function prints as before" (Some "Int")
+    (An.type_at a ~line ~character:col)
+
+let test_hover_captures_lazy () =
+  let a = analyse capture_src in
+  ignore a.An.diagnostics;
+  Alcotest.(check bool) "diagnostics do not run capture inference" false (Lazy.is_val a.An.captures);
+  let (line, col) = pos_of capture_src "load = fn" in
+  ignore (An.type_at a ~line ~character:col);
+  Alcotest.(check bool) "a hover does" true (Lazy.is_val a.An.captures)
+
 let test_type_at_int_literal () =
   (* The literal 42 should have type Int. *)
   let src = {|mod Test do

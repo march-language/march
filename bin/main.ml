@@ -3317,6 +3317,7 @@ let run_test_cmd args =
         else check (i + 1)
       in check 0
     in
+    if Capture_oracle.active () then Capture_oracle.install test_tc_env desugared.March_ast.Ast.mod_decls;
     let (n_tests, n_failed, file_failures) =
       if !verbose then
         March_eval.Eval.run_tests ~verbose:true ~filter:!filter ~capture_io desugared
@@ -3878,6 +3879,9 @@ let compile filename =
          `check` artifact skips entirely: CI saw an empty report after an
          earlier plain --check of the same source (PR #596). *)
       || !dump_role_authority
+      (* --dump-captures prints after the typechecker, which a warm artifact
+         skips, for the same reason. *)
+      || !dump_captures
       (* --emit-protocols writes a file from the desugared protocols; a warm
          artifact would exit before any protocol is expanded and the baseline
          would silently stop following the source. *)
@@ -4470,6 +4474,10 @@ let compile filename =
      cluster_node.march), so gating on it skipped inference on a program the
      user had nothing to fix in.  With --refine-infer-stdlib the stdlib is a
      target, so its errors gate too, and the skip line names them. *)
+  if !dump_captures then
+    print_string
+      (March_typecheck.Capture.render ~file:filename
+         (March_typecheck.Typecheck.capture_analyse typecheck_env desugared.March_ast.Ast.mod_decls));
   let infer_gate_errors =
     List.filter (fun (d : March_errors.Errors.diagnostic) ->
         d.severity = March_errors.Errors.Error
@@ -4595,6 +4603,19 @@ let compile filename =
   report_z3 errors ~filename ~user_files;
   March_refine.Refine.shutdown ();
   stamp "typecheck";
+  (* Capture inference (ocap phase 8a) runs only on demand: for
+     --dump-captures above, for an editor hover, and for the soundness
+     oracle.  MARCH_CAPTURES=1 forces it here and discards the result, to
+     measure what turning it on for every build would cost
+     (scripts/capture-cost.sh); MARCH_CAPTURES=all also analyses every
+     stdlib function, reached or not. *)
+  (match Sys.getenv_opt "MARCH_CAPTURES" with
+   | Some ("1" | "all" as mode) ->
+     ignore
+       (March_typecheck.Typecheck.capture_analyse ~all:(mode = "all") typecheck_env
+          desugared.March_ast.Ast.mod_decls);
+     stamp "captures"
+   | _ -> ());
   (* Lemma erasure (§4.5): after the refinement checker, before anything
      lowers, interprets or JIT-compiles the program. *)
   let user_only_desugared = erase_lemmas_in ~errors ~whole:desugared user_only_desugared in
@@ -7468,6 +7489,7 @@ let compile filename =
            | _ -> None)
         | None -> None);
     March_eval.Eval.typed_messages := true;
+    if Capture_oracle.active () then Capture_oracle.install typecheck_env desugared.March_ast.Ast.mod_decls;
     (try
        (try March_eval.Eval.run_module desugared
         with
@@ -8193,6 +8215,8 @@ let () =
     ("--dep-grants", Arg.String (fun f -> dep_grants_flag := Some f),
      "<file>  Dependency grants file (ocap phase 6; forge writes it); overrides MARCH_DEP_GRANTS");
     ("--dump-tir",     Arg.Set dump_tir,     " Print TIR instead of evaluating");
+    ("--dump-captures", Arg.Set dump_captures,
+     " Typecheck and print every function value's inferred capture set, with the reason for each element (implies --check)");
     ("--dump-role-authority", Arg.Set dump_role_authority,
      " Typecheck and print the effective-authority report per granted protocol role (implies --check)");
     ("--dump-phases",  Arg.Set dump_phases,  " Serialize each IR stage to march-phases/phases.json");
@@ -8457,6 +8481,7 @@ let () =
   if !why_copies || !why_copies_json then do_compile := true;
   (* --dump-role-authority is a report the typechecker prints; nothing runs. *)
   if !dump_role_authority then do_check := true;
+  if !dump_captures then do_check := true;
   (* Propagate --pmap-threshold to the interpreter (codegen reads it via
      emit_module's ~pmap_threshold argument below). *)
   (* --emit-io-ops regenerates stdlib/io_ops.march from builtin_cap_table; the

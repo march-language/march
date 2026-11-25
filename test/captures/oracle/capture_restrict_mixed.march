@@ -1,0 +1,28 @@
+-- A closure made inside a restrict that calls a closure made outside it:
+-- the outside closure keeps its authority, the inside one's own operations
+-- are narrowed.
+mod CaptureRestrictMixed do
+  needs IO.Console, IO.FileRead
+
+  pfn reader(p) do Authority.ignore(File.read(p)) end
+
+  fn main() do
+    let outside = fn s -> Authority.ignore(println(s))
+    let wide = fn p -> Authority.ignore(File.read(p))
+    let inside = restrict IO.FileRead("/srv/"), IO.Console do
+      fn p ->
+        let _ = outside("inside calls outside")
+        let _ = wide("/etc/capture_restrict_mixed")
+        Authority.ignore(File.read(p))
+    end
+    let named = restrict IO.FileRead("/srv/") do reader end
+    inside("/srv/capture_restrict_mixed")
+    inside("/etc/refused")
+    named("/srv/x")
+    named("/etc/refused")
+    let nested = restrict IO.FileRead("/srv/") do
+      fn p -> restrict IO.FileRead("/srv/in/") do Authority.ignore(File.read(p)) end
+    end
+    nested("/srv/in/x")
+  end
+end

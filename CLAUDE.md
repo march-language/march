@@ -113,7 +113,8 @@ scripts/run-tests.sh lsp               # the LSP analysis suite (lsp/test/)
 scripts/run-tests.sh refinecheck       # z3-backed refinement-check suite (full-run only; groups run 4-way, MARCH_TEST_PROCS)
 
 # Suites: compiler, eval, codegen, stdlib, stdlib_march, test_jit, lsp, utf16,
-# jsonrpc, incremental, query_cli, refinecheck, errors, test_reports. The five
+# jsonrpc, incremental, query_cli, refinecheck, errors, test_reports, captures
+# (capture sets: test/run_captures.exe, goldens via UPDATE_CAPTURES=1). The five
 # before refinecheck are the LSP suites and live under lsp/test/, not test/. An unknown
 # name is a hard error listing the known suites, not a confusing dune build
 # failure.

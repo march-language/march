@@ -1,0 +1,30 @@
+-- A function value that spawns an actor and a task: what they do belongs to
+-- the function value that spawned them.
+mod CaptureActorTask do
+  needs IO.Console, IO.Spawn
+
+  actor Logger do
+    state { n : Int }
+    init { n: 0 }
+    on Log(s) do
+      Authority.ignore(println("logger: " ++ s))
+      { state with n: state.n + 1 }
+    end
+  end
+
+  fn main() do
+    let start = fn () -> spawn(Logger)
+    let p = start()
+    let tell = fn s -> send(p, Log(s))
+    tell("one")
+    tell("two")
+    let work = fn () ->
+      match Task.async(fn () -> Authority.ignore(println("in a task"))) do
+        Ok(t) ->
+          let _ = Task.await(t)
+          ()
+        Err(_) -> ()
+      end
+    work()
+  end
+end
