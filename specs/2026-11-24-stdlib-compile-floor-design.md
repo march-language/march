@@ -169,3 +169,37 @@ function can't survive, so it is always true. The guards are these instead:
 
 Part 1 lands alone first: a todo entry moved to `specs/progress/` and a CHANGELOG line ("compiles
 are ~0.35 s faster"). Part 2 follows as its own PR.
+
+## Implicit-callee audit (2026-11-24, plan Task 2)
+
+Every place in mono, fusion and defun that introduces a call, or looks up a function, by a name
+that is not a free variable of the body being rewritten. Kinds: (a) an interface impl reached
+through `Tir_names.find_iface_impls`; (b) a fixed helper name; (c) a function the pass creates
+itself, or a builtin (no edge needed).
+
+| site | name or rule | kind |
+|---|---|---|
+| `mono.ml` `ensure_atom_fns` (~568) | a function used as a value; the name is a free variable | none (ordinary edge) |
+| `mono.ml` `enqueue_specialized_impl` (~659) | the mangled impl name handed in by the resolvers below | (a) |
+| `mono.ml` `iface_target` / `iface_impl_name` (~762) | impls of the called method, no `to_string` alias | (a) |
+| `mono.ml` `return_position_single_impl` (~818) | the single impl of a return-dispatched method (`from_json`) | (a) |
+| `mono.ml` `resolve_iface_value` (~832) | an interface method used as a value; impls of that free name | (a) |
+| `mono.ml` `try_collision_dispatch` (~697) | every colliding impl of the method; the `__march_ifdispatch$…` sentinel is minted | (a) + (c) |
+| `mono.ml` ord rewrite (~895–913) | `<` `<=` `>` `>=` on a tuple/ADT/record → `__ord_lt` `__ord_le` `__ord_gt` `__ord_ge`; **silent fallback when the helper is absent** | (b) |
+| `mono.ml` unresolved-method branch (~945) | impls of the method, with `to_string` aliased to `show`, module prefixes stripped | (a) |
+| `mono.ml` same branch (~1038) | `show` with no impl → `to_string` | (c) builtin |
+| `mono.ml` name-collision branch (~1059) and the `ELetRec` twin (~1170–1208) | impls of a method that shares a name with a user function | (a) |
+| `fusion.ml` list fusion | `$fused_<…>` functions it builds; calls to producers already named in the body | (c) |
+| `fusion.ml` `run_nativearr` | `$nafuse_<…>` lambdas it builds; `native_<w>_arr_<op>`, `int_and`, `int_xor` | (c) builtins |
+| `defun.ml` | apply functions and lifted closures it builds; its string lists are builtin-name sets | (c) |
+
+Conclusions for Tasks 3 and 4:
+
+- `implicit_callees iface_methods name` returns every impl symbol
+  `Tir_names.find_iface_impls iface_methods name` lists (alias on, which is a superset of the
+  alias-off lookups), plus all four `__ord_*` helpers when `name` is an ordering operator. The
+  helpers' own bodies call `compare`, so the `Ord` impls follow from the first rule.
+- There is no kind-(b) site outside mono, so fusion and defun need no tripwire of their own.
+- The mono tripwire covers lookups at ~568, 659, 818, 907, 915 and 1170. The test at ~835 only
+  asks whether a name is a user function; a pruned name there would silently change the answer,
+  so it goes through the same helper.
