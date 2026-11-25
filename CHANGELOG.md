@@ -1370,6 +1370,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **On Linux, a TLS write to a peer that has gone no longer kills the process.**
+  `Tls.write` (and a `Tls.read` or `Tls.close` that had to send) on a connection the peer
+  had reset raised SIGPIPE, and the program exited with status 141. It now returns
+  `Err(TlsError)`. macOS was not affected.
 - **Closing a socket, listener or file after a caught panic inside an operation on it now
   releases it.** A panic between the start and end of one use (caught by `try_finally`,
   `Result.try_call`, a supervisor or a test runner) left the handle counted as in use for
