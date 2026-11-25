@@ -1829,7 +1829,10 @@ __attribute__((noinline)) void **march_sched_frame_slot(void) {
 /* ocap phase 4: same shape as march_sched_frame_slot, for march_proc.auth.
  * Code outside a green thread (the main OS thread before the scheduler runs,
  * a listener thread) gets a per-OS-thread slot that starts empty. */
-extern void march_handle_leave_abandoned(void *h) __attribute__((weak));
+/* march_handle.c's; this default serves a link that leaves the handle box
+ * out (the scheduler's C unit tests), where nothing is ever entered.  A weak
+ * definition, not a weak reference: macOS ld refuses an undefined one. */
+__attribute__((weak)) void march_handle_leave_abandoned(void *h) { (void)h; }
 static _Thread_local march_auth_state foreign_auth;
 __attribute__((noinline)) march_auth_state *march_sched_auth_state(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
@@ -2568,8 +2571,7 @@ static void sched_loop(march_scheduler *sched) {
                 uint32_t n = p->auth.elen;
                 p->auth.entered = NULL;
                 p->auth.elen = p->auth.ecap = 0;
-                if (march_handle_leave_abandoned)
-                    while (n > 0) march_handle_leave_abandoned(entered[--n]);
+                while (n > 0) march_handle_leave_abandoned(entered[--n]);
                 free(entered);
             }
             /* The epoch pin taken at spawn (or moved there by an advance):
