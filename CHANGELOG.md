@@ -1344,6 +1344,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The native REPL keeps its authority after a panic inside a function with `needs`.** A
+  panic raised in such a function left that function's `needs` in force for every later
+  input, so an operation the session was allowed was refused "by function f's needs". The
+  interpreter REPL was unaffected.
 - **`march repl FILE` loads the library modules the file uses.** A preloaded file (as
   `forge interactive` and the REPL's `:load` give it) now finds the modules it names on
   `MARCH_LIB_PATH`, as a batch build does; they were "Unknown module". Its modules also load
