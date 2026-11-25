@@ -11396,11 +11396,15 @@ static void *march_cap_nil(void) {
     if (nil) return nil;
     void *mine = make_nil();
     __atomic_store_n(&((march_hdr *)mine)->rc, MARCH_RC_IMMORTAL, __ATOMIC_RELAXED);
-    if (gc_trace_on()) gc_emit("immortal", mine, 0, MARCH_RC_IMMORTAL, 0);
     void *winner = NULL;
     if (atomic_compare_exchange_strong_explicit(
-            &march_cap_nil_cell, &winner, mine, memory_order_acq_rel, memory_order_acquire))
+            &march_cap_nil_cell, &winner, mine, memory_order_acq_rel, memory_order_acquire)) {
+        /* Only the winner is immortal: the loser's cell is made mortal again
+         * and freed below, and an "immortal" event for it would sit in the
+         * trace before its "free". */
+        if (gc_trace_on()) gc_emit("immortal", mine, 0, MARCH_RC_IMMORTAL, 0);
         return mine;
+    }
     __atomic_store_n(&((march_hdr *)mine)->rc, 1, __ATOMIC_RELAXED);
     march_decrc(mine);
     return winner;
@@ -11592,11 +11596,14 @@ static void *march_cap_push_top(void *layer, void *cur) {
         if (((void **)((char *)top + 16))[1] != below)
             return top;   /* the launch layers were set in between */
         __atomic_store_n(&((march_hdr *)top)->rc, MARCH_RC_IMMORTAL, __ATOMIC_RELAXED);
-        if (gc_trace_on()) gc_emit("immortal", top, 0, MARCH_RC_IMMORTAL, 1);
         void *expected = NULL;
         if (atomic_compare_exchange_strong_explicit(
-                e, &expected, top, memory_order_acq_rel, memory_order_acquire))
+                e, &expected, top, memory_order_acq_rel, memory_order_acquire)) {
+            /* After the swap, so a loser's cell (mortal again below) never
+             * has an "immortal" event in the trace. */
+            if (gc_trace_on()) gc_emit("immortal", top, 0, MARCH_RC_IMMORTAL, 1);
             return top;
+        }
         /* Lost the race: [top] was never published, so it is still ours
          * alone; use it as an ordinary pushed cell. */
         __atomic_store_n(&((march_hdr *)top)->rc, 1, __ATOMIC_RELAXED);
