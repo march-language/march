@@ -37,3 +37,12 @@ Expected: the second `read_all` succeeds
 Actual (interpreted / compiled): `Ok(Err(FileError("data.csv: Too many open files")))` / `Ok(Err(Too many open files))`
 
 Source: `each_row`, `each_row_with_header` in stdlib/csv.march.
+
+## Fixed 2026-11-25
+
+`each_row` and `each_row_with_header` run their row loop in `try_finally` with `csv_close`
+as the cleanup, as `File.with_lines` does. The panic still reaches the caller.
+
+Test: `test/test_stdlib_suite.ml`, "each_row closes its file when the callback panics,
+compiled + interpreted": 300 caught panicking calls of each function under `ulimit -n 128`,
+then `read_all` of the same file. Before the fix both engines printed "cannot open".
