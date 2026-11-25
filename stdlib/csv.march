@@ -48,8 +48,8 @@ mod Csv do
   Only the first character of `delimiter` is used.  Each row's fields
   are passed in order; trailing CR/LF is stripped.
 
-  The file handle is closed when iteration reaches EOF.  It is NOT
-  closed if the callback panics (there is no cleanup on that path).
+  The file handle is closed when iteration reaches EOF, and also when
+  the callback panics (the panic then continues to the caller).
   Returns `Ok(:ok)` on success, `Err(FileError(message))` if the file
   cannot be opened.
 
@@ -63,8 +63,10 @@ mod Csv do
     let performed = match csv_open(path, delimiter, mode) do
     Err(e) -> Err(e)
     Ok(handle) -> do
-      each_row_loop(handle, callback)
-      csv_close(handle)
+      try_finally(
+        fn _ -> each_row_loop(handle, callback),
+        fn _ -> csv_close(handle)
+      )
       Ok(:ok)
     end
     end
@@ -120,7 +122,7 @@ mod Csv do
   `callback(header, fields)` for every subsequent row, where `header`
   is the parsed first row.  An empty file (or a header-only file)
   yields `Ok(:ok)` without invoking the callback.  Closes the file on
-  EOF, but not if the callback panics.  `Err(FileError(message))` if
+  EOF and when the callback panics.  `Err(FileError(message))` if
   the file cannot be opened.
 
   ## Examples
@@ -139,8 +141,10 @@ mod Csv do
         Ok(:ok)
       end
       Row(header) -> do
-        with_header_loop(handle, header, callback)
-        csv_close(handle)
+        try_finally(
+          fn _ -> with_header_loop(handle, header, callback),
+          fn _ -> csv_close(handle)
+        )
         Ok(:ok)
       end
       end
