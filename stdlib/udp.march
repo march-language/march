@@ -43,7 +43,8 @@
 -- An `UdpSocket` is an opaque handle (ocap phase 2): it cannot be built from
 -- a descriptor number, using it needs no capability beyond the one `open`
 -- checked, and a use after `close` is `Err(UdpError.Closed)`. Closing a socket another
--- task is blocked on in `recv` wakes that task with `Err(UdpError.Closed)`.
+-- task is blocked on in `recv` wakes that task with `Err(UdpError.Closed)`,
+-- unless a datagram had already arrived, which that `recv` still returns.
 
 mod Udp do
   needs IO.NetConnect
@@ -426,6 +427,9 @@ mod Udp do
   otherwise the task parks until data arrives or `timeout_ms` passes
   (0: do not wait; negative: wait for ever). A timeout is `Ok([])`. A
   payload longer than `max_size` is truncated to it; 65535 never truncates.
+  If another task closes the socket during the call, datagrams already
+  read are still returned; only an empty result becomes
+  `Err(UdpError.Closed)`.
 
   ## Examples
 
@@ -444,11 +448,14 @@ mod Udp do
         handle_leave(b)
         -- A receive cut short because another task closed the socket (the
         -- wait is cancelled, or shutdown() ended it) is Err(UdpError.Closed).
-        if handle_is_closed(b) do Err(UdpError.Closed) else
-          match r do
-          Ok(raw)  -> Ok(List.map(raw, wrap_from))
-          Err(msg) -> Err(UdpError.RecvFailed(msg))
-          end
+        -- Datagrams it had already read are kept: they are off the socket,
+        -- and answering Closed would lose them (as Socket.recv keeps a
+        -- non-empty read).
+        let closed = handle_is_closed(b)
+        match r do
+        Ok(Nil)  -> if closed do Err(UdpError.Closed) else Ok(Nil) end
+        Ok(raw)  -> Ok(List.map(raw, wrap_from))
+        Err(msg) -> if closed do Err(UdpError.Closed) else Err(UdpError.RecvFailed(msg)) end
         end
       end
     end
@@ -486,7 +493,8 @@ mod Udp do
 
   doc """
   Close the socket. A task blocked in `recv` / `recv_batch` on it wakes
-  with `Err(UdpError.Closed)`; closing it again does nothing.
+  with `Err(UdpError.Closed)`, or with the datagrams that had already
+  arrived; closing it again does nothing.
   """
   fn close(sock : UdpSocket) : () do
     match sock do

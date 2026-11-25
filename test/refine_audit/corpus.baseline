@@ -870,6 +870,8 @@ native_typed_array_map_closure_abi: coverage audit (user + stdlib): 391 enforced
 native_typed_array_map_closure_abi: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_typed_array_scalar_repr: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
 native_typed_array_scalar_repr: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_udp_close_after_datagram: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
+native_udp_close_after_datagram: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_udp_close_while_recv: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
 native_udp_close_while_recv: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_udp_loopback: coverage audit (user + stdlib): 392 enforced, 0 inert (warned), 0 unenforced

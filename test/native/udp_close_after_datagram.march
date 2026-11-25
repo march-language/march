@@ -1,0 +1,84 @@
+-- Udp.recv keeps a datagram that arrived before the socket was closed.
+--
+-- A reader parks in Udp.recv with no deadline. Main sends the socket one
+-- datagram and closes it at once. Whichever wakes the reader first (the
+-- datagram or the close), the datagram is already off the wire and in the
+-- socket's queue, and the receive that picks it up must answer with it:
+-- Udp.recv_batch used to answer Err(Closed) whenever the socket was closed by
+-- the time the raw receive returned, dropping the batch it had just read.
+-- The other loss was in the runtime: a wait cancelled by the close returned
+-- an error without reading what was queued. Twenty rounds, each on a fresh
+-- socket. MARCH_NUM_SCHEDULERS=1, so main closes before the reader runs.
+--
+-- Linux only (test/dune): there a loopback send has queued the datagram by
+-- the time it returns. On macOS delivery is asynchronous, so a close right
+-- after the send can truly precede the datagram, and waiting for it lets the
+-- reader take it the ordinary way, which tests nothing.
+mod UdpCloseAfterDatagram do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.Spawn
+
+  pfn sock() : UdpSocket do
+    match Authority.must(Udp.open("127.0.0.1", 0)) do
+      Ok(s) -> s
+      Err(e) -> panic("open: " ++ Udp.error_message(e))
+    end
+  end
+
+  pfn poll_result(key : String, left : Int) : String do
+    let v = Vault.get_or(Authority.must(Vault.open("ucad")), key, "")
+    if v != "" do v
+    else if left <= 0 do "still parked after 3 s"
+    else
+      sleep_ms(5)
+      poll_result(key, left - 5)
+    end end
+  end
+
+  pfn round(n : Int, from : UdpSocket) : String do
+    let key = "r" ++ int_to_string(n)
+    let s = sock()
+    let a = match Udp.local_addr(s) do
+      Ok(a) -> a
+      Err(e) -> panic("local_addr: " ++ Udp.error_message(e))
+    end
+    let _reader = Task.async(fn () ->
+      let what = match Udp.recv(s, 1500, -1) do
+        Ok(Some((_, data))) -> "datagram " ++ data
+        Ok(None) -> "timeout"
+        Err(Udp.Closed) -> "closed"
+        Err(e) -> "error: " ++ Udp.error_message(e)
+      end
+      Vault.set(Authority.must(Vault.open("ucad")), key, what))
+    sleep_ms(30)
+    let _ = Udp.send_to(from, a, "hello")
+    Udp.close(s)
+    poll_result(key, 3000)
+  end
+
+  pfn rounds(n : Int, from : UdpSocket, good : Int, first_bad : String) : (Int, String) do
+    if n >= 20 do (good, first_bad)
+    else
+      let r = round(n, from)
+      if r == "datagram hello" do rounds(n + 1, from, good + 1, first_bad)
+      else rounds(n + 1, from, good, if first_bad == "" do r else first_bad end)
+      end
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let _ = Authority.must(Vault.new("ucad"))
+    let from = sock()
+    match rounds(0, from, 0, "") do
+      (good, bad) ->
+        println(int_to_string(good) ++ " of 20 datagrams delivered")
+        if bad != "" do
+          println("first other answer: " ++ bad)
+          Authority.ignore(Process.exit(0))
+        else () end
+    end
+  end
+end

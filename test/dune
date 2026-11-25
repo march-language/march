@@ -15686,6 +15686,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/udp_close_while_recv.expected native_udp_close_while_recv.out)))
 
+; udp_close_after_datagram: a datagram that arrived before Udp.close is
+; returned by the receive that was parked on the socket, not dropped as
+; Err(Closed). Linux only: the fixture needs a loopback send to have queued
+; its datagram on return, which macOS does not promise (see the fixture).
+(rule
+ (targets native_udp_close_after_datagram native_udp_close_after_datagram.out)
+ (enabled_if (= %{system} linux))
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/udp_close_after_datagram.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_udp_close_after_datagram
+        native/udp_close_after_datagram.march)
+   (with-stdout-to native_udp_close_after_datagram.out
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_udp_close_after_datagram")))))
+
+(rule
+ (alias runtest)
+ (enabled_if (= %{system} linux))
+ (action (diff native/udp_close_after_datagram.expected native_udp_close_after_datagram.out)))
+
 ; tls_refuses_borrowed_socket (ruling R10): Tls.connect refuses a borrowed
 ; Socket and leaves the owner's socket working. It calls the
 ; @[stdlib_internal] Socket.borrow, so it runs with --stdlib-source,
