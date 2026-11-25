@@ -1,6 +1,6 @@
 # Cutting the per-compile stdlib floor: lemma erasure, then a pre-mono prune
 
-**Date:** 2026-11-24. **Status:** approved; Part 1 implemented (lemma erasure, single walk), Part 2 not started.
+**Date:** 2026-11-24. **Status:** approved; Part 1 implemented (lemma erasure, single walk), Part 2 implemented (pre-mono prune, `specs/progress/2026-11-24-pre-mono-dce.md`).
 **Context:** `specs/plans/incremental-codegen-cas-plan.md` §3 (the ~2.4 s small-program floor that
 per-unit codegen would not remove), and `specs/todos/2026-11-19-ocap-authority-mono-compile-cost.md`
 (the measurement that pointed here).
