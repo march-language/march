@@ -89,14 +89,17 @@ mod Session do
   proof cap Live with Ops
 
   doc """
-  Attach a transport. The only way to obtain a `Cap(Session.Live)`; every
+  Attach a transport, or `Err(CapError(...))` when the current authority
+  does not hold the capability kind `IO.Cluster` (sessions and clustering;
+  `needs IO` covers it). The only way to obtain a `Cap(Session.Live)`; every
   other operation here dispatches through the `ops` given.
 
       let t = Session.in_process()
-      let s = Session.attach(io, t.ops)
+      let s = Authority.must(Session.attach(t.ops))
   """
-  fn attach(io : Cap(IO), ops : Ops) : Cap(Session.Live) do
-    cap_impl(mint_cap(io), ops)
+  fn attach(ops : Ops) : Result(Cap(Session.Live), CapError) do
+    let? _ = Authority.check("IO.Cluster", "")
+    Ok(cap_impl(mint_cap(root_cap), ops))
   end
 
   pfn no_transport() do
@@ -727,7 +730,7 @@ mod Session do
   `drain` to deliver.
 
       let t = Session.in_process()
-      let s = Session.attach(io, t.ops)
+      let s = Authority.must(Session.attach(t.ops))
       let _ = cons(s, Stream_Cons.register(s, 0), 2)
       let _ = prod(s, Stream_Prod.register(s, 0), 1)
       t.drain(())

@@ -11,6 +11,7 @@
 mod Main do
   needs IO
   needs IO.Console
+  needs Actor.Introspect
 
   actor Worker do
     state { n : Int }
@@ -44,25 +45,24 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
     let sup = spawn(Sup)
     let ta1 = child_int(sup, "ta")
     let tb1 = child_int(sup, "tb")
 
     -- kill() retires a transient child: no respawn, slot untouched.
-    kill(Actor.pid_from_int(intro, ta1))
+    kill(Authority.must(Actor.pid_from_int(ta1)))
     run_until_idle()
     let ta2 = child_int(sup, "ta")
     println("transient killed, slot unchanged: " ++ bool_to_string(ta2 == ta1))
-    println("transient killed, child dead: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, ta1)) == false))
+    println("transient killed, child dead: " ++ bool_to_string(is_alive(Authority.must(Actor.pid_from_int(ta1))) == false))
 
     -- ...but a crash still restarts it.
-    send(Actor.pid_from_int(intro, tb1), Poison())
+    send(Authority.must(Actor.pid_from_int(tb1)), Poison())
     run_until_idle()
     let tb2 = child_int(sup, "tb")
     println("transient crashed, respawned: " ++ bool_to_string(tb2 != tb1))
-    println("transient crashed, child alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, tb2))))
+    println("transient crashed, child alive: " ++ bool_to_string(is_alive(Authority.must(Actor.pid_from_int(tb2)))))
     println("supervisor alive: " ++ bool_to_string(is_alive(sup)))
   end
 end

@@ -1204,7 +1204,21 @@ describe "arithmetic" do
     assert (2 * 3 == 6)
   end
 end
+
+-- mock: in a test build, an IO capability's operations go to a handler
+test "the clock is mocked" do
+  let t = mock IO.Clock with { unix_time_ms: Some(fn _ -> 1234) } do
+    System.now_ms()
+  end
+  assert (t == Ok(1234))
+end
 ```
+
+`mock SCOPE with HANDLER do block end` (a reserved word; test builds only) runs the block
+with the scope's operations handled by the record `HANDLER`, whose fields are the kind's
+operations (`march --emit-io-ops`); a literal names only the fields it overrides. Closures,
+tasks and actors made inside keep the mock. See
+[Capabilities]({{ site.baseurl }}/docs/capabilities/#mocking-an-io-capability-in-tests-mock).
 
 ---
 

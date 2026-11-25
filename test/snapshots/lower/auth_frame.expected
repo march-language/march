@@ -26,11 +26,11 @@ fn count_in$auth_layer() : Layer =
 
 ## main
 fn main() : () =
-  let $t1325 : Result((), CapError) = probe() in
-case $t1325 of
-  Ok($f1327) -> let $t1326 : Int = count_in(5, 0) in
-println($t1326)
-  Err($f1328) -> println(0)
+  let $t1443 : Result((), CapError) = probe() in
+case $t1443 of
+  Ok($f1445) -> let $t1444 : Int = count_in(5, 0) in
+println($t1444)
+  Err($f1446) -> println(0)
   _ -> panic("non-exhaustive pattern match")
 
 ## probe

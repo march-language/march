@@ -81,6 +81,10 @@ val span_is_stdlib : Ast.span -> bool
     [Hot_reload.control_wiring_file] (pinned by test_stdlib_only). *)
 val control_wiring_file : string
 
+(** ["<cap-dispatch>"]: the file of a test build's generated dispatch
+    wrappers (ocap phase 7), which may name the stdlib-only mock registry. *)
+val cap_dispatch_file : string
+
 (** [span_is_stdlib], or the generated control wiring: who may name a
     [@[stdlib_internal]] function or a [stdlib_only] builtin. *)
 val span_may_name_internal : Ast.span -> bool

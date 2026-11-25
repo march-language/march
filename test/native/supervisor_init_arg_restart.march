@@ -1,6 +1,7 @@
 mod SupervisorInitArgRestart do
   needs IO
   needs IO.Console
+  needs Actor.Introspect
 
   -- D24: a supervised child declared `Worker w(expr)` gets its init argument
   -- from the supervisor's spawn glue, where the supervisor's own init params
@@ -47,22 +48,21 @@ mod SupervisorInitArgRestart do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
     let sup = spawn(Sup, "root")
     let w1 = child_int(sup, "w")
-    println(int_to_string(child_int(Actor.pid_from_int(intro, w1), "n")))
+    println(int_to_string(child_int(Authority.must(Actor.pid_from_int(w1)), "n")))
 
-    kill(Actor.pid_from_int(intro, w1))
+    kill(Authority.must(Actor.pid_from_int(w1)))
     let w2 = wait_replaced(sup, w1, 500)
     println(bool_to_string(w2 != w1))
-    println(int_to_string(child_int(Actor.pid_from_int(intro, w2), "n")))
+    println(int_to_string(child_int(Authority.must(Actor.pid_from_int(w2)), "n")))
 
-    kill(Actor.pid_from_int(intro, w2))
+    kill(Authority.must(Actor.pid_from_int(w2)))
     let w3 = wait_replaced(sup, w2, 500)
     println(bool_to_string(w3 != w2))
-    println(int_to_string(child_int(Actor.pid_from_int(intro, w3), "n")))
-    println(int_to_string(child_int(Actor.pid_from_int(intro, w3), "count")))
-    println(bool_to_string(is_alive(Actor.pid_from_int(intro, w3))))
+    println(int_to_string(child_int(Authority.must(Actor.pid_from_int(w3)), "n")))
+    println(int_to_string(child_int(Authority.must(Actor.pid_from_int(w3)), "count")))
+    println(bool_to_string(is_alive(Authority.must(Actor.pid_from_int(w3)))))
   end
 end

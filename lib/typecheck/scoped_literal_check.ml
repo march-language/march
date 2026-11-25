@@ -84,6 +84,7 @@ let literal_urls (e : Ast.expr) : (string * string * bool * Ast.span) list =
     | Ast.ERecordUpdate (base, fields, _) -> go base; List.iter (fun (_, x) -> go x) fields
     | Ast.EIf (c, t, f, _) -> go c; go t; go f
     | Ast.ERestrict (es, b, _) -> List.iter go es; go b
+    | Ast.EMock (es, h, b, _) -> List.iter go (es @ [ h ]); go b
     | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
     | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) | Ast.ELetQ (_, a, b, _)
     | Ast.ELetStar (_, a, b, _) -> go a; go b

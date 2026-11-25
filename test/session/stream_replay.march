@@ -155,7 +155,7 @@ mod StreamReplay do
 
   fn main(c : Cap(IO)) do
     let t = in_process()
-    let s = Session.attach(c, t.ops)
+    let s = Authority.must(Session.attach(t.ops))
     let cons_ep = Session.register(s, 0, cons())
     let prod_ep = Session.register(s, 0, prod())
     let _ = cons_wait(s, cons_ep, 2)

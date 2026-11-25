@@ -1,0 +1,28 @@
+-- TEST
+-- A mock is a layer of the current authority (ocap phase 7, design §12),
+-- so it follows the capture rule of §5: a function value made inside a
+-- `mock` block keeps the mock after the block ends, and one made outside
+-- and called inside does not get it. A named function called directly
+-- inside the block runs under the mock.
+mod MockCapture do
+  needs IO.Console
+  needs IO.Clock
+
+  fn stamp() : String do
+    match System.now_ms() do
+    Ok(t) -> if t == 1234 do "mocked" else "real" end
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main() do
+    let outside = fn () -> stamp()
+    let inside = mock IO.Clock with { unix_time_ms: Some(fn _ -> 1234) } do
+      println("direct: " ++ stamp())
+      println("outside value called inside: " ++ outside())
+      fn () -> stamp()
+    end
+    println("inside value called after: " ++ inside())
+    println("after: " ++ stamp())
+  end
+end

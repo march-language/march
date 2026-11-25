@@ -150,6 +150,7 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
         List.iter (fun (br : Ast.branch) -> scan_one br.branch_body) brs
       | Ast.EIf (c, t, el, _) -> scan_one c; scan_one t; scan_one el
       | Ast.ERestrict (es, b, _) -> List.iter scan_one es; scan_one b
+      | Ast.EMock (es, h, b, _) -> List.iter scan_one (es @ [ h ]); scan_one b
       | Ast.EApp (f, args, _) -> scan_one f; List.iter scan_one args
       | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> scan_one l; scan_one r
       | Ast.ELet (b, _) -> scan_one b.Ast.bind_expr
@@ -725,6 +726,7 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
                 fv b br.branch_body) brs
           | Ast.EIf (c, t, el, _) -> fv bound c; fv bound t; fv bound el
           | Ast.ERestrict (es, b, _) -> List.iter (fv bound) es; fv bound b
+          | Ast.EMock (es, h, b, _) -> List.iter (fv bound) (es @ [ h ]); fv bound b
           | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> fv bound c; fv bound b) arms
           | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> fv bound a; fv bound b
           | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> fv bound e) fs

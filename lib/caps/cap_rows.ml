@@ -152,6 +152,10 @@ let seed_of_body (params : string list) (body : A.expr) : seed =
     | A.ERestrict (es, body, _) ->
       List.iter (go scope) es;
       go scope body
+    | A.EMock (es, h, body, _) ->
+      List.iter (go scope) es;
+      go scope h;
+      go scope body
     | A.ECond (arms, _) ->
       List.iter
         (fun (ce, be) ->

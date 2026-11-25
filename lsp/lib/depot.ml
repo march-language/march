@@ -55,6 +55,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) =
     List.iter (fun (c, b) -> iter_expr f c; iter_expr f b) arms
   | Ast.EIf (c, t, el, _) -> iter_expr f c; iter_expr f t; iter_expr f el
   | Ast.ERestrict (es, b, _) -> List.iter (iter_expr f) es; iter_expr f b
+  | Ast.EMock (es, h, b, _) -> List.iter (iter_expr f) (es @ [ h ]); iter_expr f b
   | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> iter_expr f l; iter_expr f r
   | Ast.ERecord (fs, _) -> List.iter (fun (_, e2) -> iter_expr f e2) fs
   | Ast.ERecordUpdate (e2, fs, _) ->

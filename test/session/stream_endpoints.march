@@ -75,7 +75,7 @@ mod StreamEndpoints do
   fn main(c : Cap(IO)) do
     -- The stdlib's in-process transport; it prints its own `close` lines.
     let t = Session.in_process_with(fn line -> Authority.ignore(IO.puts(line)))
-    let s = Session.attach(c, t.ops)
+    let s = Authority.must(Session.attach(t.ops))
     let cons_st = Stream_Cons.register(s, 0)
     let prod_st = Stream_Prod.register(s, 0)
     let _ = cons(s, cons_st, 2)

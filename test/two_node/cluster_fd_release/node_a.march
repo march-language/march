@@ -24,7 +24,7 @@ mod ClusterFdRelease do
 
   pfn cycle(c : Cap(IO), seed : String, port : Int, i : Int, n : Int, acc : Int) : Int do
     if i >= n do acc else
-      match ClusterNode.start(c, ClusterNode.config("flap-" ++ int_to_string(i), port, "", Cons(seed, Nil), "fd-secret", i + 1)) do
+      match ClusterNode.start(ClusterNode.config("flap-" ++ int_to_string(i), port, "", Cons(seed, Nil), "fd-secret", i + 1)) do
         Err(e) ->
           -- the port may still be closing from the previous cycle
           sleep_ms(200)
@@ -40,7 +40,7 @@ mod ClusterFdRelease do
 
   fn main(c : Cap(IO)) do
     let pa = Authority.must(Env.require_int("MARCH_PORT_A"))
-    match ClusterNode.start(c, ClusterNode.config("node-a", pa, "", Nil, "fd-secret", 1)) do
+    match ClusterNode.start(ClusterNode.config("node-a", pa, "", Nil, "fd-secret", 1)) do
       Err(e) -> panic(e)
       Ok(ha) ->
         sleep_ms(300)

@@ -18,6 +18,7 @@
 mod Main do
   needs IO
   needs IO.Console
+  needs Actor.Introspect
 
   type PingReq = PingReq
 
@@ -53,11 +54,11 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let boss = spawn(Boss)
     let first_int = current_child(boss)
-    let first = Actor.pid_from_int(intro, first_int)
+    let first = Authority.must(Actor.pid_from_int(first_int))
     println("registered: " ++ bool_to_string(Actor.register(first, "fragile")))
     -- A SECOND name on the same actor. This is the case that used to crash the
     -- process outright (EXC_BAD_ACCESS in strdup, under march_respawn_child,
@@ -76,7 +77,7 @@ mod Main do
     run_until_idle()
 
     let second_int = current_child(boss)
-    let second = Actor.pid_from_int(intro, second_int)
+    let second = Authority.must(Actor.pid_from_int(second_int))
     println("respawned with new pid: " ++ bool_to_string(second_int != first_int))
 
     -- Resolve by NAME, from a holder ("fragile") that never saw `second`.

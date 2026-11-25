@@ -1,0 +1,3 @@
+mock: mocked
+restrict inside: IO.Clock refused by the restrict at mock_restrict_inner.march:22 (IO.Console)
+exit 0

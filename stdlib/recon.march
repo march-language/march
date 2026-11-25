@@ -3,7 +3,7 @@
 -- The same numbers the observe socket serves (`forge observe`, `forge top`),
 -- read in-process through the `observe_query` builtin, which answers one
 -- request line with the socket's JSON envelope. Observe tier: every function
--- takes a `Cap(Actor.Introspect)` (mint it with `Actor.introspect(io)` in
+-- takes a `Cap(Actor.Introspect)` (mint it with `Authority.must(Actor.introspect())` in
 -- `main`) and none returns a crash message, only how an actor died.
 --
 -- Backends. Compiled, the answers come from the runtime's actor table and

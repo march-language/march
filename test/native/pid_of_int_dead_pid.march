@@ -35,11 +35,11 @@ mod PidOfIntDeadPid do
   end
 
   fn probe(intro : Cap(Actor.Introspect), n) do
-    is_alive(Actor.pid_from_int(intro, n))
+    is_alive(Authority.must(Actor.pid_from_int(n)))
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let n = spawn_and_kill()
     run_until_idle()
     -- Let the killed actor's green thread exit and drop its reference.

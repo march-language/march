@@ -1,0 +1,20 @@
+-- TEST
+-- A vault mock's `open` hook can make an open fail (ocap phase 7): the
+-- refusal is an `Err(CapError(...))` naming the table and the hook's reason.
+mod MockVaultOpenFails do
+  needs IO.Console
+  needs IO.Mut
+
+  fn main() do
+    mock IO.Mut(prefix("cache.")) with { open: Some(fn n -> if n == "cache.down" do Err("cache is down") else Ok(()) end) } do
+      match Vault.open("cache.down") do
+      Ok(_) -> println("opened")
+      Err(CapError(kind, target, _, reason)) -> println(kind ++ " " ++ target ++ ": " ++ reason)
+      end
+      match Vault.open("cache.up") do
+      Ok(_) -> println("cache.up opened")
+      Err(e) -> println(Authority.describe(e))
+      end
+    end
+  end
+end

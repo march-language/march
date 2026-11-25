@@ -255,7 +255,7 @@ end|}
    runtime effect.  Pinned so the change is deliberate rather than discovered
    later, and so the remaining gap stays visible. *)
 let impl_io_cap_test_build =
-  Alcotest.test_case "--test admits cap_impl on an IO capability"
+  Alcotest.test_case "--test refuses cap_impl on an IO capability too (retired: use mock)"
     `Quick (fun () ->
       let saved = !March_typecheck.Typecheck.test_build in
       March_typecheck.Typecheck.test_build := true;
@@ -269,7 +269,7 @@ let impl_io_cap_test_build =
   end
 end|})
       in
-      Alcotest.(check bool) "admitted under --test" false (has_errors ctx))
+      Alcotest.(check bool) "refused under --test" true (has_errors ctx))
 
 (* ── runtime: the dictionary actually dispatches ──────────────────────── *)
 
@@ -470,6 +470,8 @@ let io_mut_has_no_dictionary =
   Alcotest.test_case "IO.Mut has no dictionary and says which ops it lost" `Quick
     (fun () ->
       Alcotest.(check bool) "no dictionary" true (G.dict_ty "IO.Mut" = None);
+      Alcotest.(check (list string)) "a vault mock's handler is the open hook (ocap phase 7)"
+        [ "open" ] (List.map fst (G.mock_fields "IO.Mut"));
       Alcotest.(check bool) "and every op is reported as excluded" true
         (List.length (G.excluded_ops "IO.Mut") = List.length (G.ops_of_cap "IO.Mut")
          && G.excluded_ops "IO.Mut" <> []))
@@ -500,211 +502,151 @@ let dict_fields_sorted =
       in
       Alcotest.(check (list string)) "caps with unsorted fields" [] unsorted)
 
-(* ── capability-passing analysis invariants ───────────────────────────── *)
+(* ── `mock` blocks (ocap phase 7) ────────────────────────────────────── *)
 
-(* Regression: a nested local function that performs IO.
+(* [test_build] on for [f], restored after. *)
+let in_test_build f =
+  let saved = !March_typecheck.Typecheck.test_build in
+  March_typecheck.Typecheck.test_build := true;
+  Fun.protect ~finally:(fun () -> March_typecheck.Typecheck.test_build := saved) f
 
-   `File.with_lines` has a local `fn do_lines(a, f)` calling `file_read_line`.
-   Attributing that operation to the LOCAL's name put "do_lines" in the
-   analysis table -- but a local is not in [tm_fns], so the elaboration never
-   added parameters to it while the threading happily added an ARGUMENT at its
-   call sites.  The compiled binary died with SIGBUS (rc=138).  Defun lifts
-   such locals to top level later, which is why `--dump-tir` showed
-   `fn do_lines` and made it look top-level all along.
+let mock_ok name src =
+  Alcotest.test_case name `Quick (fun () ->
+      let ctx = in_test_build (fun () -> typecheck src) in
+      Alcotest.(check bool) (name ^ ": no error") false (has_errors ctx))
 
-   Two assertions, because either alone would have missed it: no entry may
-   name something that is not a top-level function (the crash), and the
-   ENCLOSING function must have picked the capability up (the missed
-   threading that attributing upward also fixes). *)
-let analysis_attributes_locals_to_their_owner =
-  Alcotest.test_case "a nested local fn's IO is charged to its enclosing fn" `Quick
-    (fun () ->
-      let m =
-        parse_and_desugar {|mod L do
-  needs IO.FileRead
-  fn outer(path : String) : Int do
-    fn inner(n : Int) : Int do
-      match file_read(path) do
-        Ok(_)  -> n + 1
-        Err(_) -> n
-      end
+let mock_bad name src =
+  Alcotest.test_case name `Quick (fun () ->
+      let ctx = in_test_build (fun () -> typecheck src) in
+      Alcotest.(check bool) (name ^ ": error") true (has_errors ctx))
+
+let mock_partial_literal = mock_ok "a mock handler literal may name only some fields" {|mod T do
+  needs IO.Console
+  fn f() : () do
+    mock IO.Console with { print_line: Some(fn _ -> ()) } do
+      Authority.ignore(println("x"))
     end
-    inner(0)
   end
 end|}
-      in
-      let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
-      let tir =
-        March_tir.Lower.lower_module ~type_map ~test_mode:false ~hot_reload:false m
-      in
-      let need = March_tir.Cap_passing.needed_caps tir in
-      let toplevel =
-        List.map (fun (fd : March_tir.Tir.fn_def) -> fd.March_tir.Tir.fn_name)
-          tir.March_tir.Tir.tm_fns
-      in
-      let non_toplevel =
-        Hashtbl.fold (fun k _ acc -> if List.mem k toplevel then acc else k :: acc)
-          need []
-      in
-      Alcotest.(check (list string))
-        "no entry names a non-top-level function" [] (List.sort compare non_toplevel);
-      Alcotest.(check bool) "the enclosing fn picked up IO.FileRead" true
-        (match Hashtbl.find_opt need "outer" with
-         | Some caps -> List.mem "IO.FileRead" caps
-         | None -> false))
 
-(* ── what an actor's dispatch needs, as the spawn site will capture it ─── *)
+let mock_named_handler = mock_ok "a named handler is the kind's whole record" {|mod T do
+  needs IO.Clock
+  fn f(h : { unix_time : Option(() -> Float), unix_time_ms : Option(() -> Int), uuid_v7 : Option(() -> String) }) : Int do
+    mock IO.Clock with h do
+      Authority.must(System.now_ms())
+    end
+  end
+end|}
 
-(* v1 captured ONE capability per actor and returned `None` for two or more,
-   so an actor that logged AND read the clock could not be mocked at all. The
-   analysis now returns every capability the dispatch reaches, sorted, and the
-   one-capability actor goes through the same list-shaped path rather than a
-   special case -- pinned here at the analysis level so the two spawn shapes
-   cannot drift apart, and by the `cap_mock_actor` / `cap_mock_actor_two`
-   goldens at the emitted-code level. *)
-let dispatch_caps_lists_every_capability =
-  Alcotest.test_case "an actor's dispatch reports every capability it reaches"
-    `Quick (fun () ->
-      let m =
-        parse_and_desugar {|mod D do
+let mock_vault_handler = mock_ok "a vault mock's handler is the open hook" {|mod T do
+  fn f() : () do
+    mock IO.Mut("sessions") with { open: None } do
+      ()
+    end
+  end
+end|}
+
+let mock_field_type = mock_bad "a handler field of the wrong type is refused" {|mod T do
+  needs IO.Console
+  fn f() : () do
+    mock IO.Console with { print_line: Some(fn n -> n + 1) } do
+      ()
+    end
+  end
+end|}
+
+let mock_unknown_field = mock_bad "a handler field the kind does not have is refused" {|mod T do
+  needs IO.Console
+  fn f() : () do
+    mock IO.Console with { println: Some(fn _ -> ()) } do
+      ()
+    end
+  end
+end|}
+
+let mock_two_kinds = mock_bad "a mock of two kinds is refused" {|mod T do
   needs IO.Console
   needs IO.Clock
-  actor Two do
-    state { n : Int }
-    init  { n: 0 }
-    on Tick(s : String) do
-      print_line(s ++ int_to_string(unix_time_ms()))
-      { state with n: state.n + 1 }
-    end
-  end
-  actor One do
-    state { n : Int }
-    init  { n: 0 }
-    on Say(s : String) do
-      print_line(s)
-      { state with n: state.n + 1 }
+  fn f() : () do
+    mock IO.Console, IO.Clock with { print_line: None } do
+      ()
     end
   end
 end|}
-      in
-      let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
-      let tir =
-        March_tir.Lower.lower_module ~type_map ~test_mode:false ~hot_reload:false m
-      in
-      let need = March_tir.Cap_passing.needed_caps tir in
-      let dispatch_of actor =
-        List.find
-          (fun (fd : March_tir.Tir.fn_def) ->
-             March_tir.Cap_passing.actor_of_dispatch fd.March_tir.Tir.fn_name
-             = Some actor)
-          tir.March_tir.Tir.tm_fns
-      in
-      Alcotest.(check (list string)) "two-capability actor: both, sorted"
-        [ "IO.Clock"; "IO.Console" ]
-        (March_tir.Cap_passing.dispatch_caps need (dispatch_of "Two"));
-      Alcotest.(check (list string)) "one-capability actor: a one-element list"
-        [ "IO.Console" ]
-        (March_tir.Cap_passing.dispatch_caps need (dispatch_of "One")))
 
-(* A supervisor's spawn glue spawns its `supervise`-block children itself, so
-   it must carry the children's capabilities for the capture pattern inside it
-   to have anything to attach. The child's own spawn fn is passed as a value
-   to register_supervisor_child (for respawn) and stays frozen; it needs no
-   parameters, only a record set on it. *)
-let supervisor_glue_carries_children_caps =
-  Alcotest.test_case "a supervisor's spawn glue needs its children's capabilities"
-    `Quick (fun () ->
-      let m =
-        parse_and_desugar {|mod S do
-  needs IO.Console
-  actor Logger do
-    state { n : Int }
-    init  { n: 0 }
-    on Say(s : String) do
-      print_line(s)
-      { state with n: state.n + 1 }
-    end
-  end
-  actor Sup do
-    state { w : Int }
-    init  { w: 0 }
-    supervise do
-      strategy one_for_one
-      max_restarts 5 within 60
-      Logger w
+let mock_computed_scope = mock_bad "a computed mock scope is refused" {|mod T do
+  needs IO.FileRead
+  fn f(d : String) : () do
+    mock IO.FileRead(d) with { file_read: None } do
+      ()
     end
   end
 end|}
-      in
-      let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
-      let tir =
-        March_tir.Lower.lower_module ~type_map ~test_mode:false ~hot_reload:false m
-      in
-      let glue =
-        List.find
-          (fun (fd : March_tir.Tir.fn_def) ->
-             March_tir.Cap_passing.actor_of_spawn fd.March_tir.Tir.fn_name = Some "Sup")
-          tir.March_tir.Tir.tm_fns
-      in
-      Alcotest.(check (list string)) "the glue spawns Logger as a supervised child"
-        [ "Logger" ]
-        (March_tir.Cap_passing.supervised_children glue.March_tir.Tir.fn_body);
-      let need = March_tir.Cap_passing.needed_caps tir in
-      Alcotest.(check (option (list string))) "Sup_spawn carries the child's caps"
-        (Some [ "IO.Console" ]) (Hashtbl.find_opt need "Sup_spawn");
-      Alcotest.(check (option (list string))) "Logger_spawn stays frozen (passed as a value)"
-        None (Hashtbl.find_opt need "Logger_spawn"))
 
-(* A supervisor nested under another supervisor: its spawn glue is passed as
-   a value to register_supervisor_child (for respawn), which used to freeze it.
-   That argument is now a call reference the threading pass replaces with a
-   closure, so the nested glue carries its children's capabilities and the
-   top glue picks them up transitively. A leaf's glue still needs nothing. *)
-let nested_supervisor_glue_carries_caps =
-  Alcotest.test_case "a nested supervisor's spawn glue carries its children's capabilities"
-    `Quick (fun () ->
-      let m =
-        parse_and_desugar {|mod N do
-  needs IO.Console
-  actor Leaf do
-    state { n : Int }
-    init  { n: 0 }
-    on Say(s : String) do
-      print_line(s)
-      { state with n: state.n + 1 }
-    end
-  end
-  actor Mid do
-    state { l : Int }
-    init  { l: 0 }
-    supervise do
-      strategy one_for_one
-      max_restarts 5 within 60
-      Leaf l
-    end
-  end
-  actor Top do
-    state { m : Int }
-    init  { m: 0 }
-    supervise do
-      strategy one_for_one
-      max_restarts 5 within 60
-      Mid m
+let mock_unmockable_kind = mock_bad "a kind with no operations to mock is refused" {|mod T do
+  fn f() : () do
+    mock IO with { open: None } do
+      ()
     end
   end
 end|}
-      in
-      let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
-      let tir =
-        March_tir.Lower.lower_module ~type_map ~test_mode:false ~hot_reload:false m
-      in
-      let need = March_tir.Cap_passing.needed_caps tir in
-      Alcotest.(check (option (list string))) "Mid_spawn carries Leaf's caps"
-        (Some [ "IO.Console" ]) (Hashtbl.find_opt need "Mid_spawn");
-      Alcotest.(check (option (list string))) "Top_spawn carries them transitively"
-        (Some [ "IO.Console" ]) (Hashtbl.find_opt need "Top_spawn");
-      Alcotest.(check (option (list string))) "Leaf_spawn still needs nothing"
-        None (Hashtbl.find_opt need "Leaf_spawn"))
+
+let mock_outside_test = bad "a mock outside a test build is refused" {|mod T do
+  needs IO.Console
+  fn f() : () do
+    mock IO.Console with { print_line: None } do
+      ()
+    end
+  end
+end|}
+
+(* The test build's TIR rewrite: an interceptable operation's call is routed
+   to its dispatch wrapper, and a wrapper's own call of the operation is not
+   (it would call itself). *)
+let mock_dispatch_rewrite =
+  Alcotest.test_case "Mock_dispatch routes operations through their wrappers" `Quick
+    (fun () ->
+      let module T = March_tir.Tir in
+      let v name = { T.v_name = name; v_ty = T.TFn ([ T.TString ], T.TUnit); v_lin = T.Unr } in
+      let call name = T.EApp (v name, [ T.ALit (March_ast.Ast.LitString "x") ]) in
+      let fn name body = { T.fn_name = name; fn_params = []; fn_ret_ty = T.TUnit;
+                           fn_body = body; fn_kind = T.FnNormal } in
+      let u = { T.v_name = "u"; v_ty = T.TUnit; v_lin = T.Unr } in
+      let m = { T.tm_name = "M"; tm_types = []; tm_externs = []; tm_exports = [];
+                tm_tests = []; tm_io_fns = [];
+                T.tm_fns = [ fn "user" (T.ELet (u, call "print_line", call "print_line"));
+                             fn "__march_dispatch_print_line" (call "print_line");
+                             fn "other" (call "not_a_cap_op") ] } in
+      let m' = March_tir.Mock_dispatch.rewrite m in
+      let body n = (List.find (fun (f : T.fn_def) -> f.T.fn_name = n) m'.T.tm_fns).T.fn_body in
+      let rec callees = function
+        | T.EApp (v, _) -> [ v.T.v_name ]
+        | T.ELet (_, a, b) -> callees a @ callees b
+        | _ -> [] in
+      Alcotest.(check (list string)) "user calls go through the wrapper"
+        [ "__march_dispatch_print_line"; "__march_dispatch_print_line" ] (callees (body "user"));
+      Alcotest.(check (list string)) "the wrapper keeps the real call"
+        [ "print_line" ] (callees (body "__march_dispatch_print_line"));
+      Alcotest.(check (list string)) "other builtins are untouched"
+        [ "not_a_cap_op" ] (callees (body "other")))
+
+(* A release build carries no dispatch wrapper and no mock registry call:
+   the only shared change is in the authority's policy. *)
+let release_build_has_no_wrappers =
+  Alcotest.test_case "a release build's IR names no dispatch wrapper" `Quick
+    (fun () ->
+      let ir = emit_actor_ir {|mod R do
+  needs IO.Console
+  fn main() do
+    println("hi")
+  end
+end|} in
+      let has sub =
+        let n = String.length ir and k = String.length sub in
+        let rec go i = i + k <= n && (String.sub ir i k = sub || go (i + 1)) in
+        go 0 in
+      Alcotest.(check bool) "no __march_dispatch_" false (has "__march_dispatch_");
+      Alcotest.(check bool) "no march_mock_register call" false (has "call i64 @march_mock_register"))
 
 (* ── the surface spelling of a multi-argument field ───────────────────── *)
 
@@ -754,9 +696,8 @@ let tests = [
   rt_dispatch; rt_swap; rt_default; rt_narrow_propagates;
   io_console_shape; shadow_list_matches_stdlib; io_clock_zero_arg; io_mut_has_no_dictionary;
   excluded_ops_are_documented; dict_fields_sorted;
-  analysis_attributes_locals_to_their_owner;
-  dispatch_caps_lists_every_capability;
-  supervisor_glue_carries_children_caps;
-  nested_supervisor_glue_carries_caps;
+  mock_partial_literal; mock_named_handler; mock_vault_handler; mock_field_type;
+  mock_unknown_field; mock_two_kinds; mock_computed_scope; mock_unmockable_kind;
+  mock_outside_test; mock_dispatch_rewrite; release_build_has_no_wrappers;
   rendered_multi_arg_is_curried;
 ]

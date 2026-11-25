@@ -50,7 +50,7 @@ mod StreamOverNodesB do
       Err(e) -> panic("accept: " ++ e)
     end
     let link = SessionNode.open(conn, "node-b", true, fn ep -> print_line("close " ++ int_to_string(ep)))
-    let s = Session.attach(c, SessionNode.ops(link))
+    let s = Authority.must(Session.attach(SessionNode.ops(link)))
     -- Drive Cons to its first suspension (its recv handler is installed)
     -- BEFORE reading the first frame; Prod's Item(1) waits in the socket.
     let _ = cons(s, Stream_Cons.register(s, 0), 2)

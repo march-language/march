@@ -215,7 +215,7 @@ mod DrainPeers do
     if seed == 60 do () else
       let tally = Authority.must(Vault.new("drain_peers_stream_" ++ int_to_string(seed)))
       let t = counting(tally)
-      let s = Session.attach(c, t.ops)
+      let s = Authority.must(Session.attach(t.ops))
       let _ = Stream_Cons.chaos(s, Stream_Cons.register(s, 0), seed)
       let _ = Stream_Prod.chaos(s, Stream_Prod.register(s, 0), seed + 1000)
       steps(t, (seed * 7 + 3) % 11)
@@ -233,7 +233,7 @@ mod DrainPeers do
     if seed == 60 do () else
       let tally = Authority.must(Vault.new("drain_peers_ring_" ++ int_to_string(seed)))
       let t = counting(tally)
-      let s = Session.attach(c, t.ops)
+      let s = Authority.must(Session.attach(t.ops))
       let _ = Ring_C.chaos(s, Ring_C.register(s, 0), seed)
       let _ = Ring_B.chaos(s, Ring_B.register(s, 0), seed + 100)
       let _ = Ring_A.chaos(s, Ring_A.register(s, 0), seed + 200)
@@ -268,7 +268,7 @@ mod DrainPeers do
     if seed == 60 do () else
       let tally = Authority.must(Vault.new("drain_peers_pair_" ++ int_to_string(seed)))
       let t = counting(tally)
-      let s = Session.attach(c, t.ops)
+      let s = Authority.must(Session.attach(t.ops))
       let _ = Pair_B.chaos(s, Pair_B.register(s, 0), seed)
       let _ = Pair_A.chaos(s, Pair_A.register(s, 0), seed + 300)
       steps(t, (seed * 3 + 2) % 9)
@@ -286,7 +286,7 @@ mod DrainPeers do
     if seed == 60 do () else
       let tally = Authority.must(Vault.new("drain_peers_relay_" ++ int_to_string(seed)))
       let t = counting(tally)
-      let s = Session.attach(c, t.ops)
+      let s = Authority.must(Session.attach(t.ops))
       let _ = Relay3_B.chaos(s, Relay3_B.register(s, 0), seed)
       let _ = Relay3_C.chaos(s, Relay3_C.register(s, 0), seed + 400)
       let _ = Relay3_A.chaos(s, Relay3_A.register(s, 0), seed + 500)
@@ -305,7 +305,7 @@ mod DrainPeers do
     if seed == 60 do () else
       let tally = Authority.must(Vault.new("drain_peers_fork_" ++ int_to_string(seed)))
       let t = counting(tally)
-      let s = Session.attach(c, t.ops)
+      let s = Authority.must(Session.attach(t.ops))
       let _ = Fork_A.chaos(s, Fork_A.register(s, 0), seed)
       let _ = Fork_B.chaos(s, Fork_B.register(s, 0), seed + 600)
       let _ = Fork_C.chaos(s, Fork_C.register(s, 0), seed + 700)
@@ -323,7 +323,7 @@ mod DrainPeers do
   fn main(c : Cap(IO)) do
     IO.puts("-- Stream: Cons drains at its loop boundary after two items")
     let t1 = tracing()
-    let s1 = Session.attach(c, t1.ops)
+    let s1 = Authority.must(Session.attach(t1.ops))
     let _ = cons(s1, Stream_Cons.register(s1, 0), 10)
     let _ = prod(s1, Stream_Prod.register(s1, 0), 1)
     steps(t1, 3)
@@ -334,7 +334,7 @@ mod DrainPeers do
 
     IO.puts("-- Stream: Prod's epoch drains; Cons ends at its next boundary")
     let t2 = tracing()
-    let s2 = Session.attach(c, t2.ops)
+    let s2 = Authority.must(Session.attach(t2.ops))
     let _ = cons(s2, Stream_Cons.register(s2, 0), 10)
     let _ = prod(s2, Stream_Prod.register(s2, 0), 1)
     steps(t2, 1)
@@ -344,7 +344,7 @@ mod DrainPeers do
 
     IO.puts("-- Ring: C drains; B is mid-iteration, A waits on C")
     let t3 = tracing()
-    let s3 = Session.attach(c, t3.ops)
+    let s3 = Authority.must(Session.attach(t3.ops))
     let _ = Ring_C.chaos(s3, Ring_C.register(s3, 0), 1)
     let _ = Ring_B.chaos(s3, Ring_B.register(s3, 0), 2)
     let _ = Ring_A.chaos(s3, Ring_A.register(s3, 0), 3)
@@ -369,7 +369,7 @@ mod DrainPeers do
 
     IO.puts("-- loop atomic: both roles draining, the session still runs to its end")
     let t4 = tracing()
-    let s4 = Session.attach(c, t4.ops)
+    let s4 = Authority.must(Session.attach(t4.ops))
     let _ = steady_dst(s4, Steady_Dst.register(s4, 0), 0)
     let _ = steady_src(s4, Steady_Src.register(s4, 0), 1)
     t4.drain_role(1)

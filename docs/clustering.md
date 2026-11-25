@@ -78,7 +78,7 @@ different hosts, or a deploy that rolls through a fleet.
 | Call a function on another node and get a typed reply | `RemoteCall` and `NodeRpc`, checked by `sig_hash` and `impl_hash` |
 | Run one protocol with roles on several nodes | A [choreography]({{ site.baseurl }}/docs/choreography/#running-over-a-cluster-node) over the node |
 | Limit what a node may do, not only who it is | Certificate mode: roles and the `raw_send` flag |
-| Test cluster reactions with no sockets | `ClusterNode.attach(io, ops)` with an `ops_stub` |
+| Test cluster reactions with no sockets | `Authority.must(ClusterNode.attach(ops))` with an `ops_stub` |
 
 Two things the cluster is not. A global name is not a lock: during a partition each
 side can register it, and one binding wins when the partition heals. And the links are
@@ -154,7 +154,7 @@ assemble by hand.
 match ClusterNode.config_from_env() do
   Err(e) -> panic(e)
   Ok(cfg) ->
-    match ClusterNode.start(io, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(node) ->
         let _ = ClusterNode.subscribe(node, fn ev -> println(ClusterNode.event_text(ev)))
@@ -234,7 +234,7 @@ parameter:
 
 ```march
 fn main(io : Cap(IO)) do
-  let node = match ClusterNode.start(io, cfg) do
+  let node = match ClusterNode.start(cfg) do
     Ok(n) -> n
     Err(e) -> panic(e)
   end
@@ -245,7 +245,7 @@ end
 
 **Testing without a network.** Every operation above goes through the capability's
 dictionary, a record of functions (`ClusterNode.ClusterOps`, one field per operation). `start`
-attaches the real one. A test attaches its own with `ClusterNode.attach(io, ops)`, and code
+attaches the real one. A test attaches its own with `Authority.must(ClusterNode.attach(ops))`, and code
 written against a real node then runs against it. `ClusterNode.ops_stub(node_id)` is a
 dictionary whose every operation panics with its own name; override the ones the code under
 test uses:
@@ -254,7 +254,7 @@ test uses:
 let ops = { ClusterNode.ops_stub("n0") with
   members: fn _ -> fake_members(fake),
   subscribe: fn f -> fake_subscribe(fake, f) }
-let node = ClusterNode.attach(io, ops)
+let node = Authority.must(ClusterNode.attach(ops))
 -- the test now calls the subscribers itself: NodeDead(info, "suspect timeout"), ...
 ```
 
@@ -264,7 +264,7 @@ reactions are tested with no sockets: `test/session/cluster_placement.march` inj
 
 **What a node may do with the root capability.** `start` and `attach` both take `Cap(IO)`,
 and the node keeps one power from it: `ClusterNode.with_session(node, ops, body)` runs
-`body` with the `Cap(Session.Live)` that `Session.attach(io, ops)` would give. The session
+`body` with the `Cap(Session.Live)` that `Authority.must(Session.attach(ops))` would give. The session
 runners use it, which is why the generated `<P>_Run` entry points over a cluster node take
 the node and not `Cap(IO)` (see [Choreography]({{ site.baseurl }}/docs/choreography/#running-a-role-every-entry-point)).
 The capability is handed to `body` and never returned: only `Session` may return a
@@ -863,7 +863,7 @@ seven-element frame, so upgrade receivers before senders.
 
 ```march
 let p = SessionNode.open(conn, "node-a", false, fn ep -> ())
-let s = Session.attach(io, SessionNode.ops(p))
+let s = Authority.must(Session.attach(SessionNode.ops(p)))
 let _ = run_role(s, Stream_Prod.register(s, 0))
 SessionNode.serve(p)
 SessionNode.finish(p)
@@ -1103,7 +1103,7 @@ mod NodeA do
     -- handshakes and registry (the raw descriptor plumbing under it is internal to the
     -- standard library). No seeds: this node waits to be dialled.
     let cfg = ClusterNode.config("a", 9000, "", Nil, "shared-secret", 1)
-    match ClusterNode.start(c, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e)   -> Authority.ignore(Process.exit(1))
       Ok(node) ->
         println("node " ++ ClusterNode.node_id(node) ++ " up")
@@ -1125,7 +1125,7 @@ mod NodeB do
     let secret = "shared-secret"  -- same secret as Node A
     -- Node A's address is a seed: B dials it and handshakes during `start`.
     let cfg = ClusterNode.config("b", 9001, "", Cons("127.0.0.1:9000", Nil), secret, 1)
-    match ClusterNode.start(c, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e)   -> Authority.ignore(Process.exit(1))
       Ok(node) ->
         -- Peers appear in the membership once the handshake has completed.

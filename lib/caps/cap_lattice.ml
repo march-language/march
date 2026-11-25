@@ -37,6 +37,16 @@ let hierarchy : (string * string option) list = [
      actor by name gains a capability from a string, and registering a name
      can impersonate one. *)
   ("IO.Registry",        Some "IO");
+  (* Sessions and clustering (ocap phase 7, design §21): attaching a session
+     dictionary and starting or attaching a cluster node, the operations
+     that once took the root `Cap(IO)` as a witness. *)
+  ("IO.Cluster",         Some "IO");
+  (* Observing and debugging other actors (ocap phase 7, design §7, §21):
+     minting `Cap(Actor.Introspect)` / `Cap(Actor.Debug)` and turning a spawn
+     index back into a pid. Not under IO: `needs IO` does not let a program
+     inspect every actor's state. *)
+  ("Actor.Introspect",   None);
+  ("Actor.Debug",        None);
 ]
 
 (** [cap_ancestors cap] returns [cap] and all its ancestors, most-specific first.
@@ -55,6 +65,12 @@ let cap_ancestors cap =
     E.g., cap_subsumes "IO" "IO.FileRead" = true. *)
 let cap_subsumes parent child =
   List.mem parent (cap_ancestors child)
+
+(** [is_authority c]: [c] is a node of this lattice ([IO] and below, and the
+    roots outside it, [Actor.Introspect] and [Actor.Debug]), i.e. authority
+    that `needs` clauses, `restrict`, grants and `main`'s request bound; not
+    an FFI root ([LibC]) or a proof capability ([Session.Live]). *)
+let is_authority c = List.mem_assoc c hierarchy
 
 (** [normalize caps] drops any cap subsumed by another cap already in the
     list, preserving the relative order of the caps that remain.  E.g.
@@ -184,6 +200,9 @@ let words : (string * (string * string)) list = [
   ("IO.Foreign",          ("foreign-code",     "calls foreign code"));
   ("IO.Foreign.Blocking", ("blocking foreign-code", "calls blocking foreign code"));
   ("IO.Registry",         ("registry",         "names an actor"));
+  ("IO.Cluster",          ("cluster",          "joins a cluster or a session"));
+  ("Actor.Introspect",    ("actor-introspection", "inspects other actors"));
+  ("Actor.Debug",         ("actor-debugging",  "debugs other actors"));
 ]
 
 let access cap =
