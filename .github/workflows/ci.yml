@@ -11,8 +11,8 @@
 # single slowest one rather than their sum:
 #
 #   (doc-lint lives in doc-lint.yml so it runs on Markdown-only changes too)
-#   test          (ubuntu) × 4          `dune runtest`, sharded: codegen, refinecheck,
-#                                       compiler, rest (see the job's comment)
+#   test          (ubuntu) × 6          `dune runtest`, sharded: codegen, refinecheck,
+#                                       compiler, rest, forge, captures (see the job's comment)
 #                 (macos)               `dune runtest`, unsharded
 #   macos-checks  (macos)               property groups (all but the oracle) + @vault-scale
 #   two-node      (ubuntu) × 3          two-node scenarios, sharded 1/3, 2/3, 3/3;
@@ -118,6 +118,7 @@ jobs:
           - { os: ubuntu-24.04, shard: compiler }
           - { os: ubuntu-24.04, shard: rest }
           - { os: ubuntu-24.04, shard: forge }
+          - { os: ubuntu-24.04, shard: captures }
           - { os: macos-26,     shard: all }
     runs-on: ${{ matrix.os }}
     # Must stay above the Test step's 75 plus setup (20) and build (10).
@@ -216,9 +217,15 @@ jobs:
             # `forge` ran 13-19 min. With run_errors alone moved, `rest` took
             # 47 and `forge` 40 (PR #1271).
             # run_dep_grants (seconds) is here too, to keep it off `rest` and
-            # `compiler`, both near their step timeout. run_captures (capture
-            # sets, ocap phase 8a) likewise.
-            forge)       dune build @forge/runtest @test/runtest-run_errors @test/runtest-test_jit @test/runtest-run_cap_conformance @test/runtest-run_dep_grants @test/runtest-run_captures ;;
+            # `compiler`, both near their step timeout.
+            forge)       dune build @forge/runtest @test/runtest-run_errors @test/runtest-test_jit @test/runtest-run_cap_conformance @test/runtest-run_dep_grants ;;
+            # run_captures (capture sets, ocap phase 8a) is its own shard.
+            # It is ~15 CPU-min of `march --check` and interpreter runs, each
+            # from a cold cache. In `forge` (44-61 min on main) it took this
+            # step past 75 and starved upgrade-from's timing-sensitive
+            # migrating case into a failure (PR #1323). No other shard has
+            # the room: all five ran 42-61 min on main that week.
+            captures)    MARCH_TEST_PROCS=$(nproc) dune build @test/runtest-run_captures ;;
             # macOS skips the suites whose answer does not depend on the OS
             # (refinecheck, golden diagnostics, LSP; see "CI sharding" in
             # test/dune), and runs only the OS-sensitive groups listed in

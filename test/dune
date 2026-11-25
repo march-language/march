@@ -53,7 +53,8 @@
 ; (`dune build @test/runtest-run_codegen`, ...) and runs everything else with
 ; MARCH_CI_RUNTEST_SPLIT=1 set, which drops exactly these three stanzas (exe
 ; and alias both) from `dune runtest`, along with run_cap_conformance,
-; run_errors, test_jit, run_dep_grants and run_captures, which CI runs in the `forge` shard. Unset --
+; run_errors, test_jit and run_dep_grants, which CI runs in the `forge` shard,
+; and run_captures, which is its own shard (`captures`). Unset --
 ; every local run -- nothing
 ; changes. Do not set it outside that CI job: a local `dune runtest` with it
 ; set runs none of the three and still reports success.
@@ -113,13 +114,17 @@
  (action (run %{test} -e)))
 
 ;; Capture sets (ocap phase 8a): the set algebra, capture inference and the
-;; golden `--dump-captures` corpus.  Kept out of the `rest` and `compiler`
-;; shards like run_dep_grants: CI runs it in the `forge` shard through its
-;; alias, @test/runtest-run_captures.
+;; golden `--dump-captures` corpus, and the soundness oracle.  CI runs it as
+;; its own ubuntu shard (`captures`) through its alias,
+;; @test/runtest-run_captures: about 15 CPU-minutes of cold `march --check`
+;; and interpreter runs, which no other shard has room for.  Not on macOS:
+;; nothing in it depends on the OS (typechecker and interpreter only).
 ;; UPDATE_CAPTURES=1 ./_build/default/test/run_captures.exe -e
 (test
  (name run_captures)
- (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))   ; see "CI sharding" above
+ (enabled_if
+  (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
+       (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))   ; see "CI sharding" above
  (modules run_captures test_capture_set test_captures test_capture_golden test_capture_oracle)
  (libraries march_test_helpers march_caps march_ast march_parser march_desugar march_typecheck march_errors alcotest unix str)
  (deps ../bin/main.exe (source_tree ../stdlib) (source_tree captures) (source_tree cap_conformance)
