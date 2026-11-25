@@ -17,7 +17,8 @@ not spell. Those are every impl of an interface method (`Tir_names.find_iface_im
 design doc ("Implicit-callee audit"); Fusion and Defun mint only functions they create.
 
 **Roots.** `Dce.root_names` (the roots the later DCE passes use), the pipeline's
-`extra_roots`, remote-ref targets, `__rpc_stub`s, and `@[no_alloc]` functions.
+`extra_roots`, remote-ref targets, `__rpc_stub`s, and every policy-tagged function (`Tagged(_, NoAlloc|NoPanic|NoIO|Realtime)`: nothing calls
+one, and the policy audit after Fusion and the allocation contract read them).
 
 **Tripwire.** The prune returns the set it removed, and every `fn_table` lookup in Mono goes
 through a helper that raises if the name is in it: `internal error: Mono resolved <callee>
@@ -29,9 +30,13 @@ shape of issue #1172, where a missing `__ord_lt` left `<` to the emitter).
 
 ## Tests
 
-- `test/test_dce_pre_mono.ml` (suite `dce-pre-mono` in `run_codegen`), 14 cases on hand-built
-  TIR: each edge kind, duplicate names, roots, fail open/closed, and the tripwire on an ord
-  helper and on an interface impl.
+- `test/test_dce_pre_mono.ml` (suite `dce-pre-mono` in `run_codegen`), 17 cases on hand-built
+  TIR: each edge kind, duplicate names, roots (including a remote-ref target and a function
+  with a `Tagged` policy parameter), a top-level function reached only through a local of the
+  same name, fail open/closed, and the tripwire on an ord helper and on an interface impl.
+- `test/test_alloc_contract.ml`, "NoPanic policy audits an unreached fn": a `NoPanic`-tagged
+  function nothing calls is still audited and rejected. Red before policy-tagged functions
+  were pinned (the program compiled).
 - `test/native/pre_mono_prune_ord_show.march`: tuples, a record and an ADT under each ordering
   operator, generic `when Ord`/`when Show` callers, hand-written `Show` through `to_string`, a
   function used only as a value, a local named like a top-level function. Same output
@@ -51,12 +56,15 @@ emitted in a different order and the emitter's fresh-name counter is module-wide
 merge base `97b33cb18`, 476 of 528 programs are then identical. The other 52 differ in three
 ways, and nothing else:
 
-1. **A constructor of a same-named stdlib type resolves to another of those types** (20
-   programs: 18 through `HashMap`/`Map`/`Hamt`'s `HEntry`, plus
-   `native_h_sigil_safe_collision` and `native_session_party_released`). The cell's collision
-   tag and header type id change together at every construction and match. This is an existing
-   ambiguity that the prune only re-rolls: see
-   `specs/todos/2026-11-25-ctor-entry-suffix-fallback-hashtbl-order.md`.
+1. **A constructor of a same-named type resolves to another of those types** (20 programs: 18
+   through `HashMap`/`Map`/`Hamt`'s `HEntry`, plus `native_h_sigil_safe_collision` and
+   `native_session_party_released`). The cell's collision tag and header type id change
+   together at every construction and match. `Llvm_data.ctor_entry` picks among same-arity
+   candidates by hash-table order, so the pick was already arbitrary and the prune re-rolls it.
+   For `HEntry` the layouts are identical and only the label moves. For `Safe` they are not
+   (`Html.Safe(String)` against a fixture's `Other.Safe(Int)`): the pick was the wrong layout
+   before, is the right one now for small programs, and can flip back as the program grows.
+   This is not fixed here: `specs/todos/2026-11-25-ctor-entry-suffix-fallback-hashtbl-order.md`.
 2. **A dead prelude `tail` is no longer emitted** (8 programs). Before, a stdlib function the
    program never reached made Mono keep `tail`, and DCE then kept it because a lifted closure
    has a parameter named `tail`. Nothing called it.
@@ -68,6 +76,10 @@ ways, and nothing else:
 
 All 52 were compiled and run with both compilers: 50 print the same output (one benchmark's
 timings aside) and 2 need a peer and time out the same way under both.
+
+One more difference in what the compiler reports, not in what it emits: Mono no longer
+visits unreachable functions, so a diagnostic it raised while specializing one (a
+representation disagreement, the specialization limit) no longer fires for dead code.
 
 ## Measured
 

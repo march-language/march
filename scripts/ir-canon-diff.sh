@@ -12,12 +12,15 @@
 # or one line of anything else: globals, declares, metadata), masks the
 # compiler's numbered names, sorts the chunks, and diffs the result.
 #
-# Masked: `$nafuse_lam<N>` / `$lam<N>`-style numbered suffixes after a `$`;
+# Masked: the counter of a compiler-generated name (`$lam3`, `$nafuse_lam12`,
+# `$t7`, `$jp4`, `$rc_2`, `$f1`, `$dx66`: the list is GEN below);
 # the trailing counter of every register and label (`%ld355`, `case_br30:`);
 # string-pool and record-shape global indices (`@.str121`, `@.fnt.s7`); the
 # inliner's instance suffix (`_i85`); metadata numbers.  NOT masked: opcodes,
-# types, constants, string contents, and every function symbol, so a changed
-# body or a call that now resolves to a different function still shows.
+# types, constants, string contents, and every other part of a function
+# symbol, so a changed body or a call that now resolves to a different
+# function still shows.  Two functions that differ only in a masked counter
+# (`$lam3` against `$lam4`) are indistinguishable here.
 #
 # A masked name can hide a renumbering that swaps two distinct functions with
 # identical bodies; that is the intended blind spot.  It cannot hide a function
@@ -56,8 +59,11 @@ for line in text.split("\n"):
         chunks.append("\n".join(cur)); cur = []
 if cur:
     chunks.append("\n".join(cur))
+# Compiler-generated numbered names only.  A `$` followed by anything else is
+# part of a symbol (`Ord$Tuple2.compare`, `f$Int64`) and is left alone.
+GEN = r"nafuse_lam|lam|jp|t|rc_|f|dx|df|dfree|dlast|dp|db|cres|cfree"
 mask = [
-    (re.compile(r"(\$[A-Za-z_]*?)\d+"), r"\1N"),   # $nafuse_lam12, $lam3, $7
+    (re.compile(r"\$(" + GEN + r")\d+"), r"$\1N"),   # $nafuse_lam12, $lam3, $t7
     (re.compile(r"%\d+\b"), "%N"),                 # numbered locals
     (re.compile(r"!\d+\b"), "!N"),                 # numbered metadata
     (re.compile(r"@\.fnt\.s\d+"), "@.fnt.sN"),      # fn-table string pool index
@@ -73,14 +79,18 @@ labeldef = re.compile(r"^([A-Za-z_.]+?)\d+:", re.M)
 strglob = re.compile(r"@\.(str|strcell|recshape)\d+")
 def mask_local(m):
     return trail.sub("N", inl.sub("_iN", m.group(0)))
-out = []
-for c in chunks:
+def mask_code(c):
     for rx, rep in mask:
         c = rx.sub(rep, c)
     c = local.sub(mask_local, c)
     c = labeldef.sub(r"\1N:", c)
-    c = strglob.sub(r"@.\1N", c)
-    out.append(c)
+    return strglob.sub(r"@.\1N", c)
+# String constants (`c"..."`) are data: never masked.
+strconst = re.compile(r'(c"(?:[^"\\]|\\.)*")')
+out = []
+for c in chunks:
+    parts = strconst.split(c)
+    out.append("".join(p if i % 2 else mask_code(p) for i, p in enumerate(parts)))
 out.sort()
 sys.stdout.write("\n".join(out) + "\n")
 PY
@@ -96,8 +106,11 @@ for b in "$BASE"/*.ll; do
     echo "MISSING in new: $name"; missing=$((missing + 1)); continue
   fi
   if cmp -s "$b" "$n"; then continue; fi
-  canon "$b" > "$OUT/$name.base"
-  canon "$n" > "$OUT/$name.new"
+  # An empty or failed canonicalisation would compare equal on both sides.
+  canon "$b" > "$OUT/$name.base" && [ -s "$OUT/$name.base" ] \
+    || { echo "FATAL: could not canonicalise $b"; exit 2; }
+  canon "$n" > "$OUT/$name.new" && [ -s "$OUT/$name.new" ] \
+    || { echo "FATAL: could not canonicalise $n"; exit 2; }
   if cmp -s "$OUT/$name.base" "$OUT/$name.new"; then
     rm -f "$OUT/$name.base" "$OUT/$name.new"
   else

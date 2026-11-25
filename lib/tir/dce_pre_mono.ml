@@ -1,10 +1,13 @@
 (** Reachability prune before Mono.
 
     Lowering prepends the whole stdlib, and Mono seeds every monomorphic
-    function, so Mono, Fusion and Defun used to process ~4,500 functions for a
+    function, so Mono, Fusion and Defun used to process ~6,300 functions for a
     program that reaches a few dozen.  This pass keeps only what the roots
     reach.  It is a compile-time optimisation: the early DCE after Defun would
-    drop the same functions anyway.
+    drop the same functions anyway.  The one consumer that sits between Mono
+    and that DCE, the policy audit run as the pipeline's [after_fusion] hook,
+    reads every [Tagged(_, P)] function, and nothing calls one; those are
+    pinned as roots (so is everything the allocation contract checks).
 
     Edges out of a reached function are every name its body MENTIONS (not only
     its free variables: Mono resolves names with its own, narrower notion of
@@ -72,7 +75,7 @@ let prune ?(iface_methods = Hashtbl.create 0) ~(extra_roots : string list)
   let pins = List.filter_map (fun (fd : Tir.fn_def) ->
       let n = fd.Tir.fn_name in
       if Hashtbl.mem wanted n || is_rpc_stub n
-         || Alloc_contract.has_noalloc_policy fd
+         || Policy_dce.policies_of_fn fd <> []
       then Some n else None) m.Tir.tm_fns in
   let roots =
     Dce.root_names ~fail_open

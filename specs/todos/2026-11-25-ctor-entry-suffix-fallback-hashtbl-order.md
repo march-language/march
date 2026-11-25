@@ -16,11 +16,29 @@ the module carries. On `bench/hash_map_bench.march` before the prune, `HashMap` 
 `HLeaf` and `HBranch` cells as `Hamt.HEntry` and `HCollision` cells as `HashMap.HEntry`; after
 it, `HLeaf` is `HashMap.HEntry` and `HBranch` is still `Hamt.HEntry`.
 
-It is consistent inside one build (every lookup of one key gets one answer, so construction
-and matching agree), and the three `HEntry` declarations have the same layout, so nothing
-misbehaves today: 20 programs changed their pick under the prune and all print the same
-output. Two other fixtures moved the same way: `native_h_sigil_safe_collision` (`Safe` now
-resolves to `Html.Safe`) and `native_session_party_released`.
+It is consistent inside one build: every lookup of one key gets one answer, so construction
+and matching agree. For the three `HEntry` declarations the layouts are the same, so the wrong
+pick only mislabels the cell. 20 programs changed their pick under the prune and all print the
+same output.
+
+**It is already a wrong-layout pick in one fixture.** `test/native/h_sigil_safe_collision.march`
+declares `Other.Safe = Safe(Int)` beside the stdlib's `Html.Safe = Safe(String)`. When the
+fallback picks `Other.Safe` for `Html.raw`'s cell, the String payload is emitted as an Int
+field (`ptrtoint`, a conditional untag, `store i64`). The fixture's output happens to match
+either way. Measured in the final review by adding K extra closures to its `main`:
+
+| K | with the pre-mono prune | without it |
+|---|---|---|
+| 0, 3, 10, 30, 80 | `Html.Safe` (right) | `Other.Safe` (wrong layout) |
+| 200 | `Other.Safe` (wrong layout) | `Other.Safe` (wrong layout) |
+
+So before the prune the pick was wrong but stable for this program at every size tried; with
+the prune it is right for small programs and flips with the number of types the user's own
+program adds. Whether the mis-typed field can corrupt or leak at run time has not been shown.
+`native_session_party_released` moved its pick the same way.
+
+**Priority: high.** The prune did not create this, but it makes the pick depend on program
+size.
 
 What is wrong with it:
 

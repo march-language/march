@@ -124,6 +124,43 @@ let test_fail_open () =
   Alcotest.check strs "no roots: an analysis keeps nothing" []
     (names (fst (prune ~fail_open:false m)))
 
+let tagged policy = Tir.TCon ("Tagged", [Tir.TInt; Tir.TCon (policy, [])])
+
+let test_policy_fns_are_pinned () =
+  (* The policy audit runs after Fusion and reads every Tagged function, and
+     nothing calls one, so the prune must keep them and what they call. *)
+  let m = module_of
+      [ fn "np_helper" (lit 1); fn "unused" (lit 0);
+        fn "np" ~params:[v "t" (tagged "NoPanic")] (call "np_helper" []);
+        fn "nio" ~params:[v "t" (tagged "NoIO")] (lit 2);
+        fn "na" ~params:[v "t" (tagged "NoAlloc")] (lit 3);
+        fn "rt" ~params:[v "t" (tagged "Realtime")] (lit 4);
+        fn "main" (lit 5) ] in
+  let m', gone = prune m in
+  Alcotest.check strs "every policy-tagged fn and its callees survive"
+    ["np_helper"; "np"; "nio"; "na"; "rt"; "main"] (names m');
+  Alcotest.check strs "removed" ["unused"] (removed gone)
+
+let test_bound_local_keeps_top_level () =
+  (* Mono resolves a fn-typed atom by name without checking shadowing, so a
+     local named like a top-level function must keep that function. *)
+  let local = v "shadow" int_fn in
+  let m = module_of
+      [ fn "shadow" (lit 1); fn "unused" (lit 0);
+        fn "main" ~params:[local] (Tir.EAtom (Tir.AVar local)) ] in
+  let m', pruned = prune m in
+  Alcotest.check strs "the top-level namesake is kept" ["shadow"; "main"] (names m');
+  let (_ : Tir.tir_module) = Mono.monomorphize ~pruned m' in
+  ()
+
+let test_remote_ref_target_is_root () =
+  let str s = Tir.ALit (March_ast.Ast.LitString s) in
+  let m = module_of
+      [ fn "Svc.handler" (lit 1); fn "unused" (lit 0);
+        fn "main" (call "remote_ref_hashes" [str "Svc"; str "handler"]) ] in
+  Alcotest.check strs "a remote-ref target is kept" ["Svc.handler"; "main"]
+    (names (fst (prune m)))
+
 let raises_tripwire ~mentions f =
   match f () with
   | (_ : Tir.tir_module) -> Alcotest.fail "expected the pruned-name tripwire"
@@ -180,6 +217,11 @@ let suites =
        Alcotest.test_case "tests are roots" `Quick test_no_main_keeps_tests;
        Alcotest.test_case "exports, extra roots, rpc stubs" `Quick test_roots;
        Alcotest.test_case "fail open / closed" `Quick test_fail_open;
+       Alcotest.test_case "policy-tagged fns are pinned" `Quick test_policy_fns_are_pinned;
+       Alcotest.test_case "bound local keeps its namesake" `Quick
+         test_bound_local_keeps_top_level;
+       Alcotest.test_case "remote-ref target is a root" `Quick
+         test_remote_ref_target_is_root;
        Alcotest.test_case "tripwire: ord helper" `Quick test_tripwire_fires_on_ord_helper;
        Alcotest.test_case "tripwire: iface impl" `Quick test_tripwire_fires_on_iface_impl;
        Alcotest.test_case "no tripwire without a prune" `Quick
