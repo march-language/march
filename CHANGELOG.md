@@ -1344,6 +1344,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Udp.recv` and `Udp.recv_batch` no longer drop a datagram when the socket is closed
+  right after it arrives.** A receive that was waiting when another task closed the socket
+  answered `Err(Closed)` even if a datagram had already reached the socket, and the
+  datagram was discarded. It now returns the datagrams; only a receive with nothing to
+  return answers `Err(Closed)`.
 - **The native REPL keeps its authority after a panic inside a function with `needs`.** A
   panic raised in such a function left that function's `needs` in force for every later
   input, so an operation the session was allowed was refused "by function f's needs". The
