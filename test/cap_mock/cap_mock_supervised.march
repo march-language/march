@@ -1,19 +1,16 @@
 mod CapMockSupervised do
-  -- Capability mocking reaching a SUPERVISED child.
+  -- A mock reaching a SUPERVISED child (ocap phase 7).
   --
   -- A `supervise` block's children are not spawned by user code: the
-  -- supervisor's own spawn glue spawns them, through `spawn_supervised`, a
-  -- different shape from the plain `spawn(Child)` that capture-at-spawn
-  -- matched. So a mock that reached a plain actor never reached a supervised
-  -- one. Now the supervisor's spawn glue carries its children's capabilities
-  -- as parameters, supplied at the user's `spawn(Sup)` site, and attaches
-  -- each child's record right after `spawn_supervised`.
+  -- supervisor's own spawn glue spawns them. Each child still runs under the
+  -- authority current where its supervisor was spawned, and a restart
+  -- restores the authority of the slot's first spawn, so the mock layer
+  -- reaches both.
   --
   -- Three lines, and which are mocked is the whole test:
-  --   in    : the child of a supervisor spawned inside with_cap -> mocked
+  --   in    : the child of a supervisor spawned inside the mock -> mocked
   --   again : the SAME child slot after `kill` forced a restart -> still
-  --           mocked, because the runtime carries the record over to the
-  --           replacement (a respawn does not go through the spawn glue)
+  --           mocked (the restart keeps the first spawn's authority)
   --   out   : the child of a supervisor spawned outside, sent to AFTER the
   --           block closes -> real
   needs Actor.Introspect
@@ -41,17 +38,15 @@ mod CapMockSupervised do
 
   fn child_of(intro : Cap(Actor.Introspect), sup) do
     match get_actor_field(sup, "w") do
-      None    -> Actor.pid_from_int(intro, -1)
-      Some(n) -> Actor.pid_from_int(intro, n)
+      None    -> Authority.must(Actor.pid_from_int(-1))
+      Some(n) -> Authority.must(Actor.pid_from_int(n))
     end
   end
 
-  fn main(c : Cap(IO.Console), io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let outside = spawn(Sup)
-    let mock = cap_impl(c, { cap_ops_empty(c) with
-      print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) })
-    with_cap(mock, fn _ -> do
+    mock IO.Console with { print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) } do
       let inside = spawn(Sup)
       send(child_of(intro, inside), Say("in"))
       run_until_idle()
@@ -59,7 +54,7 @@ mod CapMockSupervised do
       run_until_idle()
       send(child_of(intro, inside), Say("again"))
       run_until_idle()
-    end)
+    end
     send(child_of(intro, outside), Say("out"))
     run_until_idle()
   end

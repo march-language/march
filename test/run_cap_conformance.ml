@@ -5,6 +5,8 @@
     - [-- GRANT: <scopes>]: exported as [MARCH_GRANT] (the launch grant).
       [-- GRANT:] with nothing after it exports the empty string, which every
       runtime reads as unset. Without the header [MARCH_GRANT] is unset.
+    - [-- TEST]: a test build (ocap phase 7, `mock` blocks): every mode
+      runs with [--test], and the REPL (never a test build) does not run it.
     - [-- EXIT-ONLY]: compare only the exit status and the first line of
       stderr (a launch error), and require stdout to be empty.
     - [-- DEP: <package> <dir> <scope text>] (repeatable; ocap phase 6,
@@ -122,6 +124,15 @@ let js_unsupported : (string * string) list = [
   ("restrict_task_inherits", "the JS target has no tasks");
   ("grant_actor_restricted_for_life", "the JS target has no tasks");
   ("grant_task_inherits", "the JS target has no tasks");
+  ("mock_actor", "the JS target has no tasks");
+  ("mock_task", "the JS target has no tasks");
+  ("mock_admits_handled", "the JS target has no `file_read`, which the test build's dispatch wrapper names");
+  ("mock_scoped", "the JS target has no `file_read`, which the test build's dispatch wrapper names");
+  ("mock_unhandled_refused", "the JS target has no `file_exists` or `process_exit`");
+  ("mock_vault", "the JS target has no tables (`vault_new`, `vault_get`) or tasks");
+  ("mock_vault_open_fails", "the JS target has no tables (`vault_new`, `vault_get`)");
+  ("observer_panic_in_frame_restores", "the JS target has no tasks");
+  ("on_stop_panic_in_frame", "the JS target has no tasks");
 ]
 
 (* Fixtures the REPL mode does not run, each with the reason. *)
@@ -130,6 +141,8 @@ let repl_unsupported : (string * string) list = [
   ("actor_restart_keeps_authority", "actors: the REPL mode runs the fixtures that use no actors");
   ("restrict_actor_restricted_for_life", "actors: the REPL mode runs the fixtures that use no actors");
   ("grant_actor_restricted_for_life", "actors: the REPL mode runs the fixtures that use no actors");
+  ("observer_panic_in_frame_restores", "actors: the REPL mode runs the fixtures that use no actors");
+  ("on_stop_panic_in_frame", "actors: the REPL mode runs the fixtures that use no actors");
   ("grant_wider_launch_error",
    "the REPL requests the full authority (design §21), so no grant is wider than its request");
   ("grant_default_method",
@@ -251,13 +264,14 @@ let repl_grant (src : string) (grant : string option) : string option =
 
 let modes = [ "interp"; "jit"; "compiled"; "js"; "repl" ]
 
-let script ~dir ~name ~grant ~repl_grant ~deps_env =
+let script ~dir ~name ~grant ~repl_grant ~deps_env ~test =
   let exe = Filename.quote (Test_helpers.find_main_exe ()) in
   let home = Filename.quote (Lazy.force private_home) in
   let f = Filename.quote (name ^ ".march") in
   let js_ok =
     Lazy.force have_node && not (List.mem_assoc name js_unsupported) in
-  let repl_ok = not (List.mem_assoc name repl_unsupported) in
+  let repl_ok = not (List.mem_assoc name repl_unsupported) && not test in
+  let tflag = if test then " --test" else "" in
   let grant_env = match grant with
     | None -> "unset MARCH_GRANT;"
     | Some g -> Printf.sprintf "export MARCH_GRANT=%s;" (Filename.quote g) in
@@ -283,7 +297,7 @@ let script ~dir ~name ~grant ~repl_grant ~deps_env =
         echo $? > repl.code); \
      fi; true"
     (Filename.quote dir) home grant_env deps_env
-    exe f exe f exe f js_ok exe f
+    (exe ^ tflag) f (exe ^ tflag) f (exe ^ tflag) f js_ok (exe ^ tflag) f
     repl_ok exe repl_grant_arg f
 
 type run = { out : string; err : string; code : int }
@@ -353,9 +367,10 @@ let run_all (names : string list) : (string, (string * run) list) Hashtbl.t =
     write_file (Filename.concat tmp (name ^ ".march")) src;
     let hs = headers src in
     let grant = List.assoc_opt "GRANT" hs in
-    let repl_grant =
-      if List.mem_assoc name repl_unsupported then None else repl_grant src grant in
-    if not (List.mem_assoc name repl_unsupported) then
+    let test = List.mem_assoc "TEST" hs in
+    let no_repl = List.mem_assoc name repl_unsupported || test in
+    let repl_grant = if no_repl then None else repl_grant src grant in
+    if not no_repl then
       (write_file (Filename.concat tmp "repl.in")
          (String.concat "" (List.map (fun l -> l ^ "\n") (main_body src)));
        Unix.mkdir (Filename.concat tmp "repl") 0o755;
@@ -364,7 +379,7 @@ let run_all (names : string list) : (string, (string * run) list) Hashtbl.t =
     let deps_env = setup_deps ~tmp ~src in
     let pid =
       Unix.create_process "/bin/sh"
-        [| "/bin/sh"; "-c"; script ~dir:tmp ~name ~grant ~repl_grant ~deps_env |]
+        [| "/bin/sh"; "-c"; script ~dir:tmp ~name ~grant ~repl_grant ~deps_env ~test |]
         Unix.stdin Unix.stdout Unix.stderr in
     Hashtbl.replace running pid (name, tmp)
   in
@@ -428,7 +443,7 @@ let case name =
           if m = "js" && r.code = -2 then
             print_endline "  SKIP: node not on PATH or fixture js_unsupported"
           else if m = "repl" && r.code = -2 then
-            print_endline "  SKIP: fixture repl_unsupported"
+            print_endline "  SKIP: fixture repl_unsupported, or a test build"
           else begin
             let got = rendered ~exit_only r in
             if update_mode && m = "interp" then write_file expected_path got;

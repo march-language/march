@@ -98,6 +98,9 @@ val fn_needs_tbl : (string, fn_needs) Hashtbl.t
     [lower_module] lowered ([Auth_rt.restricts]'s input). *)
 val restrict_sites : (string, Lower_state.restrict_site) Hashtbl.t
 
+(** How many [mock] blocks the last [lower_module] lowered (ocap phase 7). *)
+val mock_sites : int ref
+
 (** Final TIR fn name -> its package's grant, for every fn the last
     [lower_module] lowered that a granted dependency package defines
     ([Auth_rt.grants]'s input; empty without a grants file). *)

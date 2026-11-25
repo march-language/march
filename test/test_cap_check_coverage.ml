@@ -39,8 +39,8 @@ let allowlist : ((string * string) * string) list = [
   (("ClusterNode.tick_loop", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("ClusterNode.watch_cert_files", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("ClusterNode.replace_checked", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
-  (("ClusterNode.start", "tcp_listen"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
-  (("ClusterNode.start", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.start_checked", "tcp_listen"), "its only caller, ClusterNode.start, checks IO.Cluster first (ocap phase 7)");
+  (("ClusterNode.start_checked", "task_spawn"), "its only caller, ClusterNode.start, checks IO.Cluster first (ocap phase 7)");
   (("Config.global_table", "vault_new"), "Config's own table (\"__march_config__\"), not one a caller names: the stdlib's state, charged to Config's IO.Mut as today");
   (("Config.global_table", "vault_whereis"), "Config's own table (\"__march_config__\"), not one a caller names: the stdlib's state, charged to Config's IO.Mut as today");
   (("File.open_raw", "file_open"), "private: the open behind File.open/with_open/with_lines/with_chunks/each_line/each_chunk, each of which calls Authority.check(\"IO.FileRead\", path) first");

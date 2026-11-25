@@ -1,6 +1,7 @@
 mod SupervisorOneForOneRestart do
   needs IO
   needs IO.Console
+  needs Actor.Introspect
 
   actor Worker do
     state { count : Int }
@@ -30,21 +31,20 @@ mod SupervisorOneForOneRestart do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
     let sup = spawn(Sup)
     let wa1 = child_int(sup, "wa")
     let wb1 = child_int(sup, "wb")
 
-    kill(Actor.pid_from_int(intro, wa1))
+    kill(Authority.must(Actor.pid_from_int(wa1)))
 
     let wa2 = child_int(sup, "wa")
     let wb2 = child_int(sup, "wb")
 
     println(bool_to_string(wa2 != wa1))
     println(bool_to_string(wb2 == wb1))
-    println(bool_to_string(is_alive(Actor.pid_from_int(intro, wa2))))
-    println(bool_to_string(is_alive(Actor.pid_from_int(intro, wb2))))
+    println(bool_to_string(is_alive(Authority.must(Actor.pid_from_int(wa2)))))
+    println(bool_to_string(is_alive(Authority.must(Actor.pid_from_int(wb2)))))
   end
 
 end

@@ -10,6 +10,7 @@
 mod Main do
   needs IO
   needs IO.Console
+  needs Actor.Introspect
 
   actor Worker do
     state { n : Int }
@@ -43,21 +44,20 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
     let boss = spawn(Boss)
     let a1 = child_int(boss, "a")
     let t1 = child_int(boss, "t")
 
     -- Crash the permanent child; one_for_all sweeps both.
-    send(Actor.pid_from_int(intro, a1), Poison())
+    send(Authority.must(Actor.pid_from_int(a1)), Poison())
     run_until_idle()
 
     let a2 = child_int(boss, "a")
     let t2 = child_int(boss, "t")
     println("permanent sibling respawned: " ++ bool_to_string(a2 != a1))
-    println("permanent sibling alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, a2))))
+    println("permanent sibling alive: " ++ bool_to_string(is_alive(Authority.must(Actor.pid_from_int(a2)))))
     println("temporary sibling not respawned: " ++ bool_to_string(t2 == t1))
-    println("temporary sibling dead: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, t1)) == false))
+    println("temporary sibling dead: " ++ bool_to_string(is_alive(Authority.must(Actor.pid_from_int(t1))) == false))
   end
 end

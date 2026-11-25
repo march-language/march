@@ -1,0 +1,45 @@
+-- `__try_call` (the Bool-returning catch behind `Result.try_call` and the
+-- property runner) puts back the authority it was entered under, as
+-- `__try_call_val` and `try_finally` do (panic_caught_mortal_mark). The
+-- caught value is made in `main`, so it holds no reference to g's frame.
+mod PanicCaughtTryCall do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(target : String) : String do
+    match Authority.check("IO.FileRead", target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn caught(r : Result(Bool, String)) : String do
+    match r do
+    Ok(_) -> "ok"
+    Err(_) -> "caught"
+    end
+  end
+
+  fn h(p : String) : Bool needs IO.Console, IO.FileRead("/srv/data/x/") do
+    println("in h: " ++ probe(p))
+    panic("boom")
+  end
+
+  fn g(act : Bool -> Bool) : String needs IO.Console, IO.FileRead("/srv/data/") do
+    let a = caught(__try_call(act))
+    "g after try_call: " ++ a ++ ", " ++ probe("/srv/data/a") ++ ", " ++ probe("/srv/b")
+  end
+
+  fn f(act : Bool -> Bool) : String needs IO.Console, IO.FileRead("/srv/") do
+    println(g(act))
+    println(g(act))
+    println(g(act))
+    "f after g: " ++ probe("/srv/b") ++ ", " ++ probe("/etc/hosts")
+  end
+
+  fn main() do
+    let act = fn _ -> h("/srv/data/a")
+    println(f(act))
+    println("main: " ++ probe("/etc/hosts"))
+  end
+end

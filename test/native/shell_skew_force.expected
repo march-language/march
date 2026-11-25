@@ -39,7 +39,7 @@ Ok({ n: 1 })
 exit=1
 audit:
 "src":"evens(4)","skew":1,"result":"ok"
-"src":"let c = Actor.pid_from_int(intro, 0)","result":"ok"
+"src":"let c = Authority.must(Actor.pid_from_int(0))","result":"ok"
 "src":"let f = fn x -> x + 1","result":"ok"
 "src":"nap() + List.length(evens(2))","skew":1,"result":"policy"
 "src":"Actor.inspect_state(debug, c, 500)","result":"ok"

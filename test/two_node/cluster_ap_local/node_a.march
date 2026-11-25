@@ -124,7 +124,7 @@ mod ClusterApLocal do
 
   fn main(c : Cap(IO)) do
     let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "local-secret", 1)
-    match ClusterNode.start(c, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         match Echo_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st)) do

@@ -1,17 +1,13 @@
 mod CapMockActorMany do
-  -- An actor that one handler gives a captured capability, sent MANY messages
-  -- that go to its OTHER handlers, from a test-only build (no `main`).
+  -- An actor spawned inside a `mock`, sent MANY messages, from a test-only
+  -- build (no `main`) (ocap phase 7).
   --
-  -- In a --test build the spawn site attaches the actor's capability record to
-  -- its runtime metadata, and the dispatch reads it back on every message. An
-  -- arm that uses no capability releases what it read. When the read handed
-  -- back the metadata's own reference rather than a new one, the second message
-  -- freed the record and a later one died with "RC underflow" (or a SIGBUS
-  -- once the memory was reused) — every conduit test that reached depot's Pool
-  -- did. `Log` is never sent: its `println` is only what makes the actor
-  -- capture a capability at all, as `Shutdown` did for Pool. cap_mock_actor
-  -- sends one message per actor and has a `main`, so it can't see this; with a
-  -- `main` the dispatch doesn't release the record, without one it does.
+  -- The actor keeps the authority of its spawn, mock layer included, and
+  -- enters it for every message. Each message must leave the layer list's
+  -- reference counts as it found them: a handler that dropped one reference
+  -- too many would free the list on the second message and a later one would
+  -- die with "RC underflow". `Log` is never sent; its `println` is what makes
+  -- the actor reach an interceptable operation at all.
   needs IO.Console
   needs IO.Spawn
   use Test
@@ -40,7 +36,9 @@ mod CapMockActorMany do
   end
 
   test "a capturing actor survives many messages to its cap-free handlers" do
-    let p = spawn(Logger)
+    let p = mock IO.Console with { print_line: Some(fn _ -> ()) } do
+      spawn(Logger)
+    end
     bump_n(p, 50)
     let t = Authority.must(Task.async(fn () -> actor_call(p, Count(0), 5000)))
     match task_await_unwrap(t) do

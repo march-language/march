@@ -1,0 +1,10 @@
+mod Main do
+  needs IO.Console
+  needs IO.Clock
+
+  fn main() do
+    mock IO.Clock with { unix_time_ms: Some(fn _ -> 0) } do
+      println(show(System.now_ms()))
+    end
+  end
+end

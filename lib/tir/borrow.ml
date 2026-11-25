@@ -447,6 +447,8 @@ let extern_borrow_table : (string * bool list) list = [
   ("cap_restore",          [false]);
   ("cap_push",             [false]);
   ("cap_enter",            [true]);
+  (* ocap phase 7: the registry takes its own reference to the handler. *)
+  ("mock_register",        [true]);
   ("cap_launch_fail",      [true]);
   ("cap_rt_parse",         [true]);
   ("cap_rt_admits",        [true; true; true; true]);
@@ -772,7 +774,7 @@ let extern_owned_builtins : string list = [
     "native_u8_arr_set"; "native_u8_arr_sort";
     "tcp_connect"; "tcp_connect_timeout"; "http_serialize_request"; "http_parse_response";
     "csv_open"; "csv_next_row"; "csv_close"; "own"; "cap_narrow"; "mint_cap";
-    "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps";
+    "cap_impl"; "cap_dict";
     "register_resource";
     "register_actor_on_stop";
     (* Observe plan R4: registration reads two static closures; the inspect

@@ -43,7 +43,7 @@ mod RemoteEpochA do
   fn main(c : Cap(IO)) do
     let seed = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_B")))
     let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Cons(seed, Nil), "epoch-secret", 1)
-    match ClusterNode.start(c, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         let to = sink(h, 30000)

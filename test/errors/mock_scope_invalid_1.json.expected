@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/mock_scope_invalid_1.march","start_line":7,"start_col":4,"end_line":7,"end_col":8,"message":"A `mock` covers one capability kind, but this one names `IO.Clock` and `IO.Console`: write one `mock` block per kind, nested.","code":"mock_scope_invalid","fix":null,"labels":[],"notes":[],"category":"CAPABILITY"}

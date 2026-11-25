@@ -147,7 +147,7 @@ mod StreamPeers do
     if seed == 50 do ()
     else
       let t = counting(tally)
-      let s = Session.attach(c, t.ops)
+      let s = Authority.must(Session.attach(t.ops))
       let _ = if mode == 0 do
         -- real Cons against a chaos Prod
         let _ = quiet_cons(s, Stream_Cons.register(s, 0), 3)
@@ -173,7 +173,7 @@ mod StreamPeers do
     if seed == 50 do ()
     else
       let t = counting(tally)
-      let s = Session.attach(c, t.ops)
+      let s = Authority.must(Session.attach(t.ops))
       let _ = Fan_C.chaos(s, Fan_C.register(s, 0), seed)
       let _ = Fan_A.chaos(s, Fan_A.register(s, 0), seed + 100)
       let _ = Fan_B.chaos(s, Fan_B.register(s, 0), seed + 200)
@@ -186,7 +186,7 @@ mod StreamPeers do
     if seed == 50 do ()
     else
       let t = counting(tally)
-      let s = Session.attach(c, t.ops)
+      let s = Authority.must(Session.attach(t.ops))
       let _ = role_i(s, Logging_I.register(s, 0), tally)
       let _ = Logging_L.chaos(s, Logging_L.register(s, 0), seed)
       let _ = Logging_C.chaos(s, Logging_C.register(s, 0), seed + 500)
@@ -198,7 +198,7 @@ mod StreamPeers do
   fn main(c : Cap(IO)) do
     IO.puts("-- scripted Cons against the real Prod")
     let t1 = Session.in_process()
-    let s1 = Session.attach(c, t1.ops)
+    let s1 = Authority.must(Session.attach(t1.ops))
     let _ = Stream_Cons.script(s1, Stream_Cons.register(s1, 0), [
       Stream_Cons.Expect_Msg_Prod_Cons_1(fn n -> Authority.ignore(IO.puts("script: Cons expected Item, got " ++ int_to_string(n)))),
       Stream_Cons.Choose_more(true),
@@ -211,7 +211,7 @@ mod StreamPeers do
 
     IO.puts("-- scripted Prod against the real Cons")
     let t2 = Session.in_process()
-    let s2 = Session.attach(c, t2.ops)
+    let s2 = Authority.must(Session.attach(t2.ops))
     let _ = cons(s2, Stream_Cons.register(s2, 0), 2)
     let _ = Stream_Prod.script(s2, Stream_Prod.register(s2, 0), [
       Stream_Prod.Send_Msg_Prod_Cons_1(10),
@@ -224,7 +224,7 @@ mod StreamPeers do
 
     IO.puts("-- Fan: scripted A and B against the real C")
     let t3 = Session.in_process()
-    let s3 = Session.attach(c, t3.ops)
+    let s3 = Authority.must(Session.attach(t3.ops))
     let _ = role_c(s3, Fan_C.register(s3, 0))
     let _ = Fan_A.script(s3, Fan_A.register(s3, 0), [
       Fan_A.Send_Number(7),

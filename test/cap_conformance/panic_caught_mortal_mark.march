@@ -1,0 +1,84 @@
+-- A panic caught where the authority the catch must put back is a
+-- refcounted cell, not the immortal launch layer or a cached first frame:
+-- scoped `f` calls scoped `g` (a different `needs`, so g's frame is pushed
+-- on a non-empty slot and allocated), `g` catches, and scoped `h` under it
+-- panics, once directly and once two frames deeper through `k`. The catch
+-- is repeated so a count that drops one reference too many per catch frees
+-- g's frame while g still runs under it. Probed after each catch in `g`,
+-- then in `f`, then in `main`.
+--
+-- `g_outside` catches function values made in `main`. A closure made
+-- inside `g` holds a reference to g's frame and a panic abandons it, which
+-- would hide a count one too low; these values hold none, so the only
+-- reference to g's frame left after the catch is the one the catch put
+-- back.
+mod PanicCaughtMortalMark do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(target : String) : String do
+    match Authority.check("IO.FileRead", target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn caught(r : Result(Int, String)) : String do
+    match r do
+    Ok(_) -> "ok"
+    Err(_) -> "caught"
+    end
+  end
+
+  fn k(p : String) : Int needs IO.Console, IO.FileRead("/srv/data/x/y/") do
+    println("in k: " ++ probe(p))
+    panic("boom")
+  end
+
+  fn h(deep : Bool, p : String) : Int needs IO.Console, IO.FileRead("/srv/data/x/") do
+    println("in h: " ++ probe(p))
+    if deep do k(p) else panic("boom") end
+  end
+
+  fn g(deep : Bool) : String needs IO.Console, IO.FileRead("/srv/data/") do
+    let a = caught(__try_call_val(fn _ -> h(deep, "/srv/data/a")))
+    println("g after try_call: " ++ a ++ ", " ++ probe("/srv/data/a") ++ ", " ++ probe("/srv/b"))
+    let b = caught(__try_call_val(fn _ ->
+      try_finally(fn _ -> h(deep, "/srv/data/a"),
+                  fn _ -> println("g cleanup: " ++ probe("/srv/data/a") ++ ", " ++ probe("/srv/b")))))
+    "g after try_finally: " ++ b ++ ", " ++ probe("/srv/data/a") ++ ", " ++ probe("/srv/b")
+  end
+
+  fn g_outside(act : Bool -> Int, guarded : Bool -> Int) : String needs IO.Console, IO.FileRead("/srv/data/") do
+    let a = caught(__try_call_val(act))
+    println("g_outside after try_call: " ++ a ++ ", " ++ probe("/srv/data/a") ++ ", " ++ probe("/srv/b"))
+    let b = caught(__try_call_val(guarded))
+    "g_outside after try_finally: " ++ b ++ ", " ++ probe("/srv/data/a") ++ ", " ++ probe("/srv/b")
+  end
+
+  fn f_outside(act : Bool -> Int, guarded : Bool -> Int) : String needs IO.Console, IO.FileRead("/srv/") do
+    println(g_outside(act, guarded))
+    println(g_outside(act, guarded))
+    println(g_outside(act, guarded))
+    "f_outside after g: " ++ probe("/srv/b") ++ ", " ++ probe("/etc/hosts")
+  end
+
+  fn f(deep : Bool) : String needs IO.Console, IO.FileRead("/srv/") do
+    println(g(deep))
+    println(g(deep))
+    println(g(deep))
+    "f after g: " ++ probe("/srv/b") ++ ", " ++ probe("/etc/hosts")
+  end
+
+  fn main() do
+    println(f(false))
+    println("main: " ++ probe("/etc/hosts"))
+    println(f(true))
+    println("main: " ++ probe("/etc/hosts"))
+    let act = fn _ -> h(true, "/srv/data/a")
+    let cleanup = fn _ -> println("outside cleanup: " ++ probe("/etc/hosts"))
+    let guarded = fn _ -> try_finally(act, cleanup)
+    println(f_outside(act, guarded))
+    println("main: " ++ probe("/etc/hosts"))
+  end
+end

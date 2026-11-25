@@ -103,7 +103,7 @@ mod TopologyConflict do
     Vault.set(fk.members, "n0", member("n0", Membership.Alive))
     Vault.set(fk.members, peer, member(peer, Membership.Dead))
     Vault.set(fk.names, Topology.marker("Echo.Primary", peer), GlobalPid.make(peer, 1, 1))
-    let c = ClusterNode.attach(io, fake_ops(fk))
+    let c = Authority.must(ClusterNode.attach(fake_ops(fk)))
     let tries : Vault(Int) = Authority.must(Vault.new("tc_tries"))
     Topology.place(c, [
       Topology.role("Echo.Primary", Topology.count(1),

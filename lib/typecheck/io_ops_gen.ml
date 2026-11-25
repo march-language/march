@@ -150,6 +150,27 @@ let excluded_ops (cap : string) : string list =
 let dict_ty (cap : string) : ty option =
   match dict_fields cap with [] -> None | flds -> Some (TRecord flds)
 
+(* ── mock handlers (ocap phase 7) ──────────────────────────────────────── *)
+
+(** The handler record a [mock] of capability [cap] takes: the dictionary's
+    fields, or, for [IO.Mut] (whose [vault_*] builtins are polymorphic and
+    have no dictionary), the one monomorphic hook a vault mock offers:
+    [open], consulted by the checked opens ([Vault.new], [Vault.open],
+    [Vault.whereis], [ns_get], [ns_drop]); [Err(reason)] fails that open.
+    [[]] when [cap] cannot be mocked. *)
+let mock_fields (cap : string) : (string * ty) list =
+  if cap = "IO.Mut" then
+    [ ("open",
+       TCon ("Option",
+             [ TArrow (TCon ("String", []),
+                       TCon ("Result", [ TTuple []; TCon ("String", []) ])) ])) ]
+  else dict_fields cap
+
+(** The capabilities a [mock] may name. *)
+let mock_caps () : string list =
+  List.filter (fun c -> mock_fields c <> []) (all_caps () @ [ "IO.Mut" ])
+  |> List.sort_uniq compare
+
 (* ── dispatch wrappers ────────────────────────────────────────────────── *)
 
 (** The prefix on a generated dispatch wrapper.  Leading underscores keep it
@@ -167,46 +188,53 @@ let is_dispatch_name (n : string) : bool =
   String.length n > String.length dispatch_prefix
   && String.sub n 0 (String.length dispatch_prefix) = dispatch_prefix
 
-(** March source for one operation's dispatch wrapper.
+(** March source for one operation's dispatch wrapper (ocap phase 7).
 
     Generated as SOURCE and injected before typechecking, rather than built as
-    TIR.  Hand-built TIR cannot be typechecked, and this shape leans on
-    [Option]'s niche encoding twice over; getting the decode subtly wrong would
-    be a silent miscompile rather than an error.  As source it is checked like
-    anything else.
+    TIR, so it is checked like anything else (the shape leans on [Option]'s
+    niche encoding, and a wrong decode built directly as TIR would be a
+    silent miscompile).
 
-    The [None] arms call the operation itself — that is the ambient path, and
-    it is why an un-mocked program behaves exactly as before. *)
+    The wrapper asks the current authority for the innermost [mock] covering
+    the operation ([Authority.mock_for]).  With none it runs the operation
+    itself: the path every un-mocked test build takes.  With one, it reads the
+    handler record from the mock registry at the kind's dictionary type (a
+    [Cap(KIND)]'s [cap_dict], which resolves the record type in a test build)
+    and calls the handler's field; a [None] field runs the real operation,
+    checked first against the authority outside the mock
+    ([Authority.mock_fallthrough]). *)
 let dispatch_wrapper (cap : string) (op : string) (op_ty : ty) : string option =
+  let target = March_caps.Mock_target.(to_source (of_op cap op)) in
+  let body ~params ~ret ~real ~mocked =
+    Printf.sprintf
+      "  pfn %s(%s) : %s do\n\
+       \    match Authority.mock_for(\"%s\", %s) do\n\
+       \      None -> %s\n\
+       \      Some(id) ->\n\
+       \        let c : Cap(%s) = mock_lookup(id)\n\
+       \        match cap_dict(c) do\n\
+       \          Some(d) ->\n\
+       \            match d.%s do\n\
+       \              Some(f) -> %s\n\
+       \              None ->\n\
+       \                let _ = Authority.mock_fallthrough(\"%s\", %s)\n\
+       \                %s\n\
+       \            end\n\
+       \          None -> %s\n\
+       \        end\n\
+       \    end\n\
+       \  end\n"
+      (dispatch_name op) params ret cap target real cap op mocked cap target real real
+  in
   match flatten_arrow op_ty with
   | ([], ret) ->
     (* An operation typed as a bare VALUE ([process_cwd : String]) is still
-       called — `process_cwd()` — and [Cap_passing] still rewrites that call to
-       this wrapper, because it has a dictionary field ([dict_fields] keeps
-       it).  So it must be generated: skipping it left every `--test` build
-       that merely emitted `Process.argv()` (bastion's CLI `main`) with an
-       undefined `__march_dispatch_process_argv`.  The field holds the mocked
-       value itself, not a closure. *)
-    Some
-      (Printf.sprintf
-         "  pfn %s(c : Cap(%s)) : %s do\n\
-         \    match cap_dict(c) do\n\
-         \      Some(d) ->\n\
-         \        match d.%s do\n\
-         \          Some(v) -> v\n\
-         \          None    -> %s()\n\
-         \        end\n\
-         \      None -> %s()\n\
-         \    end\n\
-         \  end\n"
-         (dispatch_name op) cap (march_ty ret) op op op)
+       called, [process_cwd()]: the field holds the mocked value itself. *)
+    Some (body ~params:"" ~ret:(march_ty ret) ~real:(op ^ "()") ~mocked:"f")
   | (args, ret) ->
-    (* A zero-arg builtin has the shape [TArrow (TTuple [], r)], so its single
-       "argument" is unit: the wrapper takes no parameter of its own, calls the
-       operation with no arguments, and passes an explicit [()] to the field —
-       which is why the field type is [(()) -> r] rather than [() -> r] (March
-       auto-applies a zero-arg function the moment it is named, so a field
-       could not hold one). *)
+    (* A zero-arg builtin has the shape [TArrow (TTuple [], r)]: the wrapper
+       takes no parameter, and the field (typed [(()) -> r], since March
+       auto-applies a zero-arg function the moment it is named) gets [()]. *)
     let zero_arg = (match args with [ TTuple [] ] -> true | _ -> false) in
     let params =
       if zero_arg then []
@@ -217,23 +245,10 @@ let dispatch_wrapper (cap : string) (op : string) (op_ty : ty) : string option =
     in
     let call_args = String.concat ", " actuals in
     let field_args = if zero_arg then "()" else call_args in
-    let all_params =
-      String.concat ", " (Printf.sprintf "c : Cap(%s)" cap :: params)
-    in
     Some
-      (Printf.sprintf
-         "  pfn %s(%s) : %s do\n\
-         \    match cap_dict(c) do\n\
-         \      Some(d) ->\n\
-         \        match d.%s do\n\
-         \          Some(f) -> f(%s)\n\
-         \          None    -> %s(%s)\n\
-         \        end\n\
-         \      None -> %s(%s)\n\
-         \    end\n\
-         \  end\n"
-         (dispatch_name op) all_params (march_ty ret)
-         op field_args op call_args op call_args)
+      (body ~params:(String.concat ", " params) ~ret:(march_ty ret)
+         ~real:(Printf.sprintf "%s(%s)" op call_args)
+         ~mocked:(Printf.sprintf "f(%s)" field_args))
 
 (** The generated all-[None] base for a capability's dictionary — what
     `cap_ops_empty(c)` resolves to.
@@ -246,7 +261,7 @@ let ops_empty_name (cap : string) : string =
   "__march_ops_empty_" ^ String.map (fun c -> if c = '.' then '_' else c) cap
 
 let ops_empty_fn (cap : string) : string option =
-  match dict_fields cap with
+  match mock_fields cap with
   | [] -> None
   | flds ->
     Some
@@ -264,7 +279,7 @@ let dispatch_wrappers_source () : string =
        match ops_empty_fn cap with
        | Some src -> Buffer.add_string b src
        | None -> ())
-    (all_caps ());
+    (mock_caps ());
   List.iter
     (fun cap ->
        List.iter

@@ -31,8 +31,8 @@ let default_limit = 50
 let caps = [
   ("console", "IO.Console", "cap_narrow(root_cap)", "Cap(IO.Console)");
   ("clock", "IO.Clock", "cap_narrow(root_cap)", "Cap(IO.Clock)");
-  ("intro", "Actor.Introspect", "Actor.introspect(root_cap)", "Cap(Actor.Introspect)");
-  ("debug", "Actor.Debug", "Actor.debug(root_cap)", "Cap(Actor.Debug)");
+  ("intro", "Actor.Introspect", "Authority.must(Actor.introspect())", "Cap(Actor.Introspect)");
+  ("debug", "Actor.Debug", "Authority.must(Actor.debug())", "Cap(Actor.Debug)");
 ]
 
 (* ── small helpers ── *)

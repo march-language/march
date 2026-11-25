@@ -1,0 +1,6 @@
+inside, before: none
+inside, actor wrote: 3
+inside, other: 9
+after, real user: 1
+after, real from_actor: none
+exit 0

@@ -271,7 +271,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Prelude.html#fn-unreachable"><span class="sb-kind" style="color:var(--fn)">F</span>unreachable</a>
 <a class="sl" href="Prelude.html#fn-unwrap"><span class="sb-kind" style="color:var(--fn)">F</span>unwrap</a>
 <a class="sl" href="Prelude.html#fn-unwrap_or"><span class="sb-kind" style="color:var(--fn)">F</span>unwrap_or</a>
-<a class="sl" href="Prelude.html#fn-with_cap"><span class="sb-kind" style="color:var(--fn)">F</span>with_cap</a></div></div>
+</div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Presence.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Presence.html">Presence</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Process.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Process.html">Process</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="PubSub.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="PubSub.html">PubSub</a></div></div>
@@ -401,8 +401,7 @@ unwrap_or(None, 7)" data-try-kind="transcript"><code>march&gt; unwrap_or(<span c
 <span class="tok-num">1</span>
 march&gt; unwrap_or(<span class="tok-ty">None</span>, <span class="tok-num">7</span>)
 <span class="tok-num">7</span></code></pre></div></div>
-<div class="item" id="fn-with_cap"><div class="ih"><span class="badge bfn">fn</span><span class="name">with_cap</span><span class="sig">with_cap(_c, f) do f(()) end</span><a class="anchor-link" href="#fn-with_cap" title="Link">#</a></div><div class="ib"><p>Runs <code>f</code> with <code>c</code> installed as the capability its operations dispatch through, so a test can substitute an implementation:</p><pre><code class="language-march">with_cap(mock, <span class="tok-kw">fn</span> _ -&gt; code_under_test())</code></pre><p>At runtime this simply calls <code>f</code> — the capability is consumed by the compiler's capability-passing elaboration, which rewrites calls inside <code>f</code> to route through <code>c</code>'s dictionary. Outside a <code>--test</code> build the elaboration does not run and this is exactly <code>f(())</code>.</p><h3>Examples</h3><pre data-try="with_cap(0, fn _ -&gt; 9)" data-try-kind="transcript"><code>march&gt; with_cap(<span class="tok-num">0</span>, <span class="tok-kw">fn</span> _ -&gt; <span class="tok-num">9</span>)
-<span class="tok-num">9</span></code></pre></div></div><style>
+<style>
 /* Try it */
 .try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
 .try-btn:hover{color:var(--bright);border-color:var(--acc)}

@@ -10,6 +10,7 @@
 mod ActorMailboxAlarm do
   needs IO
   needs IO.Console
+  needs Actor.Introspect
 
   actor W do
     state { n : Int }
@@ -39,8 +40,8 @@ mod ActorMailboxAlarm do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let a = spawn(W)
     let b = spawn(W)
     let c = spawn(W)

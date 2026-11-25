@@ -1,0 +1,9 @@
+in h: IO.FileRead("/srv/data/a") refused by function h's needs (IO.Console, IO.FileRead("/srv/data/x/"))
+g after try_call: caught, allowed /srv/data/a, IO.FileRead("/srv/b") refused by function g's needs (IO.Console, IO.FileRead("/srv/data/"))
+in h: IO.FileRead("/srv/data/a") refused by function h's needs (IO.Console, IO.FileRead("/srv/data/x/"))
+g after try_call: caught, allowed /srv/data/a, IO.FileRead("/srv/b") refused by function g's needs (IO.Console, IO.FileRead("/srv/data/"))
+in h: IO.FileRead("/srv/data/a") refused by function h's needs (IO.Console, IO.FileRead("/srv/data/x/"))
+g after try_call: caught, allowed /srv/data/a, IO.FileRead("/srv/b") refused by function g's needs (IO.Console, IO.FileRead("/srv/data/"))
+f after g: allowed /srv/b, IO.FileRead("/etc/hosts") refused by function f's needs (IO.Console, IO.FileRead("/srv/"))
+main: allowed /etc/hosts
+exit 0

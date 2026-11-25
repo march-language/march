@@ -5036,6 +5036,7 @@ let children : A.expr -> A.expr list = function
   | A.EField (r, _, _) -> [ r ]
   | A.EIf (c, t, e, _) -> [ c; t; e ]
   | A.ERestrict (es, b, _) -> es @ [ b ]
+  | A.EMock (es, h, b, _) -> (es @ [ h ]) @ [ b ]
   | A.ECond (arms, _) -> List.concat_map (fun (c, b) -> [ c; b ]) arms
   | A.EPipe (a, b, _) -> [ a; b ]
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)

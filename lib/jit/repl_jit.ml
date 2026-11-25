@@ -588,13 +588,19 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
   let tir =
     Fun.protect ~finally:(fun () -> March_tir.Lower_state.set_fragment_scope "")
       (fun () -> March_tir.Lower.lower_module ~type_map ~stdlib_context ~shadow_builtins:false ~launch m) in
+  (* Ocap phase 7: in a test build (`--jit --test`) every interceptable
+     operation goes through its dispatch wrapper, as natively; the wrappers
+     themselves are compiled into the test build's prelude. *)
+  let tir =
+    if !March_typecheck.Typecheck.test_build then March_tir.Mock_dispatch.rewrite tir else tir in
   (* Run-time frames for `restrict` blocks and function `needs` clauses, as
      the native pipeline (bin/main.ml) adds them right after lowering. *)
   let tir, restricts_kept =
     March_tir.Auth_rt.restricts tir ~sites:March_tir.Lower.restrict_sites in
   let tir, frames_kept = March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
   let tir, grants_kept = March_tir.Auth_rt.grants tir ~tbl:March_tir.Lower.fn_grant_tbl in
-  let has_frames = frames_kept || restricts_kept || grants_kept in
+  let has_frames = frames_kept || restricts_kept || grants_kept
+                   || !March_tir.Lower.mock_sites > 0 in
   (* Function values capture the authority they are made under (Task 5).
      A REPL fragment always runs the pass: its lambda can be called by a
      later fragment's framed fn, which this fragment's [has_frames] cannot
@@ -1997,6 +2003,7 @@ let precompile_stdlib ctx
     (try
       let (_, type_map_stdlib) = March_typecheck.Typecheck.check_module stdlib_mod in
       let tir = lower_module ~type_map:type_map_stdlib ~fragment:false stdlib_mod in
+
       let stdlib_fns = List.filter
         (fun (f : March_tir.Tir.fn_def) ->
           not (is_c_runtime_fn f.fn_name) &&

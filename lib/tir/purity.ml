@@ -37,6 +37,7 @@ let impure_builtins = [
      is ordered against the others and against the checks. *)
   "cap_layers"; "cap_set_launch"; "cap_save"; "cap_restore"; "cap_push";
   "cap_enter"; "cap_grant_text"; "cap_cwd"; "cap_launch_fail";
+      "mock_register"; "mock_lookup";
   (* Task 4b: the C policy reads the slot, the cwd and MARCH_GRANT, and
      sets the launch layers. *)
   "cap_rt_parse"; "cap_rt_admits"; "cap_rt_subset"; "cap_rt_frame_layer";

@@ -85,6 +85,7 @@ type fn_needs = Lower_state.fn_needs = {
 
 let fn_needs_tbl = Lower_state.fn_needs_tbl
 let restrict_sites = Lower_state.restrict_sites
+let mock_sites = Lower_state.mock_sites
 let fn_grant_tbl = Lower_state.fn_grant_tbl
 let _default_dispatch = Lower_state._default_dispatch
 let _alias_candidates = Lower_state._alias_candidates

@@ -63,11 +63,11 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let boss = spawn(Boss)
-    let a1 = Actor.pid_from_int(intro, child_int(boss, "a"))
-    let b1 = Actor.pid_from_int(intro, child_int(boss, "b"))
+    let a1 = Authority.must(Actor.pid_from_int(child_int(boss, "a")))
+    let b1 = Authority.must(Actor.pid_from_int(child_int(boss, "b")))
     println("registered a: " ++ bool_to_string(Actor.register(a1, "child-a")))
     println("registered b: " ++ bool_to_string(Actor.register(b1, "child-b")))
 

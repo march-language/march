@@ -1,0 +1,3 @@
+IO.FileRead("/fixtures/a.txt") refused by the launch grant (IO.Console)
+read </fixtures/a.txt>
+exit 0

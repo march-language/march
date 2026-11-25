@@ -150,7 +150,7 @@ mod ClusterApOfferRetire do
 
   fn main(c : Cap(IO)) do
     let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "local-secret", 1)
-    match ClusterNode.start(c, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         -- 1. Open and close, no session.

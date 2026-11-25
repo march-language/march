@@ -128,11 +128,11 @@ mod SupervisorRespawnNamesBeforeActivation do
     end
   end
 
-  fn main(io : Cap(IO), _clock : Cap(IO.Clock)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _clock : Cap(IO.Clock), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let sup = spawn(Sup)
-    let a = Actor.pid_from_int(intro, child_int(sup, "a"))
-    let b = Actor.pid_from_int(intro, child_int(sup, "b"))
+    let a = Authority.must(Actor.pid_from_int(child_int(sup, "a")))
+    let b = Authority.must(Actor.pid_from_int(child_int(sup, "b")))
     println("registered: " ++ bool_to_string(Actor.register(a, "worker_a")
                                             && Actor.register(b, "worker_b")))
     let total = 300

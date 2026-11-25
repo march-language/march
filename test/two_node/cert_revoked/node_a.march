@@ -73,7 +73,7 @@ mod CertRevokedA do
       Ok(x) -> x
       Err(e) -> panic(e)
     end
-    match ClusterNode.start(c, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         let flags = Authority.must(Vault.new("cert_flags"))
