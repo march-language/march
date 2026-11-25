@@ -4043,12 +4043,14 @@ void march_frame_drop_closure(void *closure) { march_clo_release(closure); }
  * march_repl_guard_result, the "panic: <msg>" string with
  * march_repl_guard_message (a fresh march_string the caller owns).
  * Whatever the fragment allocated before it panicked is not released, as
- * with any caught panic. */
+ * with any caught panic.  The authority in force is put back
+ * (march_cap_unwind), as at every catch site. */
 static int64_t march_repl_guard_word = 0;
 static void   *march_repl_guard_msg  = NULL;
 
 static int64_t march_repl_guarded(void *fptr, int kind) {
     void *frame_mark = march_frame_mark();
+    void *auth_mark = march_cap_mark();
     jmp_buf saved_jmp;
     char    saved_fail[sizeof(march_test_fail_buf)];
     int     saved_in_test = march_test_in_test;
@@ -4076,6 +4078,9 @@ static int64_t march_repl_guarded(void *fptr, int kind) {
         }
     } else {
         march_frame_unwind(frame_mark);
+        /* The next input must not run under the needs of a function the
+         * panic was raised in (every other catcher does the same). */
+        march_cap_unwind(auth_mark);
         panicked = 1;
     }
     if (panicked) {

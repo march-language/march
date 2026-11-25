@@ -39,3 +39,10 @@ those sites the restore matters only for the count. `shell_task`
 (`runtime/march_shell.c`) catches without a restore for the same reason.
 
 Left: the last four rows, and making the observer fixture able to fail.
+## One more site (2026-11-24)
+
+The count above missed `march_repl_guarded`, the native REPL's per-input guard,
+which had no restore at all (fixed, with a test:
+`specs/progress/2026-11-24-repl-jit-panic-leaves-frame-authority.md`). The other
+`setjmp` catcher without a restore, `shell_task` in `runtime/march_shell.c`, ends
+its green thread right after the catch, so nothing runs under the stale slot.
