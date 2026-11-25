@@ -42,6 +42,15 @@ exception Repr_disagreement of string
     user's lone `derive Json` is not made ambiguous by the stdlib's). *)
 val stdlib_impl_syms : (string, unit) Hashtbl.t
 
+(** [Some "__ord_lt"] for ["<"] (likewise [<=], [>], [>=]); [None] otherwise. *)
+val ord_helper_of_op : string -> string option
+
+(** Functions a reference to the given name can make mono call although the
+    TIR does not name them: an ordering operator's helper, then every impl of
+    an interface method.  A superset over types; [Dce_pre_mono] follows it. *)
+val implicit_callees :
+  iface_methods:(string, (string * string) list) Hashtbl.t -> string -> string list
+
 val resolve_impl_by_type : (string * string) list -> string -> string option
 val has_tvar : Tir.ty -> bool
 type ty_subst = (string * Tir.ty) list

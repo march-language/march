@@ -573,6 +573,35 @@ let ensure_atom_fns fn_table done_set worklist atoms =
     | _ -> ()
   ) atoms
 
+(** The prelude helper an ordering operator is routed through when its
+    operands are not primitives (see the ord rewrite in [rewrite_calls]). *)
+let ord_helper_of_op (op : string) : string option =
+  match op with
+  | "<" -> Some "__ord_lt" | "<=" -> Some "__ord_le"
+  | ">" -> Some "__ord_gt" | ">=" -> Some "__ord_ge"
+  | _ -> None
+
+(** Functions a reference to [name] can make [rewrite_calls] call although the
+    TIR does not name them: the ord helper of an ordering operator, and every
+    impl of an interface method (under any type; the [to_string] alias and
+    module-prefix stripping included).  Deliberately a superset over types.
+    [Dce_pre_mono] follows these edges, so a rule added to [rewrite_calls]
+    that mints a call by name must be added here too; the pruned-name
+    tripwire in [monomorphize] fails loudly when one is missed.  See
+    specs/2026-11-24-stdlib-compile-floor-design.md. *)
+let implicit_callees
+    ~(iface_methods : (string, (string * string) list) Hashtbl.t)
+    (name : string) : string list =
+  let impls = match Tir_names.find_iface_impls iface_methods name with
+    | None -> []
+    | Some impls ->
+      List.rev (List.fold_left (fun acc (_, m) ->
+          if List.mem m acc then acc else m :: acc) [] impls)
+  in
+  match ord_helper_of_op name with
+  | Some h -> h :: impls
+  | None -> impls
+
 (** [shadowed] extended with a function's own parameters, for rewriting that
     function's body.  A parameter is a lexical binding exactly like a [let] or
     a pattern variable: a call through it is a closure call, never a call to a
@@ -901,10 +930,9 @@ let rec rewrite_calls
         | _ -> false
       in
       if routed && List.length args = 2 then
-        let h = match orig_name with
-          | "<" -> "__ord_lt" | "<=" -> "__ord_le"
-          | ">" -> "__ord_gt" | _ -> "__ord_ge" in
-        if Hashtbl.mem fn_table h then Some h else None
+        match ord_helper_of_op orig_name with
+        | Some h when Hashtbl.mem fn_table h -> Some h
+        | _ -> None
       else None
     in
     (match ord_helper with
