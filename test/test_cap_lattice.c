@@ -53,6 +53,9 @@ static const expect_entry_t EXPECT[] = {
   { "IO.Signal",            0 }, /* 18: child of IO */
   { "IO.WebSocket",         6 }, /* 19: child of IO.NetConnect */
   { "IO.Registry",          0 }, /* 20: child of IO (ocap p2b) */
+  { "IO.Cluster",           0 }, /* 21: child of IO (ocap p7) */
+  { "Actor.Introspect",    -1 }, /* 22: root (ocap p7) */
+  { "Actor.Debug",         -1 }, /* 23: root (ocap p7) */
 };
 #define N_EXPECT (int)(sizeof(EXPECT) / sizeof(EXPECT[0]))
 

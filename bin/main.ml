@@ -829,11 +829,12 @@ let print_refine_report_sites ~filename ~user_files () =
    `@[lemma]` calls and bodies after typechecking, independent of any proof
    verdict.  [lemma_env] is built over the whole program (stdlib included),
    so a name another declaration also binds is never erased. *)
-let lemma_reserved n =
+let lemma_reserved =
+  (* Built once: [reserved_by] fills a table from the builtin lists, and
+     applying it to [n] inside the closure rebuilt that table per query. *)
   March_desugar.Lemma_erase.reserved_by
     (List.map fst March_typecheck.Typecheck_builtins.builtin_bindings
      @ List.map fst March_typecheck.Typecheck_builtins.builtin_interface_bindings)
-    n
 
 (* Ghost code (lib/desugar/ghost.ml) is erased right after lemmas, by the
    same name-resolution rule.  The typechecker has already reported a ghost

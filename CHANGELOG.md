@@ -34,9 +34,11 @@ git log is authoritative for exact commits.
   `ClusterNode.start(cfg)` no longer takes the `Cap(IO)` and reports a refusal in its
   `String` error. The new kinds are `Actor.Introspect` and `Actor.Debug` (outside `IO`, so
   `needs IO` no longer covers inspecting other actors) and `IO.Cluster`; `main` requests
-  them in its `needs`. Write `Authority.must(Actor.introspect())` where you wrote
+  them with a parameter such as `Cap(Actor.Introspect)`. Write `Authority.must(Actor.introspect())` where you wrote
   `Actor.introspect(io)`.
-
+- **Compiles are about 0.3 s faster.** Lemma erasure collected the names the program
+  mentions once per `@[lemma]` declaration, walking the whole program (stdlib included)
+  each time; it now walks it once. What gets erased is unchanged.
 - **Under dependency grants, a module name defined twice is an error.** With a grants file
   in effect, a module defined both by the app and a dependency, by two dependencies, or by a
   dependency and the standard library is `dep_module_conflict`, as is a granted library root

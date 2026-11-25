@@ -883,7 +883,9 @@ jobs:
   # which run two compiled programs as two processes over a real socket. That
   # third corpus exists because on 2026-09-16 a closure deep drop released a node
   # id the members Map still owned and BOTH other corpora swept clean while
-  # `two-node[skew]` died. See the script header for why the curated list is a
+  # `two-node[skew]` died. Since 2026-11-24 shard 1 also sweeps a named list of
+  # test/cap_conformance caught-panic fixtures (the authority slot's unwind).
+  # See the script header for why the curated list is a
   # list and not a glob, and why those programs are not simply new goldens.
   #
   # Ubuntu-only: the gate no-ops on a Mac running CrowdStrike Falcon, whose

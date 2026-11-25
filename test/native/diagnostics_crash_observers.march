@@ -83,7 +83,7 @@ mod Main do
     let location_ok = match r.location do
       -- The lines of boom's panic(...) and Fragile.Later's todo(...): keep
       -- them in step if this file's lines move.
-      Some(loc) -> in_fixture(loc.file) && loc.line == (if r.message == "later" do 39 else 32 end)
+      Some(loc) -> in_fixture(loc.file) && loc.line == (if r.message == "later" do 40 else 33 end)
       None -> false
     end
     -- Fragile.Later's body may be inlined into the actor's dispatch

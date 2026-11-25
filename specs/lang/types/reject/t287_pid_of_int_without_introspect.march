@@ -1,4 +1,4 @@
--- EXPECT-ERROR: Actor.introspect
+-- EXPECT-ERROR: Actor.pid_from_int
 -- Unforgeable local references (2026-09-22, distributed-deploys build step 2,
 -- specs/progress/2026-09-22-dd-step02-unforgeable-references.md).
 --

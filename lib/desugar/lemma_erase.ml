@@ -236,14 +236,17 @@ let rec erase_decls env (decls : decl list) : decl list =
       | _ -> d)
     decls
 
-(* Does any expression of [decls] still name [n] (as spelled, last segment)? *)
-let rec mentions (n : string) (decls : decl list) : bool =
-  let found = ref false in
+(* Every name an expression of [decls] mentions, each as its last segment
+   (the spelling [mentions] compares).  One walk, so a caller asking about
+   many names pays for the program once: [drop_unreferenced] used to walk
+   the whole program per lemma, ~0.35 s of every compile with the stdlib's
+   128 lemmas (specs/2026-11-24-stdlib-compile-floor-design.md, Part 1). *)
+let rec mentioned_names (decls : decl list) : SS.t =
+  let acc = ref SS.empty in
   let rec ex (e : expr) =
-    if not !found then
-      match e with
-      | EVar v -> if last_segment v.txt = n then found := true
-      | _ -> List.iter ex (children e)
+    match e with
+    | EVar v -> acc := SS.add (last_segment v.txt) !acc
+    | _ -> List.iter ex (children e)
   and children (e : expr) : expr list =
     match e with
     | ELit _ | EVar _ | EHole _ | EResultRef _ | EDbg (None, _) -> []
@@ -276,7 +279,7 @@ let rec mentions (n : string) (decls : decl list) : bool =
     (function
       | DFn (fd, _) -> fn fd
       | DLet (_, b, _) -> ex b.bind_expr
-      | DMod (_, _, inner, _) | DDescribe (_, inner, _) -> if mentions n inner then found := true
+      | DMod (_, _, inner, _) | DDescribe (_, inner, _) -> acc := SS.union !acc (mentioned_names inner)
       | DImpl (idef, _) -> List.iter (fun (_, f) -> fn f) idef.impl_methods
       | DInterface (idef, _) -> List.iter (fun m -> Option.iter ex m.md_default) idef.iface_methods
       | DActor (_, _, a, _) ->
@@ -292,23 +295,30 @@ let rec mentions (n : string) (decls : decl list) : bool =
         Option.iter ex a.app_on_stop
       | _ -> ())
     decls;
-  !found
+  !acc
 
-let rec drop_unreferenced (whole : decl list) (decls : decl list) : decl list =
-  List.filter_map
-    (fun d ->
-      match d with
-      | DFn (fd, _) when is_lemma fd && not (mentions fd.fn_name.txt whole) -> None
-      (* An impl method's copy for an interface law ([Interface_laws]): only
-         its lemmas used it. *)
-      | DFn (fd, _) when String.starts_with ~prefix:Interface_laws.copy_prefix fd.fn_name.txt -> None
-      (* A hot-reload simulation step ([Desugar_simulation]): logic only, read
-         by its lemmas alone, never run. *)
-      | DFn (fd, _) when List.mem "hcr_logic" fd.fn_attrs -> None
-      | DMod (n, v, inner, sp) -> Some (DMod (n, v, drop_unreferenced whole inner, sp))
-      | DDescribe (s, inner, sp) -> Some (DDescribe (s, drop_unreferenced whole inner, sp))
-      | d -> Some d)
-    decls
+(* Does any expression of [decls] still name [n] (as spelled, last segment)? *)
+let mentions (n : string) (decls : decl list) : bool = SS.mem n (mentioned_names decls)
+
+let drop_unreferenced (whole : decl list) (decls : decl list) : decl list =
+  let mentioned = mentioned_names whole in
+  let rec drop decls =
+    List.filter_map
+      (fun d ->
+        match d with
+        | DFn (fd, _) when is_lemma fd && not (SS.mem fd.fn_name.txt mentioned) -> None
+        (* An impl method's copy for an interface law ([Interface_laws]): only
+           its lemmas used it. *)
+        | DFn (fd, _) when String.starts_with ~prefix:Interface_laws.copy_prefix fd.fn_name.txt -> None
+        (* A hot-reload simulation step ([Desugar_simulation]): logic only, read
+           by its lemmas alone, never run. *)
+        | DFn (fd, _) when List.mem "hcr_logic" fd.fn_attrs -> None
+        | DMod (n, v, inner, sp) -> Some (DMod (n, v, drop inner, sp))
+        | DDescribe (s, inner, sp) -> Some (DDescribe (s, drop inner, sp))
+        | d -> Some d)
+      decls
+  in
+  drop decls
 
 let erase_module_with (env : env) (decls : decl list) : decl list =
   let erased = erase_decls env decls in
