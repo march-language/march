@@ -295,6 +295,43 @@ let test_unmodelled_is_unknown_not_smaller () =
   in
   str "the closure that calls it" "?" (set_at r "fn () ->")
 
+(* ── found by the whole-branch review: each was an inferred set too small ── *)
+
+let test_review_local_fn_recursion () =
+  let r =
+    dump
+      "  fn mk() do fn x -> println(\"hi\") end\n  fn run(n : Int) do\n    fn go(f, k : Int) do\n      if k == 0 do f(1) else go(mk(), k - 1) end\n    end\n    let quiet = fn x -> Ok(())\n    let r = fn () -> go(quiet, n)\n    r\n  end\n  fn main() do run(1) end"
+  in
+  (* `go` calls itself with a printing closure: whoever calls `go` may print. *)
+  str "the closure that starts the recursion" "IO.Console" (set_at r "fn () -> go")
+
+let test_review_mutual_types () =
+  let r =
+    dump
+      "  type A = A(B, Int -> Int)\n  type B = B(A) | BEnd\n  fn aaa(a : A) do\n    match a do\n      A(_, f) -> f(1)\n    end\n  end\n  fn zrunb(b : B) do\n    match b do\n      B(A(_, f)) -> f(1)\n      BEnd -> 0\n    end\n  end\n  fn main() do\n    let w = fn x -> match println(\"x\") do _ -> 1 end\n    let b = B(A(BEnd, w))\n    let r = fn () -> zrunb(b)\n    (r, aaa)\n  end"
+  in
+  str "through the second of two mutually recursive types" "IO.Console" (set_at r "fn () -> zrunb")
+
+let test_review_or_pattern () =
+  let r =
+    dump
+      "  fn pick(t : (Int -> Int, Int -> Int), k : Int) do\n    match (t, k) do\n      ((f, _), 0) | ((_, f), 1) -> f(1)\n      _ -> 0\n    end\n  end\n  fn mkpair() do (fn x -> x, fn x -> match println(\"x\") do _ -> 1 end) end\n  fn main() do\n    let r = fn () -> pick(mkpair(), 1)\n    r\n  end"
+  in
+  str "the binder of the second alternative" "IO.Console" (set_at r "fn () -> pick")
+
+let test_review_same_named_types () =
+  let r =
+    dump
+      "  mod M2 do\n    needs IO.Console\n    type T = A(Int -> Int)\n    fn run(t : T) do\n      match t do\n        A(f) -> f(1)\n      end\n    end\n    fn mkp(u : Int) do\n      let l = fn (x : Int) -> match println(\"x\") do _ -> u + x end\n      A(l)\n    end\n  end\n  mod M3 do\n    type T = A(Int)\n    fn m3() do A(2) end\n  end\n  fn main() do\n    let r = fn () -> M2.run(M2.mkp(1))\n    (r, M3.m3())\n  end"
+  in
+  str "a constructor shared by two types of one name" "IO.Console" (set_at r "fn () -> M2.run")
+
+let test_review_logger_dispatch () =
+  (* A callback registered with the logger runs inside whoever logs: the
+     pass cannot see which, so the logging closure is not tracked. *)
+  let r = dump "  fn main() do\n    let r = fn () -> Logger.info(\"hello\")\n    r\n  end" in
+  str "a closure that logs" "?" (set_at r "fn () -> Logger.info")
+
 (* ── static authority (Task 5) ──────────────────────────────────────────── *)
 
 let test_restrict () =
@@ -360,6 +397,11 @@ let tests =
         Alcotest.test_case "authority checks: literal, named by the caller, computed" `Quick test_authority_check_kinds;
         Alcotest.test_case "what is not modelled is not tracked, never smaller" `Quick
           test_unmodelled_is_unknown_not_smaller;
+        Alcotest.test_case "review: a local fn that calls itself" `Quick test_review_local_fn_recursion;
+        Alcotest.test_case "review: mutually recursive declared types" `Quick test_review_mutual_types;
+        Alcotest.test_case "review: an or-pattern binding different parts" `Quick test_review_or_pattern;
+        Alcotest.test_case "review: one constructor name in two same-named types" `Quick test_review_same_named_types;
+        Alcotest.test_case "review: a builtin that runs registered callbacks" `Quick test_review_logger_dispatch;
         Alcotest.test_case "restrict" `Quick test_restrict;
         Alcotest.test_case "a clause narrows a lambda" `Quick test_clause_narrows_lambda;
         Alcotest.test_case "a named value inside a restrict" `Quick test_restrict_named_value;

@@ -28,9 +28,14 @@ type t =
   | Hole of hole  (** a parameter, typed at its first use *)
   | Opaque  (** not modelled: as a source, every set it reaches is unknown *)
 
-and hole = { mutable h_ty : t option; mutable h_in : t list; mutable h_hm : ty option }
+and hole = {
+  mutable h_ty : t option;
+  mutable h_in : t list;  (** what flowed in before it was filled *)
+  mutable h_out : t list;  (** where it flowed to before it was filled *)
+  mutable h_hm : ty option;
+}
 
-let new_hole () = Hole { h_ty = None; h_in = []; h_hm = None }
+let new_hole () = Hole { h_ty = None; h_in = []; h_out = []; h_hm = None }
 
 (* ── which types hold a function value ──────────────────────────────────── *)
 
@@ -86,29 +91,35 @@ let decls_of (env : env) : decls =
 (* Whether a value of declared type [name] can hold a function value through
    its own fields (type arguments carry their own sets).  Two declared types
    with one bare name are merged, which can only answer [true] more often. *)
-let rec holds (d : decls) (name : string) : bool =
-  let k = bare name in
-  match Hashtbl.find_opt d.d_holds k with
+let holds (d : decls) (name : string) : bool =
+  let root = bare name in
+  match Hashtbl.find_opt d.d_holds root with
   | Some b -> b
   | None ->
-    if List.mem k pure_builtins then false
-    else (
-      match Hashtbl.find_opt d.d_fields k with
-      | None ->
-        (* A builtin type with no declaration.  A handle holds no function
-           value; a task holds the function it runs. *)
-        List.mem k closure_builtins
-      | Some tys ->
-        Hashtbl.replace d.d_holds k false;  (* a recursive occurrence adds nothing *)
-        let b =
+    (* Reachability from [root] over the declared types its fields name.
+       Only the root's answer is cached: an answer reached part-way through
+       a cycle is not final (two mutually recursive types). *)
+    let visited = Hashtbl.create 8 in
+    let rec go (k : string) : bool =
+      if List.mem k pure_builtins then false
+      else if Hashtbl.mem visited k then false
+      else (
+        Hashtbl.replace visited k ();
+        match Hashtbl.find_opt d.d_fields k with
+        | None ->
+          (* A builtin type with no declaration.  A handle holds no function
+             value; a task holds the function it runs. *)
+          List.mem k closure_builtins
+        | Some tys ->
           List.exists
             (fun s ->
                let arrow, names = surface_holds_arrow s in
-               arrow || List.exists (fun n -> bare n <> k && Hashtbl.mem d.d_fields (bare n) && holds d n) names)
-            tys
-        in
-        Hashtbl.replace d.d_holds k b;
-        b)
+               arrow || List.exists (fun n -> Hashtbl.mem d.d_fields (bare n) && go (bare n)) names)
+            tys)
+    in
+    let b = go root in
+    Hashtbl.replace d.d_holds root b;
+    b
 
 let declared (d : decls) (name : string) : bool = Hashtbl.mem d.d_fields (bare name)
 

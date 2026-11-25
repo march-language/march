@@ -25,11 +25,16 @@ let install (env : March_typecheck.Typecheck.env) (decls : March_ast.Ast.decl li
     | _ -> None
   in
   let r = March_typecheck.Typecheck.capture_analyse ?unsound ~all:(Sys.getenv_opt "MARCH_CAPTURE_ORACLE_ALL" <> None) env decls in
-  let sites : (March_ast.Ast.span, C.site) Hashtbl.t = Hashtbl.create 1024 in
-  List.iter (fun (x : C.site) -> Hashtbl.replace sites x.C.s_key x) r.C.sites;
+  (* One body can be several sites (an actor's `init` is walked at each
+     spawn): every one of them is checked. *)
+  let sites : (March_ast.Ast.span, C.site list) Hashtbl.t = Hashtbl.create 1024 in
+  List.iter
+    (fun (x : C.site) ->
+       Hashtbl.replace sites x.C.s_key (x :: Option.value ~default:[] (Hashtbl.find_opt sites x.C.s_key)))
+    r.C.sites;
   let cwd = Sys.getcwd () in
-  let stack : C.site list ref = ref [] in
-  let by_actor : (int, C.site list) Hashtbl.t = Hashtbl.create 16 in
+  let stack : C.site list list ref = ref [] in
+  let by_actor : (int, C.site list list) Hashtbl.t = Hashtbl.create 16 in
   let calls = ref 0 and ops = ref 0 and checks = ref 0 and misses = ref 0 and tracked = ref 0 in
   let reported = Hashtbl.create 16 in
   let pos (sp : March_ast.Ast.span) =
@@ -69,13 +74,13 @@ let install (env : March_typecheck.Typecheck.env) (decls : March_ast.Ast.decl li
                target (pos x.C.s_span) (S.to_string x.C.s_ground)
            end
          end)
-      !stack
+      (List.concat !stack)
   in
   let co_enter key =
     match Hashtbl.find_opt sites key with
-    | Some x ->
+    | Some xs ->
       incr calls;
-      stack := x :: !stack;
+      stack := xs :: !stack;
       true
     | None -> false
   in

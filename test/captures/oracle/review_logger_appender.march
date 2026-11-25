@@ -1,0 +1,12 @@
+-- Found in review: a callback registered with the logger runs inside
+-- whoever logs later.
+mod ReviewLoggerAppender do
+  needs IO.Console, IO.FileWrite
+
+  fn main() do
+    Logger.add_appender(Appender("a", fn entry -> Authority.ignore(File.write("/nonexistent-capture-oracle/o5.out", "x"))))
+    let r = fn () -> Logger.info("hello")
+    r()
+    ()
+  end
+end

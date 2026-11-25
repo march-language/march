@@ -3,7 +3,7 @@
 18:16  lambda in `main`  needs IO.Console
          IO.Console  spawns `Logger` (18:25)
 19:15  lambda in `main`  needs IO.Console, IO.Spawn
-         IO.Console  calls `Task.async` (19:24)
+         IO.Console  calls `println` (19:44)
          IO.Spawn  calls `Task.async` (19:24)
 19:35  lambda in `main`  needs IO.Console
          IO.Console  calls `println` (19:44)

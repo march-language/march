@@ -38,3 +38,13 @@ Coarse:
 - **A user file in the editor**: see
   `2026-11-24-ocap-capture-pass-always-on-prerequisites.md` for the bodies the editor path
   does not hand the pass.
+
+**Callback registries (2026-11-24, from the 8a review).** A function value registered with a
+builtin and run later by another builtin is charged to the code that registers it, and the
+builtin that runs it must be listed in `dispatching_builtins` (`lib/typecheck/capture.ml`) so
+its caller is `not tracked`. Only `logger_dispatch` is listed. Not audited: signal watchers,
+diagnostics observers (`diag_observe`), timers, HTTP server handlers, supervisor child specs.
+Each one that runs a stored function value from a builtin, outside the registering call, needs
+an entry, or better a rule derived from the builtin table. Until then a function value that
+triggers one of them can have a set that is too small. The soundness oracle
+(`MARCH_CAPTURE_ORACLE=1`) reports it when a program exercises it.

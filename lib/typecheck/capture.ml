@@ -242,7 +242,7 @@ let rec flow (s : st) ?why (src : T.t) (dst : T.t) : unit =
   | T.Opaque, d ->
     List.iter (fun v -> add_const st v S.unknown) (T.svars d)
   | T.Hole { h_ty = Some t; _ }, d -> flow s ?why t d
-  | T.Hole { h_ty = None; _ }, _ -> ()
+  | T.Hole ({ h_ty = None; _ } as h), d -> h.h_out <- d :: h.h_out
   | a, T.Hole ({ h_ty = None; _ } as h) -> h.h_in <- a :: h.h_in
   | a, T.Hole { h_ty = Some t; _ } -> flow s ?why a t
   | T.Arrow (p1, r1, s1), T.Arrow (p2, r2, s2) ->
@@ -267,9 +267,11 @@ let rec flow (s : st) ?why (src : T.t) (dst : T.t) : unit =
 
 let fill_hole (s : st) (h : T.hole) (t : T.t) : unit =
   h.h_ty <- Some t;
-  let pending = h.h_in in
+  let pending_in = h.h_in and pending_out = h.h_out in
   h.h_in <- [];
-  List.iter (fun a -> flow s a t) pending
+  h.h_out <- [];
+  List.iter (fun a -> flow s a t) pending_in;
+  List.iter (fun d -> flow s t d) pending_out
 
 (* ── what the program declares ──────────────────────────────────────────── *)
 
@@ -459,6 +461,11 @@ let fresh_result_builtins : string list =
     (* decoded or logged data: no function value can come out of it *)
     "from_json"; "elts"; "logger_get_fields"; "diag_context_get" ]
 
+(* Builtins that run function values registered earlier, by other code: the
+   caller can do whatever those can.  (The registration itself charges the
+   registrant, as any builtin handed a function does.) *)
+let dispatching_builtins : string list = [ "logger_dispatch" ]
+
 (* ── schemes: generalise and instantiate ────────────────────────────────── *)
 
 let dedup (l : svar list) : svar list = List.sort_uniq compare l
@@ -470,6 +477,14 @@ let rec resolve_holes (t : T.t) : T.t =
   | T.Con (n, args, so) -> T.Con (n, List.map resolve_holes args, so)
   | T.Tuple ts -> T.Tuple (List.map resolve_holes ts)
   | T.Record fs -> T.Record (List.map (fun (n, x) -> (n, resolve_holes x)) fs)
+  | t -> t
+
+(* A function value's type with its result hole replaced by what filled it;
+   parameter holes are kept (an unused parameter stays a hole). *)
+let rec resolve_holes_result (t : T.t) : T.t =
+  match t with
+  | T.Arrow (p, r, v) -> T.Arrow (p, resolve_holes_result r, v)
+  | T.Hole { h_ty = Some t'; _ } -> t'
   | t -> t
 
 let generalise (s : st) (key : string) (value : (svar, S.t) Hashtbl.t) (a : active) : scheme =
@@ -622,9 +637,23 @@ let ctor_fields (s : st) (ctor : string) (t : T.t) : T.t list option =
   match t with
   | T.Con (n, args, own) -> (
     let cis = Option.value ~default:[] (StrMap.find_opt ctor s.env.ctors) in
-    match
-      List.find_opt (fun (ci : ctor_info) -> T.bare ci.ci_type = T.bare n) cis
-    with
+    (* The constructor of THIS type: two modules may each declare a type of
+       one bare name with a constructor of one name.  A candidate is exact
+       when its module-qualified type name agrees with the value's; with no
+       exact one, a single candidate is taken and several are not guessed
+       among. *)
+    let suffix a b = a = b || String.ends_with ~suffix:("." ^ a) b in
+    let full (ci : ctor_info) = if ci.ci_module = "" then ci.ci_type else ci.ci_module ^ "." ^ T.bare ci.ci_type in
+    let candidates = List.filter (fun (ci : ctor_info) -> T.bare ci.ci_type = T.bare n) cis in
+    let exact = List.filter (fun ci -> suffix (full ci) n || suffix n (full ci)) candidates in
+    let pick =
+      match exact, candidates with
+      | ci :: rest, _ when List.for_all (fun (x : ctor_info) -> x.ci_arg_tys = ci.ci_arg_tys) rest -> Some ci
+      | [], [ ci ] -> Some ci
+      | [], ci :: rest when List.for_all (fun (x : ctor_info) -> x.ci_arg_tys = ci.ci_arg_tys && x.ci_module = ci.ci_module) rest -> Some ci
+      | _ -> None
+    in
+    match pick with
     | Some ci -> T.decl_field_types s.d (gen s) ~params:ci.ci_params ~field_tys:ci.ci_arg_tys ~args ~own
     | None -> None)
   | _ -> None
@@ -633,8 +662,9 @@ let record_field (s : st) (t : T.t) (field : string) : T.t option =
   match t with
   | T.Record fs -> List.assoc_opt field fs
   | T.Con (n, args, own) -> (
-    let find k = StrMap.find_opt k s.env.records in
-    match (match find n with Some r -> Some r | None -> find (T.bare n)) with
+    (* By the type's own name only: a bare-name fallback could read another
+       module's record of the same name. *)
+    match StrMap.find_opt n s.env.records with
     | Some (params, fields) -> (
       match List.assoc_opt field fields with
       | Some fty -> (
@@ -673,11 +703,26 @@ let rec bind_pat (s : st) (c : ctx) (p : Ast.pattern) (t : T.t) : ctx =
     match ctor_fields s ctor.Ast.txt t with
     | Some fts when List.length fts = List.length ps -> List.fold_left2 (bind_pat s) c ps fts
     | _ -> all_opaque c)
-  | Ast.PatOr (ps, _), _ ->
-    (* Every alternative binds the same names; take the first alternative's
-       types and flow the others' into them is not needed: each binds from
-       the same scrutinee type. *)
-    (match ps with first :: _ -> bind_pat s c first t | [] -> c)
+  | Ast.PatOr (ps, _), _ -> (
+    (* Every alternative binds the same names, but not always from the same
+       part of the value (`((f, _), 0) | ((_, f), 1)`): the body sees the
+       first alternative's binders, and each other alternative's flow into
+       them. *)
+    match ps with
+    | [] -> c
+    | first :: rest ->
+      let c1 = bind_pat s c first t in
+      List.iter
+        (fun alt ->
+           let c2 = bind_pat s c alt t in
+           List.iter
+             (fun (n : Ast.name) ->
+                match List.assoc_opt n.Ast.txt c2.scope, List.assoc_opt n.Ast.txt c1.scope with
+                | Some (Bound (b2, _)), Some (Bound (b1, _)) -> flow s b2 b1
+                | _ -> ())
+             (pat_binders alt))
+        rest;
+      c1)
   | _ -> all_opaque c
 
 let rec walk (s : st) (c : ctx) (e : Ast.expr) : T.t =
@@ -701,7 +746,7 @@ and walk_inner (s : st) (c : ctx) (e : Ast.expr) : T.t =
   | Ast.EApp (f, args, sp) -> walk_app s c f args sp
   | Ast.EPipe (l, r, sp) -> (
     match r with
-    | Ast.EApp (g, args, _) -> walk_app s c g (args @ [ l ]) sp
+    | Ast.EApp (g, args, _) -> walk_app s c g (l :: args) sp
     | _ -> walk_app s c r [ l ] sp)
   | Ast.ELam (ps, body, sp) ->
     let names = List.map (fun (p : Ast.param) -> p.Ast.param_name) ps in
@@ -872,18 +917,32 @@ and walk_block (s : st) (c : ctx) (es : Ast.expr list) : T.t =
     walk_block s c rest
 
 (* A lambda or a local fn: its annotated type and its set. *)
-and walk_fn_value (s : st) (c : ctx) ~(params : Ast.name list) ~(body : Ast.expr) : T.t * svar =
+and walk_fn_value ?(self : Ast.name option) (s : st) (c : ctx) ~(params : Ast.name list) ~(body : Ast.expr)
+    : T.t * svar =
   let set = fresh s and own = fresh s and valv = fresh s in
   let holes = List.map (fun (n : Ast.name) -> (n, T.new_hole ())) params in
+  (* The function's type exists before its body is walked, so a local fn's
+     calls to itself flow their arguments into its real parameters and take
+     its real result (the result is a hole the walked body fills). *)
+  let result = T.new_hole () in
+  let t =
+    match holes with
+    | [] -> T.Arrow (T.Plain, result, set)
+    | _ -> List.fold_right (fun (_, h) acc -> T.Arrow (h, acc, set)) holes result
+  in
   let depth = c.depth + 1 in
+  let outer_scope =
+    match self with Some n -> (n.Ast.txt, Bound (t, c.depth)) :: c.scope | None -> c.scope
+  in
   let scope =
-    List.fold_left (fun sc ((n : Ast.name), h) -> (n.Ast.txt, Bound (h, depth)) :: sc) c.scope holes
+    List.fold_left (fun sc ((n : Ast.name), h) -> (n.Ast.txt, Bound (h, depth)) :: sc) outer_scope holes
   in
   (* What a function value creates is in the set of the one that creates it
      (design §6.1). *)
   (match c.lams with (_, outer) :: _ -> add_edge s.store set outer | [] -> ());
   let c' = { c with act = None; own; valv; scope; lams = (depth, set) :: c.lams; depth } in
   let bt = walk s c' body in
+  (match result with T.Hole h -> fill_hole s h bt | _ -> ());
   List.iter (fun ((n : Ast.name), h) -> record_annot s n.Ast.span h) holes;
   add_edge s.store ~narrow:c.auth own set;
   (* What arrives through a called or captured value is never narrowed: it
@@ -891,21 +950,11 @@ and walk_fn_value (s : st) (c : ctx) ~(params : Ast.name list) ~(body : Ast.expr
      unsound rule, kept only to show the oracle catches it. *)
   if s.unsound = Some `Narrow_values then add_edge s.store ~narrow:c.auth valv set
   else add_edge s.store valv set;
-  let t =
-    match holes with
-    | [] -> T.Arrow (T.Plain, bt, set)
-    | _ -> List.fold_right (fun (_, h) acc -> T.Arrow (h, acc, set)) holes bt
-  in
-  (t, set)
+  (resolve_holes_result t, set)
 
 and walk_let_fn (s : st) (c : ctx) (name : Ast.name) (ps : Ast.param list) (body : Ast.expr) : T.t * ctx =
-  (* The function is in scope in its own body: bind it to a hole that the
-     finished type fills. *)
-  let self = T.new_hole () in
-  let c_self = { c with scope = (name.Ast.txt, Bound (self, c.depth)) :: c.scope } in
   let names = List.map (fun (p : Ast.param) -> p.Ast.param_name) ps in
-  let t, set = walk_fn_value s c_self ~params:names ~body in
-  (match self with T.Hole h -> fill_hole s h t | _ -> ());
+  let t, set = walk_fn_value ~self:name s c ~params:names ~body in
   s.sites <-
     { rs_span = name.Ast.span; rs_key = span_of_expr body; rs_kind = Local_fn name.Ast.txt; rs_owner = c.owner;
       rs_set = set; rs_ty = t }
@@ -1239,6 +1288,14 @@ and builtin_flows ?(name = "") (s : st) (c : ctx) (ats : T.t list) (sp : Ast.spa
     | T.Record fs -> List.concat_map (fun (_, x) -> callable x) fs
   in
   List.iter (fun v -> add_edge s.store v c.valv) (List.concat_map callable ats);
+  (* A builtin may store one argument in another (`vault_set(table, key,
+     value)` returns unit): what any argument holds may end up in any other. *)
+  List.iteri
+    (fun i a ->
+       List.iteri
+         (fun j b -> if i <> j then List.iter (fun u -> List.iter (fun v -> add_edge s.store u v) (T.svars b)) (T.held a))
+         ats)
+    ats;
   let rvars = T.svars join in
   List.iter (fun u -> List.iter (fun v -> add_edge s.store u v) rvars) arg_vars;
   if debug && arg_vars = [] && T.svars join <> [] then
@@ -1272,6 +1329,8 @@ and call_builtin (s : st) (c : ctx) (n : Ast.name) (args : Ast.expr list) (ats :
      let own = S.of_scopes [ { S.kind; arg = None } ] in
      add_const s.store ~why c.own (scope_own own (literal_scope n.Ast.txt args))
    | None -> ());
+  if List.mem n.Ast.txt dispatching_builtins then
+    add_unknown s.store c.valv ~cause:"a builtin that runs callbacks registered elsewhere" sp;
   let join = if plain_at s sp then T.Plain else of_span s sp in
   if join <> T.Plain || List.exists (fun a -> a <> T.Plain) ats then builtin_flows ~name:n.Ast.txt s c ats sp join;
   join

@@ -1,0 +1,19 @@
+-- Found in review: a builtin that stores one argument in another and
+-- returns unit (vault_set) links the stored value to the container.
+mod ReviewBuiltinStore do
+  needs IO.Console, IO.Mut
+  fn mk(u : Int) do
+    let l = fn (x : Int) -> match println("x") do _ -> 1 end
+    l
+  end
+  fn main() do
+    let vt = Authority.must(Vault.new("capture_review_store"))
+    vault_set(vt, "k", mk(1))
+    let r = fn () -> match vault_get(vt, "k") do
+      Some(g) -> g(1)
+      None -> 0
+    end
+    let _ = r()
+    ()
+  end
+end
