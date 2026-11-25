@@ -216,17 +216,15 @@ end
 let test_compiled_drop () =
   check_all ~skip:[ "js" ] ~name:"compiled_drop" ~src:drop_src [ ("", "flat\n") ]
 
-(* march_cap_unwind takes its OWN reference to the authority it puts back.
-   It must not instead adopt the reference held by the saved value of the
-   frame the panic abandoned ("the slot's reference moved into that saved
-   value, so reuse it"): nothing keeps that saved value alive until the
-   panic.  [boom] below never restores what its push returned, so the
-   compiler drops the saved value right after the push, and at the panic the
-   only reference to the outer authority is the pushed cell's tail.  An
-   unwind that takes no reference then frees the outer authority while it is
-   in force, and [under]'s cap_restore releases it again: the runtime aborts
-   with "RC underflow" (a use-after-free under ASan).  Tried and measured:
-   specs/todos/2026-11-19-ocap-cap-unwind-mark-leak.md. *)
+(* A caught panic must leave the authority it puts back alive.  [boom] never
+   restores what its push returned, so the compiler drops that value right
+   after the push.  When the value was the reference to the outer authority
+   (before the saved stack), an unwind that "adopted" it, taking no reference
+   of its own, freed the outer authority while it was in force, and [under]'s
+   cap_restore released it again: "RC underflow" (a use-after-free under
+   ASan).  Now the value is a token and the runtime's saved stack holds the
+   reference, so the drop is a no-op; this keeps guarding the same outcome.
+   History: specs/progress/2026-11-24-ocap-cap-unwind-mark-leak.md. *)
 let unwind_adopt_src = {|mod CapUnwindAdopt do
   needs IO.Console
   fn layer(name : String) do
@@ -273,6 +271,92 @@ let test_unwind_keeps_mark () =
      push without a frame. *)
   check_all ~skip:[ "interp" ] ~name:"unwind_adopt" ~src:unwind_adopt_src
     [ ("", "caught 400\nlayers 0\n") ]
+
+(* What a caught panic abandons, the catcher releases: the saved authority
+   of every frame the panic left without restoring (one frame, two nested
+   frames, a frame entered a second time) is held by the runtime, not by the
+   abandoned code, so march_cap_unwind can release exactly those.  Before,
+   each such frame's saved value kept one reference to the authority below
+   it, and that authority (its cell and its layer) was never freed.
+
+   A panic leaks other things by itself (its message, the closure), so
+   each shape is measured twice: caught under the launch authority, whose
+   slot value is not counted, and caught under a pushed, refcounted one that
+   is restored after every catch.  The two must leave the same number of
+   objects behind, and no more than one per catch (the message).  Compiled
+   and JIT: the other two have no live_allocs. *)
+let unwind_exact_src = {|mod CapUnwindExact do
+  needs IO.Console
+  fn layer(name : String) do
+    Authority.Layer(ByFnNeeds(name), "IO.FileRead(\"/srv/\")",
+      Cons(Authority.CapEntry("IO.FileRead", Authority.Paths(Cons("/srv/", Nil))), Nil))
+  end
+  -- Not known to panic where it is called, so the caller's restore stays.
+  fn thrower(n : Int) : Int do
+    if n >= 0 do panic("boom " ++ int_to_string(n)) else n end
+  end
+  fn one(n : Int) : Int do
+    let old = cap_push(layer("inner"))
+    let r = thrower(n)
+    cap_restore(old)
+    r
+  end
+  fn two(n : Int) : Int do
+    let old = cap_push(layer("middle"))
+    let r = one(n)
+    cap_restore(old)
+    r
+  end
+  fn again(n : Int) : Int do
+    let old = Authority.enter_fn(layer("again"))
+    let old2 = Authority.enter_fn(layer("again"))
+    let r = thrower(n)
+    cap_restore(old2)
+    cap_restore(old)
+    r
+  end
+  fn catch_one(act : Bool -> Int) : Int do
+    match __try_call_val(act) do
+    Ok(_) -> 0
+    Err(_) -> 1
+    end
+  end
+  fn bare(act : Bool -> Int, n : Int, acc : Int) : Int do
+    if n == 0 do acc else bare(act, n - 1, acc + catch_one(act)) end
+  end
+  fn under(act : Bool -> Int, n : Int, acc : Int) : Int do
+    if n == 0 do acc
+    else
+      let old = cap_push(layer("outer"))
+      let c = catch_one(act)
+      cap_restore(old)
+      under(act, n - 1, acc + c)
+    end
+  end
+  fn measure(name : String, act : Bool -> Int) : Int do
+    let warm = bare(act, 5, 0) + under(act, 5, 0)
+    let a = live_allocs()
+    let x = bare(act, 100, 0)
+    let b = live_allocs()
+    let y = under(act, 100, 0)
+    let c = live_allocs()
+    println(name ++ ": " ++ (if c - b <= b - a && b - a <= 100 do "exact" else
+      "under a frame leaves " ++ int_to_string(c - b) ++ ", bare " ++ int_to_string(b - a) end))
+    warm + x + y
+  end
+  fn main(_c : Cap(IO.Console)) do
+    let n = measure("one frame", fn _ -> one(1))
+      + measure("two frames", fn _ -> two(1))
+      + measure("entered twice", fn _ -> again(1))
+    println("caught " ++ int_to_string(n))
+    println("layers " ++ int_to_string(List.length(cap_layers())))
+  end
+end
+|}
+
+let test_unwind_exact () =
+  check_all ~skip:[ "js"; "interp" ] ~name:"unwind_exact" ~src:unwind_exact_src
+    [ ("", "one frame: exact\ntwo frames: exact\nentered twice: exact\ncaught 630\nlayers 0\n") ]
 
 (* Task 10b: cap_enter of the authority already in force changes nothing
    and touches no count (natively it returns a tagged word that cap_restore
@@ -545,6 +629,8 @@ let tests =
           test_compiled_drop;
         Alcotest.test_case "a caught panic keeps the authority it restores alive" `Quick
           test_unwind_keeps_mark;
+        Alcotest.test_case "a caught panic releases what the abandoned frames saved" `Quick
+          test_unwind_exact;
         Alcotest.test_case "cap_enter of the authority in force changes nothing" `Quick
           test_enter_same;
         Alcotest.test_case "the Task 10b fast paths leave nothing live" `Quick

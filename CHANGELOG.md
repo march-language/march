@@ -1341,6 +1341,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A caught panic no longer leaks the authority of the functions it unwound.** A panic
+  caught (`try_finally`, `Result.try_call`, a supervised actor's crash, a failing test)
+  after passing through functions with a `needs` clause or `restrict` blocks left one
+  authority record per such function allocated for the life of the program; a long-running
+  server that catches panics under scoped functions grew by it. Compiled and JIT; the
+  interpreter and the JS target were unaffected.
 - **`march repl FILE` loads the library modules the file uses.** A preloaded file (as
   `forge interactive` and the REPL's `:load` give it) now finds the modules it names on
   `MARCH_LIB_PATH`, as a batch build does; they were "Unknown module". Its modules also load
