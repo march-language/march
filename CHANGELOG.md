@@ -1376,6 +1376,11 @@ git log is authoritative for exact commits.
   authority record per such function allocated for the life of the program; a long-running
   server that catches panics under scoped functions grew by it. Compiled and JIT; the
   interpreter and the JS target were unaffected.
+- **`Udp.recv` and `Udp.recv_batch` no longer drop a datagram when the socket is closed
+  right after it arrives.** A receive that was waiting when another task closed the socket
+  answered `Err(Closed)` even if a datagram had already reached the socket, and the
+  datagram was discarded. It now returns the datagrams; only a receive with nothing to
+  return answers `Err(Closed)`.
 - **`Csv.each_row` and `Csv.each_row_with_header` close their file when the callback
   panics.** A caller that caught the panic lost one open file per failed call, and after
   enough of them every open failed with "Too many open files".
