@@ -547,6 +547,85 @@ let erase_src ~lemmas =
       "end";
       "" ]
 
+(* [Lemma_erase.drop_unreferenced]: one walk over the program decides which
+   unreferenced lemmas go (specs/2026-11-24-stdlib-compile-floor-design.md,
+   Part 1).  Pure: no z3, no compiler binary.  A CALL of a lemma is erased
+   to `()` before the drop runs, so only a non-call mention (a lemma used as
+   a value) keeps one; each lemma below has exactly one, in one of the
+   traversal cases a name set could miss. *)
+module LE = March_desugar.Lemma_erase
+
+let drop_src =
+  {|mod N do
+  type Blob = Blob(Int)
+
+  @[lemma]
+  fn l1(x : Int) : Unit do () end
+  @[lemma]
+  fn l2(x : Int) : Unit do () end
+  @[lemma]
+  fn l3(x : Int) : Unit do () end
+  @[lemma]
+  fn l4(x : Int) : Unit do () end
+
+  mod Inner do
+    fn g() do
+      let _keep1 = l1
+      0
+    end
+  end
+
+  impl Show(Blob) do
+    fn show(b) do
+      let _keep2 = l2
+      "blob"
+    end
+  end
+
+  actor Counter do
+    state { count : Int }
+    init { count: 0 }
+    on Inc() do
+      let _keep3 = l3
+      { count: state.count + 1 }
+    end
+  end
+end
+|}
+
+(* Every [DFn] name in [decls], nested modules included. *)
+let rec fn_names (decls : March_ast.Ast.decl list) : string list =
+  List.concat_map
+    (function
+      | March_ast.Ast.DFn (fd, _) -> [ fd.March_ast.Ast.fn_name.March_ast.Ast.txt ]
+      | March_ast.Ast.DMod (_, _, inner, _) -> fn_names inner
+      | _ -> [])
+    decls
+
+let erased_fn_names () =
+  fn_names (Test_helpers.erase_lemmas (Test_helpers.parse_and_desugar drop_src)).March_ast.Ast.mod_decls
+
+let drop_unreferenced_cases =
+  let kept name () =
+    if not (List.mem name (erased_fn_names ())) then
+      Alcotest.failf "lemma %s was dropped although it is mentioned" name
+  in
+  [ Alcotest.test_case "lemma_used_from_nested_mod_kept" `Quick (kept "l1");
+    Alcotest.test_case "lemma_used_from_impl_method_kept" `Quick (kept "l2");
+    Alcotest.test_case "lemma_used_from_actor_handler_kept" `Quick (kept "l3");
+    Alcotest.test_case "lemma_unmentioned_dropped" `Quick (fun () ->
+        if List.mem "l4" (erased_fn_names ()) then Alcotest.fail "unmentioned lemma l4 was kept");
+    Alcotest.test_case "mentioned_names_matches_mentions" `Quick (fun () ->
+        let decls = (Test_helpers.parse_and_desugar drop_src).March_ast.Ast.mod_decls in
+        let names = LE.mentioned_names decls in
+        LE.SS.iter
+          (fun n -> if not (LE.mentions n decls) then Alcotest.failf "%s in the set but not mentioned" n)
+          names;
+        List.iter
+          (fun n ->
+            Alcotest.(check bool) n (LE.mentions n decls) (LE.SS.mem n names))
+          [ "l1"; "l2"; "l3"; "l4" ]) ]
+
 let erase =
   [ gated "erase_runtime: interpreted, compiled and JIT output equal the lemma-free program's" (fun () ->
         List.iter

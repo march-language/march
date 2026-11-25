@@ -21,6 +21,9 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Compiles are about 0.3 s faster.** Lemma erasure collected the names the program
+  mentions once per `@[lemma]` declaration, walking the whole program (stdlib included)
+  each time; it now walks it once. What gets erased is unchanged.
 - **Under dependency grants, a module name defined twice is an error.** With a grants file
   in effect, a module defined both by the app and a dependency, by two dependencies, or by a
   dependency and the standard library is `dep_module_conflict`, as is a granted library root
