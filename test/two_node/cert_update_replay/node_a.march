@@ -56,7 +56,7 @@ mod CertUpdateReplayA do
     -- node-b's own departure is seen from its link closing, not from SWIM.
     let swim = { cfg0.swim with suspect_timeout_ms: 600000 }
     let cfg = { cfg0 with swim: swim }
-    match ClusterNode.start(c, cfg) do
+    match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         let flags = Authority.must(Vault.new("replay_flags"))

@@ -1,0 +1,27 @@
+-- TEST
+-- An actor spawned inside a `mock` block keeps the mock for life (ocap
+-- phase 7): it runs under the authority of its spawn. One spawned before
+-- the block, and sent its message after the block has ended, does not.
+mod MockActor do
+  needs IO.Console
+
+  actor Logger do
+    state { n : Int }
+    init  { n: 0 }
+    on Say(s : String) do
+      IO.puts("A:" ++ s)
+      { state with n: state.n + 1 }
+    end
+  end
+
+  fn main() do
+    let outside = spawn(Logger)
+    let inside = mock IO.Console with { print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) } do
+      spawn(Logger)
+    end
+    send(inside, Say("in"))
+    run_until_idle()
+    send(outside, Say("out"))
+    run_until_idle()
+  end
+end

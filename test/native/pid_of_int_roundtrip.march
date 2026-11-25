@@ -15,11 +15,11 @@ mod PidRoundtrip do
   -- The cap is minted once in main and FORWARDED: a function that holds no
   -- Pid can still reach one only because it was handed the authority.
   fn stale_of(intro : Cap(Actor.Introspect), n : Int) do
-    Actor.pid_from_int(intro, n)
+    Authority.must(Actor.pid_from_int(n))
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let p = spawn(Echo)
     println(bool_to_string(is_alive(p)))
 

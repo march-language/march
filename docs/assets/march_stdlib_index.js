@@ -35,6 +35,7 @@ window.marchModuleIndex = {
    "file": "actor.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "IO",
     "List",
     "Scheduler"
@@ -1143,6 +1144,7 @@ window.marchModuleIndex = {
    "uses": [
     "Authority",
     "Bytes",
+    "IO",
     "List",
     "String",
     "Vault"

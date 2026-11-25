@@ -11983,7 +11983,7 @@ end
 -- From inside the declaring module: relative names.
 fn run_inside(c : Cap(IO)) : () do
   let t = Session.in_process()
-  let s = Session.attach(c, t.ops)
+  let s = Authority.must(Session.attach(t.ops))
   let _ = role_b(s, Pq_B.register(s, 0))
   let _ = Pq_A.script(s, Pq_A.register(s, 0), [Pq_A.Send_Hi(5), Pq_A.Expect_Back(fn note -> Authority.ignore(println("script A got " ++ note.text)))])
   t.drain(())
@@ -12001,12 +12001,12 @@ end|}
 let endpoints_placement_user = {|fn use_from_outside(c : Cap(IO)) : () do
   P.run_inside(c)
   let t = Session.in_process()
-  let s = Session.attach(c, t.ops)
+  let s = Authority.must(Session.attach(t.ops))
   let _ = P.Pq_B.script(s, P.Pq_B.register(s, 0), [P.Pq_B.Expect_Hi(fn n -> Authority.ignore(println("script B got " ++ int_to_string(n)))), P.Pq_B.Send_Back({ pq: 7, text: "scripted" })])
   let _ = P.role_a(s, P.Pq_A.register(s, 0), 3)
   t.drain(())
   let t2 = Session.in_process()
-  let s2 = Session.attach(c, t2.ops)
+  let s2 = Authority.must(Session.attach(t2.ops))
   let _ = P.Pq_B.chaos(s2, P.Pq_B.register(s2, 0), 11, Gen.map(Gen.int(0, 9), fn n -> { pq: n, text: "chaos" }))
   let _ = P.Pq_A.chaos(s2, P.Pq_A.register(s2, 0), 12)
   t2.drain(())
@@ -16187,13 +16187,11 @@ let test_js_test_runner_gaps () =
   test "process env and value-typed capability mocks" do
     println(to_string(Authority.must(Process.env("MARCH_JS_GAPS_VAR"))))
     println(to_string(Authority.must(Process.env("MARCH_JS_GAPS_UNSET"))))
-    let c : Cap(IO.Process) = cap_narrow(root_cap)
     let before = where_am_i()
-    let mock = cap_impl(c, { cap_ops_empty(c) with
-      process_cwd: Some("/mocked"),
-      process_pid: Some(42) })
-    println(with_cap(mock, fn _ -> where_am_i()))
-    println(to_string(with_cap(mock, fn _ -> Process.pid())))
+    mock IO.Process with { process_cwd: Some("/mocked"), process_pid: Some(42) } do
+      println(where_am_i())
+      println(to_string(Process.pid()))
+    end
     println(to_string(before == where_am_i() && before != "/mocked"))
     ()
   end
@@ -19095,6 +19093,8 @@ declare ptr    @march_cap_push(ptr %layer)
 declare ptr    @march_cap_enter(ptr %auth)
 declare ptr    @march_cap_grant_text()
 declare ptr    @march_cap_cwd()
+declare i64    @march_mock_register(ptr %h)
+declare ptr    @march_mock_lookup(i64 %id)
 declare void   @march_cap_launch_fail(ptr %text)
 declare ptr    @march_cap_rt_parse(ptr %text)
 declare i64    @march_cap_rt_admits(ptr %scopes, ptr %kind, ptr %target, ptr %cwd)
@@ -19124,8 +19124,6 @@ declare ptr  @march_cap_narrow(ptr %cap)
 declare ptr  @march_mint_cap(ptr %cap)
 declare ptr  @march_cap_impl(ptr %cap, ptr %dict)
 declare ptr  @march_cap_dict(ptr %cap)
-declare void @march_set_actor_caps(ptr %actor, ptr %caps)
-declare ptr  @march_actor_caps(ptr %actor)
 ; Monitor/supervision builtins
 declare void @march_demonitor(i64 %ref)
 declare i64  @march_monitor(ptr %watcher, ptr %target)

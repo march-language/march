@@ -7,6 +7,7 @@ mod Main do
   needs IO
   needs IO.Console
   needs IO.FileRead
+  needs Actor.Introspect
 
   fn dir() : String do "../forge/test/fixtures/diagnose/" end
 
@@ -31,7 +32,7 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
     match Authority.must(File.read(dir() ++ "expected.txt")) do
       Ok(text) ->
         List.each(List.filter(String.split(text, "\n"), fn l -> l != ""), fn l ->
@@ -41,7 +42,7 @@ mod Main do
     -- Diagnose.run on this program itself: it runs (two in-process
     -- snapshots) on both backends. Not printed: its findings depend on the
     -- machine, and stdout must equal expected.txt.
-    let _ = Diagnose.run(Actor.introspect(io), 10)
+    let _ = Diagnose.run(Authority.must(Actor.introspect()), 10)
     match Json.parse("{\"data\":{\"actors\":{\"total\":101,\"shown\":100},\"crashes\":{\"total\":21,\"crashes\":[]}}}") do
       Ok(capped) ->
         match Diagnose.coverage(capped, capped) do

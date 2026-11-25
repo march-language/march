@@ -8,6 +8,7 @@ mod Main do
   needs IO
   needs IO.Console
   needs IO.Clock
+  needs Actor.Introspect
 
   type AskReq = AskReq
 
@@ -50,8 +51,8 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let c = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let c = Authority.must(Actor.introspect())
     let sink = spawn(Sink)
     let caller = spawn(Caller)
     let _ = send(caller, Stall(sink))

@@ -220,6 +220,8 @@ void   *march_cap_mark(void);
 void    march_cap_unwind(void *mark);
 void   *march_cap_grant_text(void);
 void   *march_cap_cwd(void);
+int64_t march_mock_register(void *handler);
+void   *march_mock_lookup(int64_t id);
 void    march_cap_launch_fail(void *text);
 void    march_cap_release(void *layers);
 
@@ -1050,8 +1052,6 @@ void   *march_dist_monitor_pending(void);
 void    march_dist_monitor_ack_pid(int64_t target_pid, int64_t watcher_pid);
 int64_t march_dist_monitor_forget_node_str(void *node_str);
 /* Register an actor with the scheduler; returns actor unchanged. */
-void    march_set_actor_caps(void *actor, void *caps);
-void   *march_actor_caps(void *actor);
 void   *march_spawn(void *actor);
 /* Internal compiler/runtime handshake for supervise-block children: assign a
  * Pid/meta now, but do not schedule the actor loop until register_child has

@@ -1392,6 +1392,7 @@ let rec expr_mentions (names : string list) (e : A.expr) : bool =
   | A.EField (r, _, _) -> expr_mentions names r
   | A.EIf (c, t, el, _) -> any [ c; t; el ]
   | A.ERestrict (es, b, _) -> any (es @ [ b ])
+  | A.EMock (es, h, b, _) -> any ((es @ [ h ]) @ [ b ])
   | A.ECond (arms, _) ->
     List.exists (fun (c, b) -> expr_mentions names c || expr_mentions names b) arms
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> expr_mentions names a || expr_mentions names b
@@ -1452,6 +1453,7 @@ let rec name_escapes ?(pass_checked : string -> int -> bool = fun _ _ -> false) 
   | A.EField (r, _, _) -> esc r
   | A.EIf (c, t, el, _) -> any [ c; t; el ]
   | A.ERestrict (es, b, _) -> any (es @ [ b ])
+  | A.EMock (es, h, b, _) -> any ((es @ [ h ]) @ [ b ])
   | A.ECond (arms, _) -> List.exists (fun (c, b) -> esc c || esc b) arms
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> esc a || esc b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
@@ -1516,6 +1518,7 @@ let rec expr_mentions_free (m : string) (e : A.expr) : bool =
   | A.EField (r, _, _) -> free r
   | A.EIf (c, t, el, _) -> any [ c; t; el ]
   | A.ERestrict (es, b, _) -> any (es @ [ b ])
+  | A.EMock (es, h, b, _) -> any ((es @ [ h ]) @ [ b ])
   | A.ECond (arms, _) -> List.exists (fun (c, b) -> free c || free b) arms
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)

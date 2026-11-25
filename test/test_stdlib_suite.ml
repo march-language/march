@@ -1261,10 +1261,10 @@ let test_eval_pid_to_int_roundtrip () =
       on Noop() do { x: state.x } end
     end
     fn main(io : Cap(IO)) do
-      let intro = Actor.introspect(io)
+      let intro = Authority.must(Actor.introspect())
       let pa = spawn(A)
       let n = pid_to_int(pa)
-      let back = Actor.pid_from_int(intro, n)
+      let back = Authority.must(Actor.pid_from_int(n))
       (n, to_string(pa) == "Pid(" ++ int_to_string(n) ++ ")", is_alive(back))
     end
   end|} in
@@ -12553,7 +12553,7 @@ let with_compiled_program ~tag ~src_text ~env_prefix f =
    A builtin has two implementations — the runtime C function and eval.ml's
    VBuiltin — and nothing forces them to agree, so they drift silently unless a
    test runs the same program both ways. *)
-let compiled_and_interpreted_stdout ~tag ~src_text =
+let compiled_and_interpreted_stdout ?(run_prefix = "") ~tag ~src_text () =
   let main_exe = find_main_exe () in
   let tmp = Filename.temp_file tag "" in
   Sys.remove tmp;
@@ -12567,8 +12567,8 @@ let compiled_and_interpreted_stdout ~tag ~src_text =
   let interp_out = Filename.concat tmp "interp.txt" in
   let irc =
     Sys.command
-      (Printf.sprintf "%s %s > %s 2>/dev/null"
-         (Filename.quote main_exe) (Filename.quote src) (Filename.quote interp_out))
+      (Printf.sprintf "%s%s %s > %s 2>/dev/null"
+         run_prefix (Filename.quote main_exe) (Filename.quote src) (Filename.quote interp_out))
   in
   Alcotest.(check int) "interpreted run exits 0" 0 irc;
   let interpreted = String.trim (read_file_contents interp_out) in
@@ -12579,7 +12579,7 @@ let compiled_and_interpreted_stdout ~tag ~src_text =
     let out = Filename.concat tmp "compiled.txt" in
     let rc =
       Sys.command
-        (Printf.sprintf "%s > %s 2>/dev/null" (Filename.quote bin) (Filename.quote out))
+        (Printf.sprintf "%s%s > %s 2>/dev/null" run_prefix (Filename.quote bin) (Filename.quote out))
     in
     Alcotest.(check int) "compiled run exits 0" 0 rc;
     (interpreted, Some (String.trim (read_file_contents out)))
@@ -12760,7 +12760,7 @@ let index_of_from_expected = "1\n3\nnone\n3\n1\nnone\n1"
 let test_string_index_of_from () =
   let (interpreted, compiled) =
     compiled_and_interpreted_stdout ~tag:"march_idxfrom"
-      ~src_text:index_of_from_probe_src
+      ~src_text:index_of_from_probe_src ()
   in
   Alcotest.(check string) "interpreted offsets and clamping"
     index_of_from_expected interpreted;
@@ -12828,7 +12828,7 @@ let char_from_int_expected = "256\n0\n255\n255\n0"
 let test_char_from_int_byte_parity () =
   let (interpreted, compiled) =
     compiled_and_interpreted_stdout ~tag:"march_charfromint"
-      ~src_text:char_from_int_probe_src
+      ~src_text:char_from_int_probe_src ()
   in
   Alcotest.(check string) "interpreted: 0-255 round-trip, wraparound is n & 0xFF"
     char_from_int_expected interpreted;
@@ -12891,7 +12891,7 @@ let search_edge_expected =
 
 let test_string_search_edge_cases () =
   let (interpreted, compiled) =
-    compiled_and_interpreted_stdout ~tag:"march_search" ~src_text:search_edge_probe_src
+    compiled_and_interpreted_stdout ~tag:"march_search" ~src_text:search_edge_probe_src ()
   in
   Alcotest.(check string) "interpreted search edge cases"
     search_edge_expected interpreted;
@@ -12968,7 +12968,7 @@ let test_concat_chain_values () =
      trims -- so the expectation ends at the single "a". *)
   let expected = "aa\naaa\naaaa\naaaaaa\naa\na" in
   let (interpreted, compiled) =
-    compiled_and_interpreted_stdout ~tag:"march_catval" ~src_text:src
+    compiled_and_interpreted_stdout ~tag:"march_catval" ~src_text:src ()
   in
   Alcotest.(check string) "interpreted concat chain values" expected interpreted;
   match compiled with
@@ -13026,7 +13026,7 @@ let test_compress_decode_error_structured_both_backends () =
     "gzip invalid_input\ndeflate invalid_input\nzstd invalid_input\n\
      brotli invalid_input\nroundtrip hello hello hello\nstream invalid_input" in
   let (interpreted, compiled) =
-    compiled_and_interpreted_stdout ~tag:"march_compress_err" ~src_text:src
+    compiled_and_interpreted_stdout ~tag:"march_compress_err" ~src_text:src ()
   in
   Alcotest.(check string) "interpreted: decode errors are Compress.Error" expected interpreted;
   match compiled with
@@ -13091,12 +13091,64 @@ let test_crypto_verify_password_malformed_both_backends () =
      dklen_big err pbkdf2_sha256: invalid parameters\n\
      valid ok 32" in
   let (interpreted, compiled) =
-    compiled_and_interpreted_stdout ~tag:"march_verifypw" ~src_text:src
+    compiled_and_interpreted_stdout ~tag:"march_verifypw" ~src_text:src ()
   in
   Alcotest.(check string) "interpreted: malformed hashes verify false" expected interpreted;
   match compiled with
   | None -> ()
   | Some out -> Alcotest.(check string) "compiled matches interpreted" expected out
+
+(* Csv.each_row and each_row_with_header close their file when the callback
+   panics.  300 calls whose callback panics, each caught, under a limit of 128
+   open files: with the handle left open the next open fails with "Too many
+   open files".  The limit is the shell's (ulimit -n), so the count does not
+   depend on the machine's own. *)
+let test_csv_each_row_closes_on_callback_panic () =
+  let data = Filename.temp_file "march_csvpanic" ".csv" in
+  Out_channel.with_open_bin data (fun oc -> output_string oc "a,b\n1,2\n3,4\n");
+  let src =
+    Printf.sprintf
+      "mod CsvPanic do\n\
+      \  needs IO.Console\n\
+      \  needs IO.FileRead\n\
+      \  pfn burn(n : Int, header : Bool) do\n\
+      \    if n == 0 do :ok\n\
+      \    else\n\
+      \      let _ = __try_call(fn _ ->\n\
+      \        let _ = if header do\n\
+      \          Csv.each_row_with_header(%S, \",\", :rfc4180, fn (_h, _r) -> panic(\"boom\"))\n\
+      \        else\n\
+      \          Csv.each_row(%S, \",\", :rfc4180, fn _ -> panic(\"boom\"))\n\
+      \        end\n\
+      \        true)\n\
+      \      burn(n - 1, header)\n\
+      \    end\n\
+      \  end\n\
+      \  pfn rows() : String do\n\
+      \    match Csv.read_all(%S, \",\", :rfc4180) do\n\
+      \    Ok(Ok(rs)) -> int_to_string(List.length(rs)) ++ \" rows\"\n\
+      \    _ -> \"cannot open\"\n\
+      \    end\n\
+      \  end\n\
+      \  fn main(_c : Cap(IO.Console), _f : Cap(IO.FileRead)) do\n\
+      \    burn(300, false)\n\
+      \    println(\"each_row: \" ++ rows())\n\
+      \    burn(300, true)\n\
+      \    println(\"each_row_with_header: \" ++ rows())\n\
+      \  end\n\
+       end\n"
+      data data data
+  in
+  let expected = "each_row: 3 rows\neach_row_with_header: 3 rows" in
+  let (interpreted, compiled) =
+    compiled_and_interpreted_stdout ~run_prefix:"ulimit -n 128; " ~tag:"march_csvpanic"
+      ~src_text:src ()
+  in
+  (try Sys.remove data with Sys_error _ -> ());
+  Alcotest.(check string) "interpreted: the file still opens" expected interpreted;
+  match compiled with
+  | None -> ()
+  | Some out -> Alcotest.(check string) "compiled: the file still opens" expected out
 
 (* Is this machine's ASAN runtime able to run ANY sanitized binary?  Compiles
    and runs a C hello-world with no March code in it; [true] means even that
@@ -15585,6 +15637,10 @@ let stdlib_suites =
         Alcotest.test_case "verify rejects wrong"       `Quick test_crypto_password_wrong;
         Alcotest.test_case "verify malformed hash is false, compiled + interpreted" `Slow
           test_crypto_verify_password_malformed_both_backends;
+      ]);
+      ("csv handle on panic", [
+        Alcotest.test_case "each_row closes its file when the callback panics, compiled + interpreted" `Slow
+          test_csv_each_row_closes_on_callback_panic;
       ]);
       ("compress stdlib", [
         Alcotest.test_case "parse"                              `Quick test_compress_parse_ok;

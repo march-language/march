@@ -19,6 +19,14 @@ val ops_of_cap : string -> string list
 val dict_fields : string -> (string * ty) list
 (** The capability's dictionary as sorted [(field, Option(op_ty))] pairs. *)
 
+val mock_fields : string -> (string * ty) list
+(** The handler record a [mock] of this capability takes (ocap phase 7): its
+    dictionary's fields, or [IO.Mut]'s [open] hook; [[]] when it cannot be
+    mocked. *)
+
+val mock_caps : unit -> string list
+(** The capabilities a [mock] may name, sorted. *)
+
 val shadowed_by_stdlib : string list
 (** Builtins a stdlib March function shadows, so the builtin is dead and the
     table's type is not the operation a user's call resolves to.  Cross-checked

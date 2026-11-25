@@ -40,7 +40,7 @@ mod Main do
   end
 
   fn main(io : Cap(IO)) : () do
-    let node = match ClusterNode.start(io, ClusterNode.config("party-1", 0, "", Nil, "party-secret", 1)) do
+    let node = match ClusterNode.start(ClusterNode.config("party-1", 0, "", Nil, "party-secret", 1)) do
       Ok(h) -> h
       Err(e) -> panic(e)
     end

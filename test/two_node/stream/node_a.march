@@ -64,7 +64,7 @@ mod StreamOverNodesA do
       Err(e) -> panic("connect: " ++ e)
     end
     let link = SessionNode.open(conn, "node-a", false, fn ep -> print_line("close " ++ int_to_string(ep)))
-    let s = Session.attach(c, SessionNode.ops(link))
+    let s = Authority.must(Session.attach(SessionNode.ops(link)))
     -- Drive Prod to its first suspension (its first Item is on the wire),
     -- then every resumption runs inside the endpoint actor's turn, per frame.
     let _ = prod(s, Stream_Prod.register(s, 0), 1)

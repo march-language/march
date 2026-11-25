@@ -1,0 +1,31 @@
+-- TEST
+-- A task started inside a `mock` block runs under the mock, even when it
+-- finishes after the block has ended (ocap phase 7): the task takes the
+-- authority of its spawn, mock layer included.
+mod MockTask do
+  needs IO.Console
+  needs IO.Clock
+  needs IO.Spawn
+
+  fn stamp() : String do
+    match System.now_ms() do
+    Ok(t) -> if t == 1234 do "mocked" else "real" end
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main() do
+    let t = mock IO.Clock with { unix_time_ms: Some(fn _ -> 1234) } do
+      Task.async(fn () -> stamp())
+    end
+    match t do
+    Err(e) -> println("spawn: " ++ Authority.describe(e))
+    Ok(task) ->
+      match Task.await(task) do
+      Ok(s) -> println("task: " ++ s)
+      Err(e) -> println("await failed: " ++ e)
+      end
+    end
+    println("main after: " ++ stamp())
+  end
+end

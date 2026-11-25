@@ -71,14 +71,14 @@ mod SupervisorConcurrentChildCrash do
   end
 
   fn poison(intro : Cap(Actor.Introspect), sup, field) do
-    send(Actor.pid_from_int(intro, child_int(sup, field)), Poison())
+    send(Authority.must(Actor.pid_from_int(child_int(sup, field))), Poison())
   end
 
   -- Wait (bounded by a deadline) until [field] names a live child other
   -- than [old].
   fn await_restart(intro : Cap(Actor.Introspect), sup, field, old, deadline) do
     let now_pid = child_int(sup, field)
-    if now_pid != old && is_alive(Actor.pid_from_int(intro, now_pid)) do
+    if now_pid != old && is_alive(Authority.must(Actor.pid_from_int(now_pid))) do
       true
     else if Authority.must(System.now_ms()) >= deadline do
       false
@@ -120,8 +120,8 @@ mod SupervisorConcurrentChildCrash do
     end
   end
 
-  fn main(io : Cap(IO), _clock : Cap(IO.Clock)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _clock : Cap(IO.Clock), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let sup = spawn(Sup)
 
     let all_restarted = crash_round(intro, sup, 0, 20, true)
@@ -131,11 +131,11 @@ mod SupervisorConcurrentChildCrash do
     let old_a = child_int(sup2, "a")
     send(sup2, Nap(500))
     let _ = await_dequeued(sup2, Authority.must(System.now_ms()) + 20000)
-    kill(Actor.pid_from_int(intro, old_a))
+    kill(Authority.must(Actor.pid_from_int(old_a)))
     match Actor.call(sup2, GetReq, 20000) do
       Ok(a) ->
         println("restart during a handler kept: "
-                ++ bool_to_string(a != old_a && is_alive(Actor.pid_from_int(intro, a))))
+                ++ bool_to_string(a != old_a && is_alive(Authority.must(Actor.pid_from_int(a)))))
       Err(_) -> println("call failed")
     end
   end

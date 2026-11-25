@@ -51,6 +51,7 @@ let rec calls (e : A.expr) : A.expr list =
   | A.EField (x, _, _) | A.EAnnot (x, _, _) -> calls x
   | A.EIf (c, a, b, _) -> calls c @ calls a @ calls b
   | A.ERestrict (es, b, _) -> List.concat_map calls es @ calls b
+  | A.EMock (es, h, b, _) -> List.concat_map calls (es @ [ h ]) @ calls b
   | _ -> []
 
 (* The variables [e] reads (not application heads). *)
@@ -63,6 +64,7 @@ let rec free_vars (e : A.expr) : string list =
   | A.EField (x, _, _) | A.EAnnot (x, _, _) -> free_vars x
   | A.EIf (c, a, b, _) -> free_vars c @ free_vars a @ free_vars b
   | A.ERestrict (es, b, _) -> List.concat_map free_vars es @ free_vars b
+  | A.EMock (es, h, b, _) -> List.concat_map free_vars (es @ [ h ]) @ free_vars b
   | A.ELit _ -> []
   | _ -> [ "$opaque" ]
 
@@ -194,6 +196,7 @@ let rec at_span (sp : A.span) (e : A.expr) : A.expr option =
       | A.ELet (b, _) -> [ b.A.bind_expr ]
       | A.EIf (c, a, b, _) -> [ c; a; b ]
       | A.ERestrict (es, b, _) -> es @ [ b ]
+      | A.EMock (es, h, b, _) -> (es @ [ h ]) @ [ b ]
       | A.EMatch (s, brs, _) -> s :: List.map (fun (b : A.branch) -> b.A.branch_body) brs
       | A.ELam (_, b, _) | A.ELetFn (_, _, _, b, _) -> [ b ]
       | A.EField (x, _, _) | A.EAnnot (x, _, _) -> [ x ]
@@ -284,6 +287,7 @@ let rec subst (env : (string * A.expr) list) (e : A.expr) : A.expr =
   | A.EAnnot (x, t, sp) -> A.EAnnot (go x, t, sp)
   | A.EIf (c, a, b, sp) -> A.EIf (go c, go a, go b, sp)
   | A.ERestrict (es, b, sp) -> A.ERestrict (List.map go es, go b, sp)
+  | A.EMock (es, h, b, sp) -> A.EMock (List.map go es, go h, go b, sp)
   (* A bounded quantifier's body: the binder shadows [env], and a replacement
      that mentions the binder would be captured, so leave that body alone. *)
   | A.ELam (ps, b, sp) ->

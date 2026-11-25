@@ -9,6 +9,7 @@ mod Main do
   needs IO
   needs IO.Console
   needs IO.Clock
+  needs Actor.Introspect
 
   type GetLog = GetLog
   type LogState = { lines : List(String) }
@@ -77,8 +78,8 @@ mod Main do
 
   fn child(intro, sup, field) do
     match get_actor_field(sup, field) do
-      None    -> Actor.pid_from_int(intro, -1)
-      Some(n) -> Actor.pid_from_int(intro, n)
+      None    -> Authority.must(Actor.pid_from_int(-1))
+      Some(n) -> Authority.must(Actor.pid_from_int(n))
     end
   end
 
@@ -89,8 +90,8 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
-    let intro = Actor.introspect(io)
+  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+    let intro = Authority.must(Actor.introspect())
     let log = spawn(Log)
 
     println("-- Actor.stop(pid, 200): the blocked on_stop is killed at the deadline")

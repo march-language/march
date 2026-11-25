@@ -4,11 +4,12 @@
 mod Main do
   needs IO
   needs IO.Console
+  needs Actor.Debug
 
   fn step(n : Int) : Int do n + 1 end
 
-  fn main(io : Cap(IO)) do
-    let d = Actor.debug(io)
+  fn main(io : Cap(IO), _cap_debug : Cap(Actor.Debug)) do
+    let d = Authority.must(Actor.debug())
     match Trace.start(d, ["step"], Trace.MaxEvents(0 - 3)) do
       Ok(_) -> println("started (wrong)")
       Err(Trace.LimitOutOfRange) -> println("negative: LimitOutOfRange")

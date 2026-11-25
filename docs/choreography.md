@@ -332,7 +332,7 @@ transport and run every role in one program. This works on both backends:
 
 ```march
 let t = Session.in_process()
-let s = Session.attach(io, t.ops)
+let s = Authority.must(Session.attach(t.ops))
 let _ = cons(s, Stream_Cons.register(s, 0), 2)
 let _ = prod(s, Stream_Prod.register(s, 0), 1)
 t.drain(())
@@ -373,7 +373,7 @@ protocol is its own test oracle:
 
 ```march
 let t = Session.in_process()
-let s = Session.attach(io, t.ops)
+let s = Authority.must(Session.attach(t.ops))
 let _ = Stream_Cons.script(s, Stream_Cons.register(s, 0), [
   Stream_Cons.Expect_Item(fn n -> assert(n == 1)),
   Stream_Cons.Choose_done(true)
@@ -382,7 +382,7 @@ let _ = prod(s, Stream_Prod.register(s, 0), 1)
 t.drain(())
 
 let t2 = Session.in_process()
-let s2 = Session.attach(io, t2.ops)
+let s2 = Authority.must(Session.attach(t2.ops))
 let _ = cons(s2, Stream_Cons.register(s2, 0), 2)
 let _ = Stream_Prod.chaos(s2, Stream_Prod.register(s2, 0), seed)
 t2.drain(())
@@ -978,7 +978,7 @@ neither cannot offer the role at all: it does not typecheck.
 
 Because the grant is a value, the composition root is explicit from `main` to every role,
 and a test can hand a body any dictionary it likes in place of the runner's (see
-[Mocking an IO capability in tests]({{ site.baseurl }}/docs/capabilities/#mocking-an-io-capability-in-tests)).
+[Mocking an IO capability in tests]({{ site.baseurl }}/docs/capabilities/#mocking-an-io-capability-in-tests-mock)).
 It is also checked: what a body reaches must fit under its grant.
 
 ### What the grant checks

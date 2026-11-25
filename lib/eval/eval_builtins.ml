@@ -2937,6 +2937,13 @@ let base_env : env =
   ; ("cap_grant_text", VBuiltin ("cap_grant_text", function
         | args when args = [] || args = [VUnit] -> VString (Lazy.force cap_grant_text)
         | _ -> eval_error "cap_grant_text: takes no arguments"))
+  (* ocap phase 7: the mock registry (runtime/march_runtime.c's twin). *)
+  ; ("mock_register", VBuiltin ("mock_register", function
+        | [h] -> VInt (mock_register h)
+        | _ -> eval_error "mock_register: expected one argument"))
+  ; ("mock_lookup", VBuiltin ("mock_lookup", function
+        | [VInt id] -> mock_lookup id
+        | _ -> eval_error "mock_lookup: expected an Int"))
   ; ("cap_cwd", VBuiltin ("cap_cwd", function
         (* "" when the directory cannot be read (every backend agrees):
            Authority then refuses a relative path target. *)

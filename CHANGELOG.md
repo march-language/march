@@ -21,6 +21,21 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`with_cap` is gone; tests mock with `mock` blocks** (object capabilities, phase 7).
+  `with_cap`, and `cap_impl` / `cap_ops_empty` on an IO capability, are removed: write
+  `mock IO.Console with { print_line: Some(f) } do ... end` instead (see Added).
+  `cap_impl` on a program's own proof capabilities is unchanged.
+- **`mock` is now a reserved word.** A program that names a function or variable `mock`
+  must rename it.
+- **The witness APIs are checked operations under capability kinds** (object
+  capabilities, phase 7). `Actor.introspect()`, `Actor.debug()`, `Actor.pid_from_int(n)`,
+  `Session.attach(ops)` and `ClusterNode.attach(ops)` no longer take a `Cap(IO)` (or
+  `Cap(Actor.Introspect)`) argument and return `Result(_, CapError)`;
+  `ClusterNode.start(cfg)` no longer takes the `Cap(IO)` and reports a refusal in its
+  `String` error. The new kinds are `Actor.Introspect` and `Actor.Debug` (outside `IO`, so
+  `needs IO` no longer covers inspecting other actors) and `IO.Cluster`; `main` requests
+  them with a parameter such as `Cap(Actor.Introspect)`. Write `Authority.must(Actor.introspect())` where you wrote
+  `Actor.introspect(io)`.
 - **Compiles are about 0.3 s faster.** Lemma erasure collected the names the program
   mentions once per `@[lemma]` declaration, walking the whole program (stdlib included)
   each time; it now walks it once. What gets erased is unchanged.
@@ -77,6 +92,17 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`mock` blocks for tests** (object capabilities, phase 7). In a test build (`march test`,
+  `forge test`, `--test`), `mock SCOPE with HANDLER do ... end` sends the scope's
+  interceptable IO operations to the handler record, whose literal names only the
+  operations it overrides. A mock is part of the current authority, so closures, tasks,
+  actors and supervisor restarts created inside keep it; it admits the operations it
+  covers even when the test was not launched with them, while an operation it does not
+  handle stays bound by the launch. `mock IO.Mut("name")` gives the tables it covers a
+  private namespace, with an optional `open` hook to make an open fail. Mocks work the same
+  in the interpreter, `--jit`, compiled code and JS; `with_cap` mocked only compiled test
+  builds. New
+  diagnostics `mock_outside_test`, `mock_scope_invalid` and `mock_handler_field`.
 - **Dependency grants (object capabilities, phase 6).** A `grant` on a dependency in
   `forge.toml` limits what its code may do, as a scope list in `needs` syntax:
   `reader = { path = "deps/reader", grant = ['IO.FileRead("/srv/data")'] }`. Every function
@@ -1349,6 +1375,14 @@ git log is authoritative for exact commits.
   handle is closed. `File.close` returned `Ok(())` anyway and the data was lost silently.
   It now returns `Err(IoError(msg))` (the handle is still closed), and
   `File.with_open_write` returns `Ok(Err(IoError(msg)))`.
+- **`Udp.recv` and `Udp.recv_batch` no longer drop a datagram when the socket is closed
+  right after it arrives.** A receive that was waiting when another task closed the socket
+  answered `Err(Closed)` even if a datagram had already reached the socket, and the
+  datagram was discarded. It now returns the datagrams; only a receive with nothing to
+  return answers `Err(Closed)`.
+- **`Csv.each_row` and `Csv.each_row_with_header` close their file when the callback
+  panics.** A caller that caught the panic lost one open file per failed call, and after
+  enough of them every open failed with "Too many open files".
 - **The native REPL keeps its authority after a panic inside a function with `needs`.** A
   panic raised in such a function left that function's `needs` in force for every later
   input, so an operation the session was allowed was refused "by function f's needs". The
