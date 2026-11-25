@@ -24,3 +24,22 @@ Fix options (ocap phase 2 Task 4 review, Minor 1; ruling: no new builtin in Task
 Option 1 is the smaller change and mirrors what most runtimes do (`close` = flush + close).
 Test: write to a full filesystem (`/dev/full` on Linux: `open_write("/dev/full", Truncate)`,
 `write_to(h, "x")`, `close(h)` must be `Err(IoError(_))`).
+
+## Fixed (2026-11-25)
+
+Option 1. A stdlib-only builtin `file_flush : Int -> Result((), FileError)`
+(`march_file_flush` in runtime/march_runtime.c: `fflush` on a write stream, `Ok(())` on a
+read stream; the interpreter flushes the out channel). `File.close` enters the handle,
+flushes, leaves, then closes, and returns the flush's error; the handle is closed either
+way. `File.with_open_write` closes after `f` returns and answers `Ok(Err(IoError(msg)))`
+when that flush fails (it discarded the close's result before).
+
+Test: `test/native/file_close_flush_error.march`, compiled and interpreted. It runs under
+`trap '' XFSZ; ulimit -f 1`, which makes the flush of 3000 buffered bytes fail with EFBIG
+on macOS and Linux, so `/dev/full` is not needed. Before the fix both engines printed
+`close: ok`.
+
+Still as before: a handle that is never closed is flushed by its release, with nobody to
+report a failure to (option 2 of this file, not done). The interpreter's `file_close`
+still ignores `close_out`'s error for the same reason: after the flush in `File.close`
+nothing is buffered, so only the release path can reach it.

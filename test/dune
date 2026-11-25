@@ -15730,6 +15730,42 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/udp_close_while_recv.expected native_udp_close_while_recv.out)))
 
+; file_close_flush_error: File.close (and File.with_open_write) report a
+; write that only fails when the buffer is flushed. The file size limit makes
+; that flush fail (EFBIG) once SIGXFSZ is ignored; the limit is set for the
+; run only, not the compile. Compiled and interpreted against one golden.
+; The interpreted run gets its own HOME: under the limit the interpreter
+; cannot save its stdlib typecheck cache, and a cut-short cache file must not
+; land in the real one.
+(rule
+ (targets native_file_close_flush_error native_file_close_flush_error.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/file_close_flush_error.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_file_close_flush_error
+        native/file_close_flush_error.march)
+   (with-stdout-to native_file_close_flush_error.out
+        (system "trap '' XFSZ; ulimit -f 1; ./native_file_close_flush_error")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/file_close_flush_error.expected native_file_close_flush_error.out)))
+
+(rule
+ (targets native_file_close_flush_error_interp.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib)
+       (file native/file_close_flush_error.march))
+ (action
+  (with-stdout-to native_file_close_flush_error_interp.out
+       (system "mkdir -p fcfe_home; trap '' XFSZ; ulimit -f 1; HOME=$PWD/fcfe_home %{exe:../bin/main.exe} native/file_close_flush_error.march"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/file_close_flush_error.expected native_file_close_flush_error_interp.out)))
+
 ; tls_refuses_borrowed_socket (ruling R10): Tls.connect refuses a borrowed
 ; Socket and leaves the owner's socket working. It calls the
 ; @[stdlib_internal] Socket.borrow, so it runs with --stdlib-source,

@@ -2501,6 +2501,7 @@ let stdlib_only_hand_written : (string * string) list =
       ("file_open_write", "use `File.open_write(path, mode)`");
       ("file_write_handle", "use `File.write_to(h, data)` on a `File.Handle`");
       ("file_seek", "use `File.seek(h, offset)` on a `File.Handle`");
+      ("file_flush", "use `File.close(h)` on a `File.Handle`, which flushes it");
       (* ocap phase 2 (Task 7): the raw directory-fd builtins behind
          File.Dir. A guessed Int fd must not open or list beneath a
          directory the program holds. *)

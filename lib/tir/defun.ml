@@ -69,7 +69,7 @@ let builtin_names : StringSet.t =
       (* File/Dir builtins *)
       "file_exists"; "dir_exists";
       "file_open"; "file_close"; "file_read"; "file_read_line"; "file_read_chunk";
-      "file_open_write"; "file_write_handle"; "file_seek";
+      "file_open_write"; "file_write_handle"; "file_seek"; "file_flush";
       "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at";
       "file_write"; "file_append"; "file_delete"; "file_copy"; "file_rename"; "file_stat";
       "file_create_dir"; "file_create_dir_all";

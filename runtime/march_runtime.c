@@ -12972,6 +12972,19 @@ void *march_file_seek(int64_t handle, int64_t offset) {
     return mk_ok((void *)(intptr_t)(((int64_t)pos << 1) | 1));
 }
 
+/* file_flush(handle) : Result((), FileError).  Writes a write stream's
+ * buffered bytes out, so a failure only the final write reports (ENOSPC,
+ * EDQUOT, EFBIG, an NFS error) reaches File.close instead of being lost in
+ * the release's fclose.  A read stream has nothing to flush: Ok(()). */
+void *march_file_flush(int64_t handle) {
+    FILE *f = fh_lookup((void *)(intptr_t)handle, NULL, NULL);
+    if (!f) return mk_err_file_cstr(FILEERR_IO_ERROR, "flush of a closed file");
+    int acc = fcntl(fileno(f), F_GETFL);
+    if (acc != -1 && (acc & O_ACCMODE) == O_RDONLY) return mk_ok_unit();
+    if (fflush(f) != 0) return mk_err_errno_io();
+    return mk_ok_unit();
+}
+
 /* ── Directory builtins ─────────────────────────────────────────────── */
 
 void *march_dir_list(void *path_ptr) {

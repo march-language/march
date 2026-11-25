@@ -1238,6 +1238,9 @@ let builtin_bindings : (string * scheme) list =
     ("file_open_write", Mono (TArrow (t_string, TArrow (t_int, t_result t_int (TCon ("FileError", []))))));
     ("file_write_handle", Mono (TArrow (t_int, TArrow (t_string, t_result t_unit (TCon ("FileError", []))))));
     ("file_seek",       Mono (TArrow (t_int, TArrow (t_int, t_result t_int (TCon ("FileError", []))))));
+    (* file_flush(fd) writes a write stream's buffered bytes out and reports
+       the failure File.close would otherwise lose; Ok(()) on a read stream. *)
+    ("file_flush",      Mono (TArrow (t_int, t_result t_unit (TCon ("FileError", [])))));
     (* File.Dir (ocap phase 2): dir_open(path) / dir_open_write(path) open a
        directory (O_DIRECTORY) and return its raw fd; file_open_at(dirfd, rel,
        flags) opens rel beneath it (flags 0 read, 1 truncate, 2 append) as a

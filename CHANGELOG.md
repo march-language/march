@@ -1344,6 +1344,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`File.close` reports a write that fails when the file is flushed.** Writes through a
+  `File.Handle` are buffered, so a full disk or a quota often shows up only when the
+  handle is closed. `File.close` returned `Ok(())` anyway and the data was lost silently.
+  It now returns `Err(IoError(msg))` (the handle is still closed), and
+  `File.with_open_write` returns `Ok(Err(IoError(msg)))`.
 - **The native REPL keeps its authority after a panic inside a function with `needs`.** A
   panic raised in such a function left that function's `needs` in force for every later
   input, so an operation the session was allowed was refused "by function f's needs". The
