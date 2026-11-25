@@ -1588,6 +1588,12 @@ and 0.1 ns on the minima (noise: the plain loop is mostly process start-up);
 `restrict_enter_computed` 399 ms against 18 ms, about 380 ns per entry. Detail in
 `specs/progress/2026-11-19-ocap-p5-restrict.md`.
 
+2026-11-24, the saved authority stack (the runtime keeps what a frame entry replaced, so
+a caught panic can release it): about 18 more instructions per frame entry and leave
+(`restrict_enter` 34.4 -> 35.2 ms on the minima, same machine, interleaved), none on a
+captured call under its own authority (`cap_capture_closures`). Detail in
+`specs/progress/2026-11-24-ocap-cap-unwind-mark-leak.md`.
+
 ## bench/grant_enter*.march — ocap dependency-grant boundary cost (2026-11-23)
 
 `grant_enter` and `grant_enter_static` make 1,000,000 calls from the app into

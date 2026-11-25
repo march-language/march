@@ -235,6 +235,15 @@ struct march_scheduler;
  * against was a pointer that outlived the fact it named; read every new
  * holder against the sentence above.
  * specs/progress/2026-09-23-proc-struct-reclamation-metas.md has the per-site survey. */
+/* A green thread's run-time authority: the value in force and the stack of
+ * the ones to put back (see march_proc.auth).  [auth] is first, so a pointer
+ * to the state is a pointer to the slot. */
+typedef struct march_auth_state {
+    void     *auth;
+    void    **saved;
+    uint32_t  len, cap;
+} march_auth_state;
+
 typedef struct march_proc {
     int64_t                    pid;          /* Unique process ID (monotonic counter) */
     _Atomic march_proc_status  status;       /* Process lifecycle state (atomic)      */
@@ -489,8 +498,16 @@ typedef struct march_proc {
      * launch layers apply).  One reference owned by the proc: copied from
      * the spawner with an incrc at spawn, released at the reap
      * (march_cap_release).  Only the proc itself reads or writes it, through
-     * march_sched_auth_slot; per proc, never TLS: procs migrate. */
-    void                      *auth;
+     * march_sched_auth_slot; per proc, never TLS: procs migrate.
+     *
+     * [auth.saved] is the stack of authorities the frames and captured
+     * bodies entered on this green thread will put back (march_cap_push /
+     * march_cap_enter push, march_cap_restore pops), each an owned
+     * reference.  The runtime holds them, not the compiled code, so a
+     * caught panic can release exactly what the frames it abandoned had
+     * saved (march_cap_unwind).  Entries still on it at the reap are
+     * released there. */
+    march_auth_state           auth;
 #ifdef MARCH_ASAN_BUILD
     /* ASan fiber-switch bookkeeping: this proc's own "fake stack" handle,
      * threaded through __sanitizer_start_switch_fiber/finish_switch_fiber
@@ -657,6 +674,7 @@ void         march_sched_init(void);
  * (empty unless code there pushed one).  noinline: a migration barrier, like
  * march_sched_frame_slot (see march_sched_yield's comment). */
 void **march_sched_auth_slot(void);
+march_auth_state *march_sched_auth_state(void);
 
 /* Number of OS scheduler threads this process resolved at march_sched_init:
  * the MARCH_NUM_SCHEDULERS environment request when it is usable, otherwise

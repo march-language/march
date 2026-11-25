@@ -2639,7 +2639,7 @@ static void diag_dispatch(int kind, const char *msg, size_t msg_len,
     jmp_buf **jslot = diag_jmp_slot();
     for (volatile int64_t k = 0; k < n; k++) {
         void *frame_mark = march_frame_mark();
-        void *auth_mark = march_cap_mark();
+        march_cap_mark_t auth_mark = march_cap_mark();
         jmp_buf jb;
         *jslot = &jb;
         if (setjmp(jb) == 0) {
@@ -3200,7 +3200,7 @@ void march_test_run(void (*fn)(void), const char *name, void (*setup)(void)) {
     march_test_in_test = 1;
     march_panic_handled = 1;   /* a failing test is not a crash to report */
     void *frame_mark = march_frame_mark();
-    void *auth_mark = march_cap_mark();
+    march_cap_mark_t auth_mark = march_cap_mark();
     int jmp_rc = setjmp(march_test_jmp_buf);
     march_frame_unwind(frame_mark);
     march_cap_unwind(auth_mark);
@@ -3946,7 +3946,7 @@ void march_assert_fail(void *meta, void *left, void *right) {
  */
 void *march_try_call(void *thunk) {
     void *frame_mark = march_frame_mark();
-    void *auth_mark = march_cap_mark();
+    march_cap_mark_t auth_mark = march_cap_mark();
     typedef int64_t (*apply_fn_t)(void *, int64_t);
     apply_fn_t apply = *(apply_fn_t *)((char *)thunk + 16);
 
@@ -4050,7 +4050,7 @@ static void   *march_repl_guard_msg  = NULL;
 
 static int64_t march_repl_guarded(void *fptr, int kind) {
     void *frame_mark = march_frame_mark();
-    void *auth_mark = march_cap_mark();
+    march_cap_mark_t auth_mark = march_cap_mark();
     jmp_buf saved_jmp;
     char    saved_fail[sizeof(march_test_fail_buf)];
     int     saved_in_test = march_test_in_test;
@@ -4129,7 +4129,7 @@ void *march_repl_guard_message(void) {
  */
 void *march_try_call_val(void *thunk) {
     void *frame_mark = march_frame_mark();
-    void *auth_mark = march_cap_mark();
+    march_cap_mark_t auth_mark = march_cap_mark();
     typedef int64_t (*apply_fn_t)(void *, int64_t);
     apply_fn_t apply = *(apply_fn_t *)((char *)thunk + 16);
 
@@ -4219,7 +4219,7 @@ void *march_try_call_val(void *thunk) {
  */
 void *march_try_finally(void *action, void *cleanup) {
     void *frame_mark = march_frame_mark();
-    void *auth_mark = march_cap_mark();
+    march_cap_mark_t auth_mark = march_cap_mark();
     typedef int64_t (*apply_fn_t)(void *, int64_t);
     apply_fn_t apply_action  = *(apply_fn_t *)((char *)action + 16);
     apply_fn_t apply_cleanup = *(apply_fn_t *)((char *)cleanup + 16);
@@ -6927,7 +6927,7 @@ static int hcr_on_stop_slot(uint32_t dispatch_slot, uint32_t *out) {
 static int actor_run_on_stop(march_proc *self, void *actor, void *clo,
                              void (*bare)(void *)) {
     void *frame_mark = march_frame_mark();
-    void *auth_mark = march_cap_mark();
+    march_cap_mark_t auth_mark = march_cap_mark();
     volatile int panicked = 0;
     jmp_buf on_stop_jmp;
     jmp_buf *saved_crash = self->crash_jmp;
@@ -7009,7 +7009,7 @@ static void actor_green_thread(void *arg) {
     /* Every nested code frame is owned by the proc; a catcher restores this
      * immutable watermark, including refs that nested calls never released. */
     void *frame_mark = march_frame_mark();
-    void *auth_mark = march_cap_mark();
+    march_cap_mark_t auth_mark = march_cap_mark();
 
     /* The stop trap, for every actor: a nested `receive()` told to stop
      * lands here (march_actor_recv) and the actor dies the normal way.  The
@@ -9584,7 +9584,7 @@ int64_t march_tasks_cancelled(void) {
 
 static void march_thunk_trampoline(void *arg) {
     void *frame_mark = march_frame_mark();
-    void *auth_mark = march_cap_mark();
+    march_cap_mark_t auth_mark = march_cap_mark();
     march_thunk_arg *wa = (march_thunk_arg *)arg;
     void *clo = wa->clo;
     int64_t *task = wa->task;
@@ -10722,7 +10722,7 @@ static void actor_answer_inspect(march_actor_meta *meta, march_proc *self,
         return;
     }
     void *frame_mark = march_frame_mark();
-    void *auth_mark = march_cap_mark();
+    march_cap_mark_t auth_mark = march_cap_mark();
     jmp_buf jb;
     jmp_buf *saved_crash = self->crash_jmp;
     self->crash_jmp = &jb;
@@ -10878,7 +10878,7 @@ static void actor_answer_migrate_check(march_actor_meta *meta, march_proc *self,
     int64_t *a = (int64_t *)actor;
     void *state = (void *)(uintptr_t)a[4];
     void *frame_mark = march_frame_mark();
-    void *auth_mark = march_cap_mark();
+    march_cap_mark_t auth_mark = march_cap_mark();
     jmp_buf jb;
     jmp_buf *saved_crash = self->crash_jmp;
     self->crash_jmp = &jb;
@@ -11391,49 +11391,117 @@ void *march_cap_save(void) {
     return cur;
 }
 
-/* What cap_enter returns when [auth] was already in force (Task 10b): the
- * authority itself with bit 0 set.  Slot values are NULL or heap pointers
- * (even), so the tag is unambiguous, and IS_HEAP_PTR rejects a tagged word:
- * the compiler's own incrc/decrc/march_cap_release on a CapAuthRef, should
- * it ever emit one on the saved value, is a no-op on it, as it must be (it
- * carries no reference). */
+/* ── The saved stack ──────────────────────────────────────────────────────
+ *
+ * Entering a frame (march_cap_push) or a captured body (march_cap_enter)
+ * replaces the slot; the authority that was in force goes on the green
+ * thread's saved stack (march_auth_state.saved), reference and all, and the
+ * caller gets a TOKEN naming that entry.  march_cap_restore(token) pops the
+ * entry back into the slot.
+ *
+ * The runtime holds the reference, not the compiled code, because a panic
+ * abandons compiled code's locals: with the reference in a local, a catcher
+ * could not tell whether the abandoned frame still held it (and adopt it)
+ * or had already dropped it (a saved value nothing restores is dead after
+ * the push), so it took a second reference and the first leaked, with the
+ * whole chain below it.  Now march_cap_unwind pops to the depth of its
+ * mark and releases exactly what the abandoned frames had saved.
+ *
+ * A token is ((index + 1) << 1) | 1: odd, so IS_HEAP_PTR rejects it and the
+ * compiler's own incrc/decrc/march_cap_release on a CapAuthRef holding one
+ * is a no-op, as it must be (a token carries no reference).  The word 1 is
+ * "nothing to put back" (cap_enter of the authority already in force).  An
+ * even word is a real authority with its own reference (march_cap_save),
+ * which march_cap_restore installs as before. */
 #define MARCH_CAP_SAME ((uintptr_t)1)
 
-/* Leaves a captured body or a frame.  A tagged [saved] (cap_enter changed
- * nothing) is a no-op without even reading the slot: the body put back
- * every authority it entered, because the only way out of a body that
- * skips its restores is a panic, and every catcher that goes on running
- * March code on the same green thread puts back the authority it was
- * entered under (march_cap_unwind), before any enclosing restore can run. */
-void march_cap_restore(void *saved) {
-    if ((uintptr_t)saved & MARCH_CAP_SAME) return;
-    void **slot = march_cap_slot();
-    void *old = *slot;
-    *slot = saved;
+static inline void *march_cap_token(uint32_t index) {
+    return (void *)((((uintptr_t)index + 1) << 1) | 1);
+}
+
+/* [old] (the slot's reference to it) onto the saved stack; its token. */
+static inline void *march_cap_saved_push(march_auth_state *st, void *old) {
+    if (__builtin_expect(st->len == st->cap, 0)) {
+        uint32_t cap = st->cap ? st->cap * 2 : 16;
+        void **v = (void **)realloc(st->saved, (size_t)cap * sizeof(void *));
+        if (!v) { fprintf(stderr, "march: out of memory (authority stack)\n"); abort(); }
+        st->saved = v;
+        st->cap = cap;
+    }
+    st->saved[st->len] = old;
+    return march_cap_token(st->len++);
+}
+
+/* Leaves the saved stack [depth] entries deep: entry [depth] goes back in
+ * the slot, the entries above it (frames left without a restore: a panic,
+ * or a tail call out of a frame) and the slot's old value are released.
+ * Nothing to do when the stack is already that shallow. */
+static void march_cap_pop_to(march_auth_state *st, uint32_t depth) {
+    uint32_t len = st->len;
+    if (len <= depth) return;
+    void *old = st->auth;
+    st->auth = st->saved[depth];
+    st->len = depth;
+    for (uint32_t i = len - 1; i > depth; i--) march_cap_release(st->saved[i]);
     march_cap_release(old);
 }
 
-/* The authority in force, for a panic catcher to put back with
- * march_cap_unwind: no reference is taken (the slot keeps it). */
-void *march_cap_mark(void) {
-    return *march_cap_slot();
+/* cap_restore past its first test: a token pops the saved stack (one entry
+ * when the frame is the innermost, the usual case; more when frames above it
+ * were left without a restore), an authority of its own (march_cap_save) is
+ * installed.  Out of line so that march_cap_restore's no-op path saves no
+ * registers: inlined, it cost every captured call four more instructions
+ * than before the saved stack (bench/cap_capture_closures.march). */
+static __attribute__((noinline)) void march_cap_restore_slow(uintptr_t w) {
+    march_auth_state *st = march_sched_auth_state();
+    void *old = st->auth;
+    if (w & 1) {
+        uint32_t depth = (uint32_t)(w >> 1) - 1;
+        if (__builtin_expect(st->len != depth + 1, 0)) {
+            march_cap_pop_to(st, depth);
+            return;
+        }
+        st->auth = st->saved[depth];
+        st->len = depth;
+    } else {
+        st->auth = (void *)w;
+    }
+    march_cap_release(old);
 }
 
-/* After a caught panic: [mark] (march_cap_mark() when the catcher was
- * entered) in force again.  The panic longjmped past the restores of the
- * frames and captured bodies it was inside, so the slot may still hold one
- * of theirs, and the code after the catch would run under it (the
- * interpreter restores on the way out, lib/eval/eval.ml's Fun.protect; this
- * makes the compiled runtimes agree).  [mark] is alive: the slot's
- * reference to it moved into the saved value of the first frame entered
- * after the mark, whose restore never ran, so it was never released (the
- * same one reference every skipped restore leaks). */
-void march_cap_unwind(void *mark) {
-    void **slot = march_cap_slot();
-    void *cur = *slot;
-    if (cur == mark) return;
-    march_incrc(mark);
-    *slot = mark;
+/* Leaves a captured body or a frame.  The word 1 (cap_enter changed
+ * nothing) is a no-op without even reading the slot. */
+void march_cap_restore(void *saved) {
+    if ((uintptr_t)saved == MARCH_CAP_SAME) return;
+    march_cap_restore_slow((uintptr_t)saved);
+}
+
+/* Where a panic catcher is entered: the saved stack's depth, and the
+ * authority in force (no reference taken: the slot keeps it). */
+march_cap_mark_t march_cap_mark(void) {
+    march_auth_state *st = march_sched_auth_state();
+    march_cap_mark_t m = { st->auth, st->len };
+    return m;
+}
+
+/* After a caught panic: the authority of [mark] in force again.  The panic
+ * longjmped past the restores of the frames and captured bodies it was
+ * inside, so the slot may still hold one of theirs, and the code after the
+ * catch would run under it (the interpreter restores on the way out,
+ * lib/eval/eval.ml's Fun.protect; this makes the compiled runtimes agree).
+ * Popping to the mark's depth puts back what the first abandoned frame
+ * saved, which is the mark's authority, and releases the rest.
+ *
+ * The second step covers a slot changed without the stack (stdlib-internal
+ * code that installs a march_cap_save value by hand): the mark's authority
+ * goes back with a reference of its own. */
+void march_cap_unwind(march_cap_mark_t mark) {
+    march_auth_state *st = march_sched_auth_state();
+    march_cap_pop_to(st, mark.depth);
+    void *cur = st->auth;
+    if (cur == mark.auth) return;
+    march_incrc(mark.auth);
+    st->auth = mark.auth;
     march_cap_release(cur);
 }
 
@@ -11484,10 +11552,10 @@ static void *march_cap_push_top(void *layer, void *cur) {
 
 void *march_cap_push(void *layer) {
     march_cap_note_frame();
-    void **slot = march_cap_slot();
-    void *old = *slot;
-    *slot = march_cap_push_top(layer, old);
-    return old;   /* the slot's reference moves to the caller */
+    march_auth_state *st = march_sched_auth_state();
+    void *old = st->auth;
+    st->auth = march_cap_push_top(layer, old);
+    return march_cap_saved_push(st, old);   /* the slot's reference moves there */
 }
 
 /* A captured function value's entry: [auth] (borrowed) in force for its
@@ -11495,13 +11563,13 @@ void *march_cap_push(void *layer) {
  * under the authority it was made under) nothing is written and no count
  * is touched; the tagged result tells cap_restore so. */
 void *march_cap_enter(void *auth) {
-    void **slot = march_cap_slot();
-    void *old = *slot;
-    if (old == auth) return (void *)((uintptr_t)auth | MARCH_CAP_SAME);
+    march_auth_state *st = march_sched_auth_state();
+    void *old = st->auth;
+    if (old == auth) return (void *)MARCH_CAP_SAME;
     if (auth != NULL) march_cap_note_frame();
     march_incrc(auth);
-    *slot = auth;
-    return old;
+    st->auth = auth;
+    return march_cap_saved_push(st, old);
 }
 
 /* MARCH_GRANT, trimmed of spaces and tabs; "" when unset or blank. */

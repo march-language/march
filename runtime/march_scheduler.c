@@ -1829,10 +1829,17 @@ __attribute__((noinline)) void **march_sched_frame_slot(void) {
 /* ocap phase 4: same shape as march_sched_frame_slot, for march_proc.auth.
  * Code outside a green thread (the main OS thread before the scheduler runs,
  * a listener thread) gets a per-OS-thread slot that starts empty. */
-static _Thread_local void *foreign_auth;
-__attribute__((noinline)) void **march_sched_auth_slot(void) {
+static _Thread_local march_auth_state foreign_auth;
+__attribute__((noinline)) march_auth_state *march_sched_auth_state(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     return p ? &p->auth : &foreign_auth;
+}
+/* Its own body, not a call of the one above: every capability check reads
+ * the slot through this, and a second call there cost 5-8% on the frame
+ * benchmarks. */
+__attribute__((noinline)) void **march_sched_auth_slot(void) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    return p ? &p->auth.auth : &foreign_auth.auth;
 }
 
 void march_sched_hold_next_spawn(void) {
@@ -1997,7 +2004,7 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
         void *auth = *march_sched_auth_slot();
         if (auth) {
             march_incrc(auth);
-            p->auth = auth;
+            p->auth.auth = auth;
         }
     }
     /* A spawn the spawner asked to start held (march_sched_hold_next_spawn):
@@ -2536,10 +2543,20 @@ static void sched_loop(march_scheduler *sched) {
             registry_remove(p);
             march_frame_clear(&p->code_frames);
             /* ocap phase 4: the proc's reference to its authority. */
-            if (p->auth) {
-                void *auth = p->auth;
-                p->auth = NULL;
+            if (p->auth.auth) {
+                void *auth = p->auth.auth;
+                p->auth.auth = NULL;
                 march_cap_release(auth);
+            }
+            /* What frames this thread never left had saved (it died inside
+             * them: a crash, a stop, a kill). */
+            if (p->auth.saved) {
+                void **saved = p->auth.saved;
+                uint32_t n = p->auth.len;
+                p->auth.saved = NULL;
+                p->auth.len = p->auth.cap = 0;
+                for (uint32_t i = 0; i < n; i++) march_cap_release(saved[i]);
+                free(saved);
             }
             /* The epoch pin taken at spawn (or moved there by an advance):
              * dropped exactly once, here.  The PROC_DEAD release store

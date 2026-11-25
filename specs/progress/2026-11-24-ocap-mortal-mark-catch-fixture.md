@@ -41,5 +41,5 @@ The unmodified runtime is clean under ASan (macOS arm64, 2026-11-24).
 `march --rc-trace --compile`, `MARCH_TRACE_GC=1`, `scripts/gc-trace-report.py`:
 15 authority cells (allocated at `Authority.enter_fn#3:march_cap_push`) are live
 at exit. The todo asked for none; that is the next item,
-`specs/todos/2026-11-19-ocap-cap-unwind-mark-leak.md`, which now carries the
+`specs/progress/2026-11-24-ocap-cap-unwind-mark-leak.md`, which carries the
 breakdown.
