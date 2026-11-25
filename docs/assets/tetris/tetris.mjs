@@ -6843,8 +6843,8 @@ function Authority$admits_in($tco_a0, $tco_a1, $tco_a2, $tco_a3, $tco_a4) {
                     {
                       let $t909;
                       {
-                        const $rc_78 = Authority$member(chain, k);
-                        $t909 = $rc_78;
+                        const $rc_79 = Authority$member(chain, k);
+                        $t909 = $rc_79;
                       }
                       if ($t909 === true) {
                         $t910 = Authority$arg_admits(arg, kind, target, cwd);
@@ -6939,7 +6939,7 @@ function Authority$arg_admits(arg, kind, target, cwd) {
                 {
                   const $t928 = Authority$resolve(cwd, target);
                   {
-                    let $rc_79;
+                    let $rc_80;
                     {
                       const $t984_i9679 = march_string_starts_with($t928, "/");
                       {
@@ -6958,12 +6958,12 @@ function Authority$arg_admits(arg, kind, target, cwd) {
                           }
                         }
                         {
-                          const $rc_87_i9686 = Authority$any_within_segs(ps, $t984_i9679, $t985_i9685);
-                          $rc_79 = $rc_87_i9686;
+                          const $rc_88_i9686 = Authority$any_within_segs(ps, $t984_i9679, $t985_i9685);
+                          $rc_80 = $rc_88_i9686;
                         }
                       }
                     }
-                    return $rc_79;
+                    return $rc_80;
                   }
                 }
               }
@@ -6983,8 +6983,8 @@ function Authority$arg_admits(arg, kind, target, cwd) {
             return Authority$host_permits(spec, target);
           } else {
             {
-              const $rc_80 = (target === "");
-              return $rc_80;
+              const $rc_81 = (target === "");
+              return $rc_81;
             }
           }
         }
@@ -7010,16 +7010,16 @@ function Authority$arg_admits(arg, kind, target, cwd) {
             }
             if ($t930 === true) {
               {
-                let $rc_81;
+                let $rc_82;
                 {
                   const $t1167_i67 = Authority$member(ns, target);
                   if ($t1167_i67 === true) {
-                    $rc_81 = true;
+                    $rc_82 = true;
                   } else {
-                    $rc_81 = Authority$starts_with_any(target, pre);
+                    $rc_82 = Authority$starts_with_any(target, pre);
                   }
                 }
-                return $rc_81;
+                return $rc_82;
               }
             } else {
               return false;
@@ -7057,8 +7057,8 @@ function Authority$arg_admits(arg, kind, target, cwd) {
                         {
                           const th = $f934;
                           {
-                            const $rc_82 = Authority$host_matches(h, wild, port, th, tp);
-                            return $rc_82;
+                            const $rc_83 = Authority$host_matches(h, wild, port, th, tp);
+                            return $rc_83;
                           }
                         }
                       }
@@ -7067,8 +7067,8 @@ function Authority$arg_admits(arg, kind, target, cwd) {
                 }
               } else {
                 {
-                  const $rc_83 = (target === "");
-                  return $rc_83;
+                  const $rc_84 = (target === "");
+                  return $rc_84;
                 }
               }
             }
@@ -7127,13 +7127,13 @@ function Authority$arg_admits(arg, kind, target, cwd) {
                   {
                     const $t945 = Authority$resolve(cwd, target);
                     {
-                      const $rc_85 = Authority$normalize($t945);
-                      $t946 = $rc_85;
+                      const $rc_86 = Authority$normalize($t945);
+                      $t946 = $rc_86;
                     }
                   }
                   {
-                    const $rc_84 = Authority$any_normal_within(ps, $t946);
-                    return $rc_84;
+                    const $rc_85 = Authority$any_normal_within(ps, $t946);
+                    return $rc_85;
                   }
                 }
               }
@@ -7191,8 +7191,8 @@ function Authority$any_normal_within($tco_a0, $tco_a1) {
                           $t976 = march_string_slice(n, $t975, 1);
                         }
                         {
-                          const $rc_86 = ($t976 === "/");
-                          $t977 = $rc_86;
+                          const $rc_87 = ($t976 === "/");
+                          $t977 = $rc_87;
                         }
                       }
                     } else {
@@ -7266,8 +7266,8 @@ function Authority$any_within_segs($tco_a0, $tco_a1, $tco_a2) {
                       }
                     }
                     {
-                      const $rc_88 = Authority$segs_prefix($t988, segs);
-                      $t989 = $rc_88;
+                      const $rc_89 = Authority$segs_prefix($t988, segs);
+                      $t989 = $rc_89;
                     }
                   }
                 } else {
@@ -7333,8 +7333,8 @@ function Authority$covered($tco_a0, $tco_a1) {
                             {
                               let $t998;
                               {
-                                const $rc_89 = Authority$kind_subsumes(k, ik);
-                                $t998 = $rc_89;
+                                const $rc_90 = Authority$kind_subsumes(k, ik);
+                                $t998 = $rc_90;
                               }
                               if ($t998 === true) {
                                 $t999 = Authority$arg_subsumes(outer, inner);
@@ -7398,8 +7398,8 @@ function Authority$arg_subsumes(outer, inner) {
               {
                 const i_paths = $f1019;
                 {
-                  const $rc_90 = Authority$all_paths_within(i_paths, o_paths);
-                  return $rc_90;
+                  const $rc_91 = Authority$all_paths_within(i_paths, o_paths);
+                  return $rc_91;
                 }
               }
               break;
@@ -7428,8 +7428,8 @@ function Authority$arg_subsumes(outer, inner) {
               {
                 const i_paths = $f1021;
                 {
-                  const $rc_91 = Authority$all_paths_within(i_paths, o_paths);
-                  return $rc_91;
+                  const $rc_92 = Authority$all_paths_within(i_paths, o_paths);
+                  return $rc_92;
                 }
               }
               break;
@@ -7464,13 +7464,13 @@ function Authority$arg_subsumes(outer, inner) {
                   {
                     let $t1022;
                     {
-                      const $rc_93 = Authority$all_names_admitted(i_names, o_names, o_pre);
-                      $t1022 = $rc_93;
+                      const $rc_94 = Authority$all_names_admitted(i_names, o_names, o_pre);
+                      $t1022 = $rc_94;
                     }
                     if ($t1022 === true) {
                       {
-                        const $rc_92 = Authority$all_prefixes_under(i_pre, o_pre);
-                        return $rc_92;
+                        const $rc_93 = Authority$all_prefixes_under(i_pre, o_pre);
+                        return $rc_93;
                       }
                     } else {
                       return false;
@@ -7500,8 +7500,8 @@ function Authority$arg_subsumes(outer, inner) {
               {
                 const i = $f1026;
                 {
-                  const $rc_94 = Authority$host_subsumes(o, i);
-                  return $rc_94;
+                  const $rc_95 = Authority$host_subsumes(o, i);
+                  return $rc_95;
                 }
               }
               break;
@@ -7533,8 +7533,8 @@ function Authority$arg_subsumes(outer, inner) {
               {
                 const i = $f1028;
                 {
-                  const $rc_95 = Authority$host_subsumes(o, i);
-                  return $rc_95;
+                  const $rc_96 = Authority$host_subsumes(o, i);
+                  return $rc_96;
                 }
               }
               break;
@@ -7947,8 +7947,8 @@ function Authority$resolve(cwd, p) {
       return p;
     } else {
       {
-        const $rc_96 = march_string_concat3(cwd, "/", p);
-        return $rc_96;
+        const $rc_97 = march_string_concat3(cwd, "/", p);
+        return $rc_97;
       }
     }
   }
@@ -8065,16 +8065,16 @@ function Authority$normalize(p) {
         }
       }
       {
-        const $rc_98 = march_string_join($t1147, "/");
-        body = $rc_98;
+        const $rc_99 = march_string_join($t1147, "/");
+        body = $rc_99;
       }
     }
     {
       const $t1148 = march_string_starts_with(p, "/");
       if ($t1148 === true) {
         {
-          const $rc_97 = ("/" + body);
-          return $rc_97;
+          const $rc_98 = ("/" + body);
+          return $rc_98;
         }
       } else {
         return body;
@@ -8126,8 +8126,8 @@ function Authority$path_within(scope, p) {
             }
           }
           {
-            const $rc_99 = Authority$segs_prefix($t1152, $t1153);
-            return $rc_99;
+            const $rc_100 = Authority$segs_prefix($t1152, $t1153);
+            return $rc_100;
           }
         }
       }
@@ -8257,8 +8257,8 @@ function Authority$host_permits(spec, target) {
             {
               const i_i9690 = $f1203_i9689;
               {
-                const $rc_101_i9691 = march_string_slice(spec, 0, i_i9690);
-                raw = $rc_101_i9691;
+                const $rc_102_i9691 = march_string_slice(spec, 0, i_i9690);
+                raw = $rc_102_i9691;
               }
             }
             break;
@@ -8304,8 +8304,8 @@ function Authority$host_permits(spec, target) {
                         {
                           const th = $f1178;
                           {
-                            const $rc_100 = Authority$host_matches(h, wild, port, th, tp);
-                            return $rc_100;
+                            const $rc_101 = Authority$host_matches(h, wild, port, th, tp);
+                            return $rc_101;
                           }
                         }
                       }
@@ -8357,14 +8357,14 @@ function Authority$split_target(t) {
                       $t1209 = (($t1208 - 1) < 4611686018427387904 && ($t1208 - 1) >= -4611686018427387904 ? ($t1208 - 1) : march_int_ovf(($t1208 - 1), 1));
                     }
                     {
-                      const $rc_103 = march_string_slice(t, $t1206, $t1209);
-                      $t1210 = $rc_103;
+                      const $rc_104 = march_string_slice(t, $t1206, $t1209);
+                      $t1210 = $rc_104;
                     }
                   }
                 }
                 {
-                  const $rc_102 = Authority$port_or_zero($t1210);
-                  $t1211 = $rc_102;
+                  const $rc_103 = Authority$port_or_zero($t1210);
+                  $t1211 = $rc_103;
                 }
               }
               return { _0: $t1205, _1: $t1211 };
@@ -8410,8 +8410,8 @@ function Authority$host_matches(h, wild, port, host, tport) {
               }
               if ($t1218 === true) {
                 {
-                  const $rc_104 = march_string_ends_with(th, suffix);
-                  return $rc_104;
+                  const $rc_105 = march_string_ends_with(th, suffix);
+                  return $rc_105;
                 }
               } else {
                 return false;
@@ -8420,8 +8420,8 @@ function Authority$host_matches(h, wild, port, host, tport) {
           }
         } else {
           {
-            const $rc_105 = (th === h);
-            return $rc_105;
+            const $rc_106 = (th === h);
+            return $rc_106;
           }
         }
       }
@@ -8443,8 +8443,8 @@ function Authority$normalize_host(h) {
             $t1221 = (($t1220 - 1) < 4611686018427387904 && ($t1220 - 1) >= -4611686018427387904 ? ($t1220 - 1) : march_int_ovf(($t1220 - 1), 1));
           }
           {
-            const $rc_106 = march_string_slice(l, 0, $t1221);
-            return $rc_106;
+            const $rc_107 = march_string_slice(l, 0, $t1221);
+            return $rc_107;
           }
         }
       } else {
@@ -8541,8 +8541,8 @@ function Authority$all_chars($tco_a0, $tco_a1, $tco_a2) {
           {
             const $t1234 = march_string_slice(s, i, 1);
             {
-              const $rc_107 = march_string_contains(allowed, $t1234);
-              $t1235 = $rc_107;
+              const $rc_108 = march_string_contains(allowed, $t1234);
+              $t1235 = $rc_108;
             }
           }
           if ($t1235 === true) {
@@ -8610,13 +8610,13 @@ function Authority$parse_host_pattern(raw) {
                               $t1244 = (($t1243 - i) < 4611686018427387904 && ($t1243 - i) >= -4611686018427387904 ? ($t1243 - i) : march_int_ovf(($t1243 - i), 1));
                             }
                             {
-                              const $rc_111 = march_string_slice(raw, i, $t1244);
-                              $t1245 = $rc_111;
+                              const $rc_112 = march_string_slice(raw, i, $t1244);
+                              $t1245 = $rc_112;
                             }
                           }
                           {
-                            const $rc_110 = Authority$parse_scope_path($t1245);
-                            $t1246 = $rc_110;
+                            const $rc_111 = Authority$parse_scope_path($t1245);
+                            $t1246 = $rc_111;
                           }
                         }
                         $p1251 = { _0: $t1242, _1: $t1246 };
@@ -8641,8 +8641,8 @@ function Authority$parse_host_pattern(raw) {
                     {
                       const e = $f1249;
                       {
-                        const $rc_109 = { $: "Err", _0: e };
-                        return $rc_109;
+                        const $rc_110 = { $: "Err", _0: e };
+                        return $rc_110;
                       }
                     }
                     break;
@@ -8712,8 +8712,8 @@ function Authority$host_part_pattern(s, path) {
                       {
                         const $t1258 = march_string_concat3("`", port_text, "` is not a port (1-65535)");
                         {
-                          const $rc_125 = { $: "Err", _0: $t1258 };
-                          return $rc_125;
+                          const $rc_126 = { $: "Err", _0: $t1258 };
+                          return $rc_126;
                         }
                       }
                     } else {
@@ -8742,16 +8742,16 @@ function Authority$host_part_pattern(s, path) {
                                       $t1263 = march_string_slice(host_part, 1, $t1262);
                                     }
                                     {
-                                      let $rc_112;
+                                      let $rc_113;
                                       {
                                         const $t1306_i107 = ($t1263 !== "");
                                         if ($t1306_i107 === true) {
-                                          $rc_112 = Authority$all_chars($t1263, "0123456789abcdef:.", 0);
+                                          $rc_113 = Authority$all_chars($t1263, "0123456789abcdef:.", 0);
                                         } else {
-                                          $rc_112 = false;
+                                          $rc_113 = false;
                                         }
                                       }
-                                      $t1264 = $rc_112;
+                                      $t1264 = $rc_113;
                                     }
                                   }
                                 } else {
@@ -8763,16 +8763,16 @@ function Authority$host_part_pattern(s, path) {
                                   let $t1265;
                                   $t1265 = { _0: host_part, _1: false, _2: port, _3: path };
                                   {
-                                    const $rc_124 = { $: "Ok", _0: $t1265 };
-                                    return $rc_124;
+                                    const $rc_125 = { $: "Ok", _0: $t1265 };
+                                    return $rc_125;
                                   }
                                 }
                               } else {
                                 {
                                   const $t1266 = march_string_concat3("`", host_part, "` is not an IPv6 literal");
                                   {
-                                    const $rc_123 = { $: "Err", _0: $t1266 };
-                                    return $rc_123;
+                                    const $rc_124 = { $: "Err", _0: $t1266 };
+                                    return $rc_124;
                                   }
                                 }
                               }
@@ -8810,8 +8810,8 @@ function Authority$host_part_pattern(s, path) {
                                   $t1271 = host_part;
                                 }
                                 {
-                                  const $rc_113 = Authority$normalize_host($t1271);
-                                  name = $rc_113;
+                                  const $rc_114 = Authority$normalize_host($t1271);
+                                  name = $rc_114;
                                 }
                               }
                               {
@@ -8826,8 +8826,8 @@ function Authority$host_part_pattern(s, path) {
                                 }
                                 if ($t1273 === true) {
                                   {
-                                    const $rc_122 = { $: "Err", _0: "a wildcard must be the whole leftmost label (`*.example.com`)" };
-                                    return $rc_122;
+                                    const $rc_123 = { $: "Err", _0: "a wildcard must be the whole leftmost label (`*.example.com`)" };
+                                    return $rc_123;
                                   }
                                 } else {
                                   {
@@ -8840,8 +8840,8 @@ function Authority$host_part_pattern(s, path) {
                                           {
                                             const $t1308_i9694 = march_string_split(name, ".");
                                             {
-                                              const $rc_130_i9695 = Authority$labels_ok($t1308_i9694);
-                                              $t1274 = $rc_130_i9695;
+                                              const $rc_131_i9695 = Authority$labels_ok($t1308_i9694);
+                                              $t1274 = $rc_131_i9695;
                                             }
                                           }
                                         } else {
@@ -8854,16 +8854,16 @@ function Authority$host_part_pattern(s, path) {
                                       {
                                         const $t1276 = march_string_concat3("`", host_part, "` is not a host name: labels are letters, digits and `-`, separated by single dots");
                                         {
-                                          const $rc_121 = { $: "Err", _0: $t1276 };
-                                          return $rc_121;
+                                          const $rc_122 = { $: "Err", _0: $t1276 };
+                                          return $rc_122;
                                         }
                                       }
                                     } else {
                                       {
                                         const $t1277 = { _0: name, _1: wild, _2: port, _3: path };
                                         {
-                                          const $rc_120 = { $: "Ok", _0: $t1277 };
-                                          return $rc_120;
+                                          const $rc_121 = { $: "Ok", _0: $t1277 };
+                                          return $rc_121;
                                         }
                                       }
                                     }
@@ -8927,8 +8927,8 @@ function Authority$split_host_port(s) {
                       {
                         const $t1286 = ((i + 1) < 4611686018427387904 && (i + 1) >= -4611686018427387904 ? (i + 1) : march_int_ovf((i + 1), 0));
                         {
-                          const $rc_126 = march_string_slice(s, 0, $t1286);
-                          $t1287 = $rc_126;
+                          const $rc_127 = march_string_slice(s, 0, $t1286);
+                          $t1287 = $rc_127;
                         }
                       }
                       return { _0: $t1287, _1: "" };
@@ -8942,8 +8942,8 @@ function Authority$split_host_port(s) {
                           {
                             const $t1289 = ((i + 1) < 4611686018427387904 && (i + 1) >= -4611686018427387904 ? (i + 1) : march_int_ovf((i + 1), 0));
                             {
-                              const $rc_128 = march_string_slice(s, 0, $t1289);
-                              $t1290 = $rc_128;
+                              const $rc_129 = march_string_slice(s, 0, $t1289);
+                              $t1290 = $rc_129;
                             }
                           }
                           {
@@ -8957,8 +8957,8 @@ function Authority$split_host_port(s) {
                                   $t1292 = (($t1291 - 1) < 4611686018427387904 && ($t1291 - 1) >= -4611686018427387904 ? ($t1291 - 1) : march_int_ovf(($t1291 - 1), 1));
                                 }
                                 {
-                                  const $rc_127 = march_string_slice(rest, 1, $t1292);
-                                  $t1293 = $rc_127;
+                                  const $rc_128 = march_string_slice(rest, 1, $t1292);
+                                  $t1293 = $rc_128;
                                 }
                               }
                               $t1294 = Authority$port_text_of($t1293);
@@ -9012,8 +9012,8 @@ function Authority$split_host_port(s) {
                           $t1301 = (($t1300 - 1) < 4611686018427387904 && ($t1300 - 1) >= -4611686018427387904 ? ($t1300 - 1) : march_int_ovf(($t1300 - 1), 1));
                         }
                         {
-                          const $rc_129 = march_string_slice(s, $t1298, $t1301);
-                          $t1302 = $rc_129;
+                          const $rc_130 = march_string_slice(s, $t1298, $t1301);
+                          $t1302 = $rc_130;
                         }
                       }
                     }
@@ -9187,8 +9187,8 @@ function Authority$parse_scope_path(p) {
                       {
                         let $t1323;
                         {
-                          const $rc_131 = march_string_concat3("a path scope cannot contain a `", seg, "` segment");
-                          $t1323 = $rc_131;
+                          const $rc_132 = march_string_concat3("a path scope cannot contain a `", seg, "` segment");
+                          $t1323 = $rc_132;
                         }
                         return { $: "Err", _0: $t1323 };
                       }
@@ -9196,8 +9196,8 @@ function Authority$parse_scope_path(p) {
                       {
                         let $t1324;
                         {
-                          const $rc_132 = march_string_concat3("the path segment `", seg, "` may contain only letters, digits, `-`, `_`, `.` and `~` (no `%`, `?`, `#` or `\\`)");
-                          $t1324 = $rc_132;
+                          const $rc_133 = march_string_concat3("the path segment `", seg, "` may contain only letters, digits, `-`, `_`, `.` and `~` (no `%`, `?`, `#` or `\\`)");
+                          $t1324 = $rc_133;
                         }
                         return { $: "Err", _0: $t1324 };
                       }
@@ -9352,8 +9352,8 @@ function Authority$host_options($tco_a0, $tco_a1, $tco_a2, $tco_a3) {
                                   {
                                     let $t1358;
                                     {
-                                      const $rc_133 = march_string_split(v, ",");
-                                      $t1358 = $rc_133;
+                                      const $rc_134 = march_string_split(v, ",");
+                                      $t1358 = $rc_134;
                                     }
                                     {
                                       $tco_a0 = rest;
@@ -9374,8 +9374,8 @@ function Authority$host_options($tco_a0, $tco_a1, $tco_a2, $tco_a3) {
                                 {
                                   let $t1359;
                                   {
-                                    const $rc_134 = march_string_concat3("`", m, "` is not an HTTP method a scope can name; use `get`, `head`, `post`, `put`, `patch`, `delete`, `options`");
-                                    $t1359 = $rc_134;
+                                    const $rc_135 = march_string_concat3("`", m, "` is not an HTTP method a scope can name; use `get`, `head`, `post`, `put`, `patch`, `delete`, `options`");
+                                    $t1359 = $rc_135;
                                   }
                                   return { $: "Err", _0: $t1359 };
                                 }
@@ -9445,8 +9445,8 @@ function Authority$bad_method($tco_a0) {
                             {
                               const $t1375 = { $: "Cons", _0: "get", _1: $t1374 };
                               {
-                                const $rc_135 = Authority$member($t1375, m);
-                                $t1376 = $rc_135;
+                                const $rc_136 = Authority$member($t1375, m);
+                                $t1376 = $rc_136;
                               }
                             }
                           }
@@ -9569,8 +9569,8 @@ function Authority$host_decl(spec) {
                         {
                           const $t1392 = { $: "Nil" };
                           {
-                            const $rc_136 = Authority$host_options(opts, false, false, $t1392);
-                            $t1393 = $rc_136;
+                            const $rc_137 = Authority$host_options(opts, false, false, $t1392);
+                            $t1393 = $rc_137;
                           }
                         }
                         switch ($t1393.$) {
@@ -9683,8 +9683,8 @@ function Authority$host_subsumes(o, i) {
                                         } else {
                                           if (img === true) {
                                             {
-                                              const $rc_137 = Authority$all_member(ims, oms);
-                                              $t1422 = $rc_137;
+                                              const $rc_138 = Authority$all_member(ims, oms);
+                                              $t1422 = $rc_138;
                                             }
                                           } else {
                                             $t1422 = false;
@@ -9796,12 +9796,12 @@ function Authority$pattern_subsumes(o, i) {
                                         {
                                           let $t1441;
                                           {
-                                            const $rc_140 = ("." + oh);
-                                            $t1441 = $rc_140;
+                                            const $rc_141 = ("." + oh);
+                                            $t1441 = $rc_141;
                                           }
                                           {
-                                            const $rc_139 = march_string_ends_with(ih, $t1441);
-                                            host_ok = $rc_139;
+                                            const $rc_140 = march_string_ends_with(ih, $t1441);
+                                            host_ok = $rc_140;
                                           }
                                         }
                                       }
@@ -9811,8 +9811,8 @@ function Authority$pattern_subsumes(o, i) {
                                       const $t1442 = (!iw);
                                       if ($t1442 === true) {
                                         {
-                                          const $rc_141 = (ih === oh);
-                                          host_ok = $rc_141;
+                                          const $rc_142 = (ih === oh);
+                                          host_ok = $rc_142;
                                         }
                                       } else {
                                         host_ok = false;
@@ -9849,8 +9849,8 @@ function Authority$pattern_subsumes(o, i) {
                                                 {
                                                   const i_paths = $f1445;
                                                   {
-                                                    const $rc_138 = Authority$segs_prefix(o_paths, i_paths);
-                                                    path_ok = $rc_138;
+                                                    const $rc_139 = Authority$segs_prefix(o_paths, i_paths);
+                                                    path_ok = $rc_139;
                                                   }
                                                 }
                                                 break;
@@ -10113,8 +10113,8 @@ function Authority$tokenize($tco_a0, $tco_a1, $tco_a2, $tco_a3) {
                                 {
                                   let $t1500;
                                   {
-                                    const $rc_142 = ("\"" + str);
-                                    $t1500 = $rc_142;
+                                    const $rc_143 = ("\"" + str);
+                                    $t1500 = $rc_143;
                                   }
                                   {
                                     const $t1501 = { $: "Cons", _0: $t1500, _1: acc };
@@ -10172,8 +10172,8 @@ function Authority$tokenize($tco_a0, $tco_a1, $tco_a2, $tco_a3) {
                           {
                             let $t1514;
                             {
-                              const $rc_143 = march_string_concat3("unexpected `", c, "`");
-                              $t1514 = $rc_143;
+                              const $rc_144 = march_string_concat3("unexpected `", c, "`");
+                              $t1514 = $rc_144;
                             }
                             return { $: "Err", _0: $t1514 };
                           }
@@ -10206,16 +10206,16 @@ function Authority$word_end($tco_a0, $tco_a1, $tco_a2) {
           {
             const $t1517 = march_string_slice(s, i, 1);
             {
-              let $rc_144;
+              let $rc_145;
               {
                 const $t1515_i112 = ($t1517 !== "");
                 if ($t1515_i112 === true) {
-                  $rc_144 = march_string_contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.", $t1517);
+                  $rc_145 = march_string_contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.", $t1517);
                 } else {
-                  $rc_144 = false;
+                  $rc_145 = false;
                 }
               }
-              $t1518 = $rc_144;
+              $t1518 = $rc_145;
             }
           }
         } else {
@@ -10312,8 +10312,8 @@ function Authority$read_string($tco_a0, $tco_a1, $tco_a2, $tco_a3) {
                             {
                               let $t1532;
                               {
-                                const $rc_145 = (acc + d);
-                                $t1532 = $rc_145;
+                                const $rc_146 = (acc + d);
+                                $t1532 = $rc_146;
                               }
                               {
                                 $tco_a0 = s;
@@ -10334,8 +10334,8 @@ function Authority$read_string($tco_a0, $tco_a1, $tco_a2, $tco_a3) {
                     {
                       let $t1534;
                       {
-                        const $rc_146 = (acc + c);
-                        $t1534 = $rc_146;
+                        const $rc_147 = (acc + c);
+                        $t1534 = $rc_147;
                       }
                       {
                         $tco_a0 = s;
@@ -10418,20 +10418,20 @@ function Authority$parse_entries($tco_a0, $tco_a1) {
                         {
                           let $t1543;
                           {
-                            let $rc_148;
+                            let $rc_149;
                             {
                               const $t1537_i115 = march_string_starts_with(t, "\"");
                               if ($t1537_i115 === true) {
-                                $rc_148 = "a string";
+                                $rc_149 = "a string";
                               } else {
-                                $rc_148 = march_string_concat3("`", t, "`");
+                                $rc_149 = march_string_concat3("`", t, "`");
                               }
                             }
-                            $t1543 = $rc_148;
+                            $t1543 = $rc_149;
                           }
                           {
-                            const $rc_147 = ("expected `,` between capabilities, found " + $t1543);
-                            $t1544 = $rc_147;
+                            const $rc_148 = ("expected `,` between capabilities, found " + $t1543);
+                            $t1544 = $rc_148;
                           }
                         }
                         return { $: "Err", _0: $t1544 };
@@ -10509,8 +10509,8 @@ function Authority$parse_entry(toks) {
                   {
                     const $t1619_i9714 = march_string_split(k, ".");
                     {
-                      const $rc_152_i9715 = Authority$kind_parts_ok($t1619_i9714);
-                      $t1563 = $rc_152_i9715;
+                      const $rc_153_i9715 = Authority$kind_parts_ok($t1619_i9714);
+                      $t1563 = $rc_153_i9715;
                     }
                   }
                 } else {
@@ -10525,20 +10525,20 @@ function Authority$parse_entry(toks) {
                 {
                   let $t1565;
                   {
-                    let $rc_150;
+                    let $rc_151;
                     {
                       const $t1537_i117 = march_string_starts_with(k, "\"");
                       if ($t1537_i117 === true) {
-                        $rc_150 = "a string";
+                        $rc_151 = "a string";
                       } else {
-                        $rc_150 = march_string_concat3("`", k, "`");
+                        $rc_151 = march_string_concat3("`", k, "`");
                       }
                     }
-                    $t1565 = $rc_150;
+                    $t1565 = $rc_151;
                   }
                   {
-                    const $rc_149 = ("expected a capability such as `IO.Console`, found " + $t1565);
-                    $t1566 = $rc_149;
+                    const $rc_150 = ("expected a capability such as `IO.Console`, found " + $t1565);
+                    $t1566 = $rc_150;
                   }
                 }
                 return { $: "Err", _0: $t1566 };
@@ -10559,8 +10559,8 @@ function Authority$parse_entry(toks) {
                             {
                               let $t1567;
                               {
-                                const $rc_151 = march_string_concat_n("`", k, "()` names no scope: write `", k, "` for any target");
-                                $t1567 = $rc_151;
+                                const $rc_152 = march_string_concat_n("`", k, "()` names no scope: write `", k, "` for any target");
+                                $t1567 = $rc_152;
                               }
                               return { $: "Err", _0: $t1567 };
                             }
@@ -10775,8 +10775,8 @@ function Authority$kind_parts_ok($tco_a0) {
                   {
                     const $t1621 = march_string_slice(p, 0, 1);
                     {
-                      const $rc_153 = march_string_contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ", $t1621);
-                      $t1622 = $rc_153;
+                      const $rc_154 = march_string_contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ", $t1621);
+                      $t1622 = $rc_154;
                     }
                   }
                 } else {
@@ -10843,16 +10843,16 @@ function Authority$parse_items($tco_a0, $tco_a1, $tco_a2) {
                       {
                         let $t1632;
                         {
-                          let $rc_156;
+                          let $rc_157;
                           {
                             let $t1536_i127;
                             {
                               const $t1535_i126 = march_string_byte_length(t);
                               $t1536_i127 = (($t1535_i126 - 1) < 4611686018427387904 && ($t1535_i126 - 1) >= -4611686018427387904 ? ($t1535_i126 - 1) : march_int_ovf(($t1535_i126 - 1), 1));
                             }
-                            $rc_156 = march_string_slice(t, 1, $t1536_i127);
+                            $rc_157 = march_string_slice(t, 1, $t1536_i127);
                           }
-                          $t1632 = $rc_156;
+                          $t1632 = $rc_157;
                         }
                         {
                           const $t1633 = { $: "Cons", _0: $t1632, _1: strs };
@@ -10920,20 +10920,20 @@ function Authority$parse_items($tco_a0, $tco_a1, $tco_a2) {
                         {
                           let $t1647;
                           {
-                            let $rc_158;
+                            let $rc_159;
                             {
                               const $t1537_i122 = march_string_starts_with(t, "\"");
                               if ($t1537_i122 === true) {
-                                $rc_158 = "a string";
+                                $rc_159 = "a string";
                               } else {
-                                $rc_158 = march_string_concat3("`", t, "`");
+                                $rc_159 = march_string_concat3("`", t, "`");
                               }
                             }
-                            $t1647 = $rc_158;
+                            $t1647 = $rc_159;
                           }
                           {
-                            const $rc_157 = ("expected a string or an option in a scope, found " + $t1647);
-                            $t1648 = $rc_157;
+                            const $rc_158 = ("expected a string or an option in a scope, found " + $t1647);
+                            $t1648 = $rc_158;
                           }
                         }
                         item = { $: "Err", _0: $t1648 };
@@ -11004,20 +11004,20 @@ function Authority$parse_items($tco_a0, $tco_a1, $tco_a2) {
                                   {
                                     let $t1654;
                                     {
-                                      let $rc_155;
+                                      let $rc_156;
                                       {
                                         const $t1537_i120 = march_string_starts_with(x, "\"");
                                         if ($t1537_i120 === true) {
-                                          $rc_155 = "a string";
+                                          $rc_156 = "a string";
                                         } else {
-                                          $rc_155 = march_string_concat3("`", x, "`");
+                                          $rc_156 = march_string_concat3("`", x, "`");
                                         }
                                       }
-                                      $t1654 = $rc_155;
+                                      $t1654 = $rc_156;
                                     }
                                     {
-                                      const $rc_154 = ("expected `,` or `)` in a scope, found " + $t1654);
-                                      $t1655 = $rc_154;
+                                      const $rc_155 = ("expected `,` or `)` in a scope, found " + $t1654);
+                                      $t1655 = $rc_155;
                                     }
                                   }
                                   return { $: "Err", _0: $t1655 };
@@ -11092,20 +11092,20 @@ function Authority$parse_option(name, toks) {
                                   {
                                     let $t1691;
                                     {
-                                      let $rc_160;
+                                      let $rc_161;
                                       {
                                         let $t1536_i134;
                                         {
                                           const $t1535_i133 = march_string_byte_length(v);
                                           $t1536_i134 = (($t1535_i133 - 1) < 4611686018427387904 && ($t1535_i133 - 1) >= -4611686018427387904 ? ($t1535_i133 - 1) : march_int_ovf(($t1535_i133 - 1), 1));
                                         }
-                                        $rc_160 = march_string_slice(v, 1, $t1536_i134);
+                                        $rc_161 = march_string_slice(v, 1, $t1536_i134);
                                       }
-                                      $t1691 = $rc_160;
+                                      $t1691 = $rc_161;
                                     }
                                     {
-                                      const $rc_159 = march_string_concat3(name, "=", $t1691);
-                                      $t1692 = $rc_159;
+                                      const $rc_160 = march_string_concat3(name, "=", $t1691);
+                                      $t1692 = $rc_160;
                                     }
                                   }
                                   {
@@ -11137,8 +11137,8 @@ function Authority$parse_option(name, toks) {
                                 {
                                   let $t1696;
                                   {
-                                    const $rc_161 = ("methods=" + v);
-                                    $t1696 = $rc_161;
+                                    const $rc_162 = ("methods=" + v);
+                                    $t1696 = $rc_162;
                                   }
                                   {
                                     const $t1697 = { _0: $t1696, _1: rest };
@@ -11149,8 +11149,8 @@ function Authority$parse_option(name, toks) {
                                 {
                                   let $t1698;
                                   {
-                                    const $rc_162 = march_string_concat3("`", name, "(...)` takes a quoted string");
-                                    $t1698 = $rc_162;
+                                    const $rc_163 = march_string_concat3("`", name, "(...)` takes a quoted string");
+                                    $t1698 = $rc_163;
                                   }
                                   return { $: "Err", _0: $t1698 };
                                 }
@@ -11206,12 +11206,12 @@ function Authority$parse_option(name, toks) {
                               {
                                 let $t1702;
                                 {
-                                  const $rc_164 = march_string_join(ms, ",");
-                                  $t1702 = $rc_164;
+                                  const $rc_165 = march_string_join(ms, ",");
+                                  $t1702 = $rc_165;
                                 }
                                 {
-                                  const $rc_163 = ("methods=" + $t1702);
-                                  $t1703 = $rc_163;
+                                  const $rc_164 = ("methods=" + $t1702);
+                                  $t1703 = $rc_164;
                                 }
                               }
                               {
@@ -11232,8 +11232,8 @@ function Authority$parse_option(name, toks) {
                   {
                     let $t1713;
                     {
-                      const $rc_165 = march_string_concat3("`", name, "(...)` takes one quoted string");
-                      $t1713 = $rc_165;
+                      const $rc_166 = march_string_concat3("`", name, "(...)` takes one quoted string");
+                      $t1713 = $rc_166;
                     }
                     return { $: "Err", _0: $t1713 };
                   }
@@ -11351,18 +11351,18 @@ function Authority$scope_arg(k, strs, opts) {
         {
           let $t1775;
           {
-            let $rc_167;
+            let $rc_168;
             switch (opts.$) {
               case "Nil": {
-                $rc_167 = true;
+                $rc_168 = true;
                 break;
               }
               default: {
-                $rc_167 = false;
+                $rc_168 = false;
                 break;
               }
             }
-            $t1775 = $rc_167;
+            $t1775 = $rc_168;
           }
           $t1776 = (!$t1775);
         }
@@ -11388,8 +11388,8 @@ function Authority$scope_arg(k, strs, opts) {
                       {
                         let $t1780;
                         {
-                          const $rc_166 = march_string_concat_n("the scope `", p, "` on `", k, "` is a relative path; give an absolute path, one starting with `/`");
-                          $t1780 = $rc_166;
+                          const $rc_167 = march_string_concat_n("the scope `", p, "` on `", k, "` is a relative path; give an absolute path, one starting with `/`");
+                          $t1780 = $rc_167;
                         }
                         return { $: "Err", _0: $t1780 };
                       }
@@ -11418,8 +11418,8 @@ function Authority$scope_arg(k, strs, opts) {
                                   {
                                     let $t2037_i9731;
                                     {
-                                      const $rc_206_i9730 = Authority$normalize(x_i9729);
-                                      $t2037_i9731 = $rc_206_i9730;
+                                      const $rc_207_i9730 = Authority$normalize(x_i9729);
+                                      $t2037_i9731 = $rc_207_i9730;
                                     }
                                     {
                                       const $trmc27_i9732 = { $: "Cons", _0: $t2037_i9731, _1: null };
@@ -11463,12 +11463,12 @@ function Authority$scope_arg(k, strs, opts) {
                 {
                   let $t1785;
                   {
-                    const $rc_169 = march_string_join(opts, ";");
-                    $t1785 = $rc_169;
+                    const $rc_170 = march_string_join(opts, ";");
+                    $t1785 = $rc_170;
                   }
                   {
-                    const $rc_168 = (";" + $t1785);
-                    spec = $rc_168;
+                    const $rc_169 = (";" + $t1785);
+                    spec = $rc_169;
                   }
                 }
                 break;
@@ -11499,8 +11499,8 @@ function Authority$scope_arg(k, strs, opts) {
                                 {
                                   let $t2029_i9723;
                                   {
-                                    const $rc_204_i9722 = ("name=" + x_i9721);
-                                    $t2029_i9723 = $rc_204_i9722;
+                                    const $rc_205_i9722 = ("name=" + x_i9721);
+                                    $t2029_i9723 = $rc_205_i9722;
                                   }
                                   {
                                     const $trmc23_i9724 = { $: "Cons", _0: $t2029_i9723, _1: null };
@@ -11530,8 +11530,8 @@ function Authority$scope_arg(k, strs, opts) {
                         {
                           const $t1788 = { $: "Cons", _0: first, _1: $t1787 };
                           {
-                            const $rc_170 = march_string_join($t1788, ";");
-                            spec = $rc_170;
+                            const $rc_171 = march_string_join($t1788, ";");
+                            spec = $rc_171;
                           }
                         }
                       }
@@ -11788,8 +11788,8 @@ function Authority$name_options($tco_a0, $tco_a1) {
                       $t1858 = (($t1857 - 7) < 4611686018427387904 && ($t1857 - 7) >= -4611686018427387904 ? ($t1857 - 7) : march_int_ovf(($t1857 - 7), 1));
                     }
                     {
-                      const $rc_171 = march_string_slice(o, 7, $t1858);
-                      $t1859 = $rc_171;
+                      const $rc_172 = march_string_slice(o, 7, $t1858);
+                      $t1859 = $rc_172;
                     }
                   }
                   {
@@ -11805,8 +11805,8 @@ function Authority$name_options($tco_a0, $tco_a1) {
                 {
                   let $t1861;
                   {
-                    const $rc_172 = march_string_concat3("`", o, "` is not an option a name scope takes; it takes names and `prefix(\"...\")`");
-                    $t1861 = $rc_172;
+                    const $rc_173 = march_string_concat3("`", o, "` is not an option a name scope takes; it takes names and `prefix(\"...\")`");
+                    $t1861 = $rc_173;
                   }
                   return { $: "Err", _0: $t1861 };
                 }
@@ -11921,13 +11921,13 @@ function Authority$scope_text(s) {
                     {
                       const $t1880 = Authority$quote_all(ps);
                       {
-                        const $rc_174 = march_string_join($t1880, ", ");
-                        $t1881 = $rc_174;
+                        const $rc_175 = march_string_join($t1880, ", ");
+                        $t1881 = $rc_175;
                       }
                     }
                     {
-                      const $rc_173 = march_string_concat_n(k, "(", $t1881, ")");
-                      return $rc_173;
+                      const $rc_174 = march_string_concat_n(k, "(", $t1881, ")");
+                      return $rc_174;
                     }
                   }
                 }
@@ -11947,13 +11947,13 @@ function Authority$scope_text(s) {
                         {
                           const $t1882 = Authority$quote_all(ps);
                           {
-                            const $rc_176 = march_string_join($t1882, ", ");
-                            $t1883 = $rc_176;
+                            const $rc_177 = march_string_join($t1882, ", ");
+                            $t1883 = $rc_177;
                           }
                         }
                         {
-                          const $rc_175 = march_string_concat_n(k, "(", $t1883, ")");
-                          return $rc_175;
+                          const $rc_176 = march_string_concat_n(k, "(", $t1883, ")");
+                          return $rc_176;
                         }
                       }
                     }
@@ -11996,8 +11996,8 @@ function Authority$scope_text(s) {
                                               {
                                                 let $t1991_i9740;
                                                 {
-                                                  const $rc_202_i9739 = march_string_concat3("prefix(", x_i9738, ")");
-                                                  $t1991_i9740 = $rc_202_i9739;
+                                                  const $rc_203_i9739 = march_string_concat3("prefix(", x_i9738, ")");
+                                                  $t1991_i9740 = $rc_203_i9739;
                                                 }
                                                 {
                                                   const $trmc19_i9741 = { $: "Cons", _0: $t1991_i9740, _1: null };
@@ -12025,16 +12025,16 @@ function Authority$scope_text(s) {
                                         }
                                       }
                                       {
-                                        const $rc_178 = march_string_join($t1887, ", ");
-                                        $t1888 = $rc_178;
+                                        const $rc_179 = march_string_join($t1887, ", ");
+                                        $t1888 = $rc_179;
                                       }
                                     }
                                   }
                                 }
                               }
                               {
-                                const $rc_177 = march_string_concat_n(k, "(", $t1888, ")");
-                                return $rc_177;
+                                const $rc_178 = march_string_concat_n(k, "(", $t1888, ")");
+                                return $rc_178;
                               }
                             }
                           }
@@ -12051,8 +12051,8 @@ function Authority$scope_text(s) {
                             {
                               const k = $f1889;
                               {
-                                const $rc_179 = Authority$host_scope_text(k, spec);
-                                return $rc_179;
+                                const $rc_180 = Authority$host_scope_text(k, spec);
+                                return $rc_180;
                               }
                             }
                           }
@@ -12070,8 +12070,8 @@ function Authority$scope_text(s) {
                                 {
                                   const k = $f1889;
                                   {
-                                    const $rc_180 = Authority$host_scope_text(k, spec);
-                                    return $rc_180;
+                                    const $rc_181 = Authority$host_scope_text(k, spec);
+                                    return $rc_181;
                                   }
                                 }
                               }
@@ -12125,8 +12125,8 @@ function Authority$host_scope_text(k, spec) {
                   {
                     let $t1952;
                     {
-                      const $rc_183 = Authority$quote(first);
-                      $t1952 = $rc_183;
+                      const $rc_184 = Authority$quote(first);
+                      $t1952 = $rc_184;
                     }
                     {
                       const $t1953 = { $: "Nil" };
@@ -12148,14 +12148,14 @@ function Authority$host_scope_text(k, spec) {
                         }
                       }
                       {
-                        const $rc_182 = march_string_join($t1955, ", ");
-                        $t1956 = $rc_182;
+                        const $rc_183 = march_string_join($t1955, ", ");
+                        $t1956 = $rc_183;
                       }
                     }
                   }
                   {
-                    const $rc_181 = march_string_concat_n(k, "(", $t1956, ")");
-                    return $rc_181;
+                    const $rc_182 = march_string_concat_n(k, "(", $t1956, ")");
+                    return $rc_182;
                   }
                 }
               }
@@ -12215,8 +12215,8 @@ function Authority$option_texts(opts) {
                               $t1967 = (($t1966 - 1) < 4611686018427387904 && ($t1966 - 1) >= -4611686018427387904 ? ($t1966 - 1) : march_int_ovf(($t1966 - 1), 1));
                             }
                             {
-                              const $rc_190 = march_string_slice(o, $t1964, $t1967);
-                              v = $rc_190;
+                              const $rc_191 = march_string_slice(o, $t1964, $t1967);
+                              v = $rc_191;
                             }
                           }
                         }
@@ -12224,8 +12224,8 @@ function Authority$option_texts(opts) {
                           const $t1968 = (name === "name");
                           if ($t1968 === true) {
                             {
-                              const $rc_184 = Authority$quote(v);
-                              t = $rc_184;
+                              const $rc_185 = Authority$quote(v);
+                              t = $rc_185;
                             }
                           } else {
                             {
@@ -12236,29 +12236,29 @@ function Authority$option_texts(opts) {
                                   {
                                     let $t1970;
                                     {
-                                      const $rc_187 = march_string_split(v, ",");
-                                      $t1970 = $rc_187;
+                                      const $rc_188 = march_string_split(v, ",");
+                                      $t1970 = $rc_188;
                                     }
                                     {
-                                      const $rc_186 = march_string_join($t1970, ", ");
-                                      $t1971 = $rc_186;
+                                      const $rc_187 = march_string_join($t1970, ", ");
+                                      $t1971 = $rc_187;
                                     }
                                   }
                                   {
-                                    const $rc_185 = march_string_concat3("methods(", $t1971, ")");
-                                    t = $rc_185;
+                                    const $rc_186 = march_string_concat3("methods(", $t1971, ")");
+                                    t = $rc_186;
                                   }
                                 }
                               } else {
                                 {
                                   let $t1972;
                                   {
-                                    const $rc_189 = Authority$quote(v);
-                                    $t1972 = $rc_189;
+                                    const $rc_190 = Authority$quote(v);
+                                    $t1972 = $rc_190;
                                   }
                                   {
-                                    const $rc_188 = march_string_concat_n(name, "(", $t1972, ")");
-                                    t = $rc_188;
+                                    const $rc_189 = march_string_concat_n(name, "(", $t1972, ")");
+                                    t = $rc_189;
                                   }
                                 }
                               }
@@ -12342,8 +12342,8 @@ function Authority$option_texts$dps($tco_a0, $tco_a1) {
                                 $t1967 = (($t1966 - 1) < 4611686018427387904 && ($t1966 - 1) >= -4611686018427387904 ? ($t1966 - 1) : march_int_ovf(($t1966 - 1), 1));
                               }
                               {
-                                const $rc_197 = march_string_slice(o, $t1964, $t1967);
-                                v = $rc_197;
+                                const $rc_198 = march_string_slice(o, $t1964, $t1967);
+                                v = $rc_198;
                               }
                             }
                           }
@@ -12351,8 +12351,8 @@ function Authority$option_texts$dps($tco_a0, $tco_a1) {
                             const $t1968 = (name === "name");
                             if ($t1968 === true) {
                               {
-                                const $rc_191 = Authority$quote(v);
-                                t = $rc_191;
+                                const $rc_192 = Authority$quote(v);
+                                t = $rc_192;
                               }
                             } else {
                               {
@@ -12363,29 +12363,29 @@ function Authority$option_texts$dps($tco_a0, $tco_a1) {
                                     {
                                       let $t1970;
                                       {
-                                        const $rc_194 = march_string_split(v, ",");
-                                        $t1970 = $rc_194;
+                                        const $rc_195 = march_string_split(v, ",");
+                                        $t1970 = $rc_195;
                                       }
                                       {
-                                        const $rc_193 = march_string_join($t1970, ", ");
-                                        $t1971 = $rc_193;
+                                        const $rc_194 = march_string_join($t1970, ", ");
+                                        $t1971 = $rc_194;
                                       }
                                     }
                                     {
-                                      const $rc_192 = march_string_concat3("methods(", $t1971, ")");
-                                      t = $rc_192;
+                                      const $rc_193 = march_string_concat3("methods(", $t1971, ")");
+                                      t = $rc_193;
                                     }
                                   }
                                 } else {
                                   {
                                     let $t1972;
                                     {
-                                      const $rc_196 = Authority$quote(v);
-                                      $t1972 = $rc_196;
+                                      const $rc_197 = Authority$quote(v);
+                                      $t1972 = $rc_197;
                                     }
                                     {
-                                      const $rc_195 = march_string_concat_n(name, "(", $t1972, ")");
-                                      t = $rc_195;
+                                      const $rc_196 = march_string_concat_n(name, "(", $t1972, ")");
+                                      t = $rc_196;
                                     }
                                   }
                                 }
@@ -12435,13 +12435,13 @@ function Authority$quote(s) {
     {
       const $t1981 = march_string_replace_all(s, "\\", "\\\\");
       {
-        const $rc_199 = march_string_replace_all($t1981, "\"", "\\\"");
-        $t1982 = $rc_199;
+        const $rc_200 = march_string_replace_all($t1981, "\"", "\\\"");
+        $t1982 = $rc_200;
       }
     }
     {
-      const $rc_198 = march_string_concat3("\"", $t1982, "\"");
-      return $rc_198;
+      const $rc_199 = march_string_concat3("\"", $t1982, "\"");
+      return $rc_199;
     }
   }
 }
@@ -12463,8 +12463,8 @@ function Authority$quote_all(l) {
           {
             let $t1983;
             {
-              const $rc_200 = Authority$quote(x);
-              $t1983 = $rc_200;
+              const $rc_201 = Authority$quote(x);
+              $t1983 = $rc_201;
             }
             {
               const $trmc15 = { $: "Cons", _0: $t1983, _1: null };
@@ -12505,8 +12505,8 @@ function Authority$quote_all$dps($tco_a0, $tco_a1) {
             {
               let $t1983;
               {
-                const $rc_201 = Authority$quote(x);
-                $t1983 = $rc_201;
+                const $rc_202 = Authority$quote(x);
+                $t1983 = $rc_202;
               }
               {
                 const $trmc14 = { $: "Cons", _0: $t1983, _1: null };
@@ -12557,8 +12557,8 @@ function Authority$wrap_all$dps($tco_a0, $tco_a1, $tco_a2) {
             {
               let $t1991;
               {
-                const $rc_203 = march_string_concat3(pre, x, ")");
-                $t1991 = $rc_203;
+                const $rc_204 = march_string_concat3(pre, x, ")");
+                $t1991 = $rc_204;
               }
               {
                 const $trmc18 = { $: "Cons", _0: $t1991, _1: null };
@@ -12766,8 +12766,8 @@ function Authority$prefix_all$dps($tco_a0, $tco_a1, $tco_a2) {
             {
               let $t2029;
               {
-                const $rc_205 = (pre + x);
-                $t2029 = $rc_205;
+                const $rc_206 = (pre + x);
+                $t2029 = $rc_206;
               }
               {
                 const $trmc22 = { $: "Cons", _0: $t2029, _1: null };
@@ -12818,8 +12818,8 @@ function Authority$map_normalize$dps($tco_a0, $tco_a1) {
             {
               let $t2037;
               {
-                const $rc_207 = Authority$normalize(x);
-                $t2037 = $rc_207;
+                const $rc_208 = Authority$normalize(x);
+                $t2037 = $rc_208;
               }
               {
                 const $trmc26 = { $: "Cons", _0: $t2037, _1: null };
@@ -12876,8 +12876,8 @@ function Authority$mock_covers($tco_a0, $tco_a1, $tco_a2, $tco_a3) {
                     {
                       let $t2173;
                       {
-                        const $rc_214 = (k === kind);
-                        $t2173 = $rc_214;
+                        const $rc_215 = (k === kind);
+                        $t2173 = $rc_215;
                       }
                       if ($t2173 === true) {
                         $t2174 = Authority$arg_admits(arg, kind, target, cwd);
@@ -12919,64 +12919,64 @@ const Authority$mock_covers$clo = { _0: ($_, scopes, kind, target, cwd) => Autho
 
 function Js$Dom$find(id) {
   {
-    const $rc_2747 = dom_get_element_by_id$clo._0(dom_get_element_by_id$clo, id);
-    return $rc_2747;
+    const $rc_2748 = dom_get_element_by_id$clo._0(dom_get_element_by_id$clo, id);
+    return $rc_2748;
   }
 }
 const Js$Dom$find$clo = { _0: ($_, id) => Js$Dom$find(id) };
 
 function Js$Dom$create(tag) {
   {
-    const $rc_2750 = dom_create_element$clo._0(dom_create_element$clo, tag);
-    return $rc_2750;
+    const $rc_2751 = dom_create_element$clo._0(dom_create_element$clo, tag);
+    return $rc_2751;
   }
 }
 const Js$Dom$create$clo = { _0: ($_, tag) => Js$Dom$create(tag) };
 
 function Js$Dom$append(parent, child) {
   {
-    const $rc_2753 = dom_append_child$clo._0(dom_append_child$clo, parent, child);
-    return $rc_2753;
+    const $rc_2754 = dom_append_child$clo._0(dom_append_child$clo, parent, child);
+    return $rc_2754;
   }
 }
 const Js$Dom$append$clo = { _0: ($_, parent, child) => Js$Dom$append(parent, child) };
 
 function Js$Dom$get_attr(el, name) {
   {
-    const $rc_2766 = dom_get_attribute$clo._0(dom_get_attribute$clo, el, name);
-    return $rc_2766;
+    const $rc_2767 = dom_get_attribute$clo._0(dom_get_attribute$clo, el, name);
+    return $rc_2767;
   }
 }
 const Js$Dom$get_attr$clo = { _0: ($_, el, name) => Js$Dom$get_attr(el, name) };
 
 function Js$Dom$set_attr(el, name, val) {
   {
-    const $rc_2767 = dom_set_attribute$clo._0(dom_set_attribute$clo, el, name, val);
-    return $rc_2767;
+    const $rc_2768 = dom_set_attribute$clo._0(dom_set_attribute$clo, el, name, val);
+    return $rc_2768;
   }
 }
 const Js$Dom$set_attr$clo = { _0: ($_, el, name, val) => Js$Dom$set_attr(el, name, val) };
 
 function Js$Dom$add_class(el, cls) {
   {
-    const $rc_2770 = dom_class_add$clo._0(dom_class_add$clo, el, cls);
-    return $rc_2770;
+    const $rc_2771 = dom_class_add$clo._0(dom_class_add$clo, el, cls);
+    return $rc_2771;
   }
 }
 const Js$Dom$add_class$clo = { _0: ($_, el, cls) => Js$Dom$add_class(el, cls) };
 
 function Js$Dom$set_style(el, prop, val) {
   {
-    const $rc_2774 = dom_set_style$clo._0(dom_set_style$clo, el, prop, val);
-    return $rc_2774;
+    const $rc_2775 = dom_set_style$clo._0(dom_set_style$clo, el, prop, val);
+    return $rc_2775;
   }
 }
 const Js$Dom$set_style$clo = { _0: ($_, el, prop, val) => Js$Dom$set_style(el, prop, val) };
 
 function Js$Dom$listen(el, event, handler) {
   {
-    const $rc_2778 = dom_add_event_listener$clo._0(dom_add_event_listener$clo, el, event, handler);
-    return $rc_2778;
+    const $rc_2779 = dom_add_event_listener$clo._0(dom_add_event_listener$clo, el, event, handler);
+    return $rc_2779;
   }
 }
 const Js$Dom$listen$clo = { _0: ($_, el, event, handler) => Js$Dom$listen(el, event, handler) };
@@ -13350,8 +13350,8 @@ function int_list_to_string(xs) {
         }
       }
       {
-        const $rc_2829 = march_string_join($t49780, ",");
-        return $rc_2829;
+        const $rc_2830 = march_string_join($t49780, ",");
+        return $rc_2830;
       }
     }
   }
@@ -13498,12 +13498,12 @@ function get_int_attr(el, name, _default) {
           {
             let $t49821;
             {
-              const $rc_2831 = march_string_to_int(s);
-              $t49821 = $rc_2831;
+              const $rc_2832 = march_string_to_int(s);
+              $t49821 = $rc_2832;
             }
             {
-              const $rc_2830 = Option$unwrap_or$Option_Int$Int($t49821, _default);
-              return $rc_2830;
+              const $rc_2831 = Option$unwrap_or$Option_Int$Int($t49821, _default);
+              return $rc_2831;
             }
           }
         }
@@ -13648,8 +13648,8 @@ function set_text_if_found(id, text) {
             {
               const text_i13538 = text;
               {
-                const $rc_2763_i13539 = dom_set_text$clo._0(dom_set_text$clo, el, text);
-                return $rc_2763_i13539;
+                const $rc_2764_i13539 = dom_set_text$clo._0(dom_set_text$clo, el, text);
+                return $rc_2764_i13539;
               }
             }
           }
@@ -13673,8 +13673,8 @@ function with_state(f) {
         let $t49872;
         $t49872 = get_str_attr(el, "data-over", "false");
         {
-          const $rc_2840 = ($t49872 === "true");
-          over = $rc_2840;
+          const $rc_2841 = ($t49872 === "true");
+          over = $rc_2841;
         }
       }
       if (over === true) {
@@ -13688,15 +13688,15 @@ function with_state(f) {
             {
               let $t49874;
               {
-                let $rc_2839;
+                let $rc_2840;
                 {
                   const $t49781_i5917 = march_string_split($t49873, ",");
                   {
                     const $t49784_i5918 = { $: "$Clo_$lam0_string_to_int_list$0_string_to_int_list", _0: $lam0_string_to_int_list$apply$0_string_to_int_list };
-                    $rc_2839 = List$map$List_String$Fn_String_Int($t49781_i5917, $t49784_i5918);
+                    $rc_2840 = List$map$List_String$Fn_String_Int($t49781_i5917, $t49784_i5918);
                   }
                 }
-                $t49874 = $rc_2839;
+                $t49874 = $rc_2840;
               }
               board = Array$from_list$List_Int($t49874);
             }
@@ -13707,23 +13707,23 @@ function with_state(f) {
               let $t49875;
               $t49875 = get_str_attr(el, "data-piece", "I");
               {
-                let $rc_2838;
+                let $rc_2839;
                 if ($t49875 === "I") {
-                  $rc_2838 = { $: "I" };
+                  $rc_2839 = { $: "I" };
                 } else if ($t49875 === "O") {
-                  $rc_2838 = { $: "O" };
+                  $rc_2839 = { $: "O" };
                 } else if ($t49875 === "T") {
-                  $rc_2838 = { $: "T" };
+                  $rc_2839 = { $: "T" };
                 } else if ($t49875 === "S") {
-                  $rc_2838 = { $: "S" };
+                  $rc_2839 = { $: "S" };
                 } else if ($t49875 === "Z") {
-                  $rc_2838 = { $: "Z" };
+                  $rc_2839 = { $: "Z" };
                 } else if ($t49875 === "J") {
-                  $rc_2838 = { $: "J" };
+                  $rc_2839 = { $: "J" };
                 } else {
-                  $rc_2838 = { $: "L" };
+                  $rc_2839 = { $: "L" };
                 }
-                piece = $rc_2838;
+                piece = $rc_2839;
               }
             }
             {
@@ -13741,23 +13741,23 @@ function with_state(f) {
                       let $t49876;
                       $t49876 = get_str_attr(el, "data-next", "O");
                       {
-                        let $rc_2837;
+                        let $rc_2838;
                         if ($t49876 === "I") {
-                          $rc_2837 = { $: "I" };
+                          $rc_2838 = { $: "I" };
                         } else if ($t49876 === "O") {
-                          $rc_2837 = { $: "O" };
+                          $rc_2838 = { $: "O" };
                         } else if ($t49876 === "T") {
-                          $rc_2837 = { $: "T" };
+                          $rc_2838 = { $: "T" };
                         } else if ($t49876 === "S") {
-                          $rc_2837 = { $: "S" };
+                          $rc_2838 = { $: "S" };
                         } else if ($t49876 === "Z") {
-                          $rc_2837 = { $: "Z" };
+                          $rc_2838 = { $: "Z" };
                         } else if ($t49876 === "J") {
-                          $rc_2837 = { $: "J" };
+                          $rc_2838 = { $: "J" };
                         } else {
-                          $rc_2837 = { $: "L" };
+                          $rc_2838 = { $: "L" };
                         }
-                        next = $rc_2837;
+                        next = $rc_2838;
                       }
                     }
                     {
@@ -13859,8 +13859,8 @@ function with_state(f) {
                                                       {
                                                         const $t49878 = String(score2);
                                                         {
-                                                          const $rc_2836 = ("Score: " + $t49878);
-                                                          $t49879 = $rc_2836;
+                                                          const $rc_2837 = ("Score: " + $t49878);
+                                                          $t49879 = $rc_2837;
                                                         }
                                                       }
                                                       $eff = set_text_if_found("score", $t49879);
@@ -13877,8 +13877,8 @@ function with_state(f) {
                                                           $t49881 = String($t49880);
                                                         }
                                                         {
-                                                          const $rc_2835 = ("Level: " + $t49881);
-                                                          $t49882 = $rc_2835;
+                                                          const $rc_2836 = ("Level: " + $t49881);
+                                                          $t49882 = $rc_2836;
                                                         }
                                                       }
                                                       $eff = set_text_if_found("level", $t49882);
@@ -13891,8 +13891,8 @@ function with_state(f) {
                                                       {
                                                         const $t49883 = piece_to_string(next2);
                                                         {
-                                                          const $rc_2834 = ("Next: " + $t49883);
-                                                          $t49884 = $rc_2834;
+                                                          const $rc_2835 = ("Next: " + $t49883);
+                                                          $t49884 = $rc_2835;
                                                         }
                                                       }
                                                       $eff = set_text_if_found("next", $t49884);
@@ -13940,8 +13940,8 @@ function with_state(f) {
                                                       {
                                                         let $t49887;
                                                         {
-                                                          const $rc_2833 = piece_to_string(piece2);
-                                                          $t49887 = $rc_2833;
+                                                          const $rc_2834 = piece_to_string(piece2);
+                                                          $t49887 = $rc_2834;
                                                         }
                                                         $eff = Js$Dom$set_attr(el, "data-piece", $t49887);
                                                       }
@@ -13972,8 +13972,8 @@ function with_state(f) {
                                                       {
                                                         let $t49891;
                                                         {
-                                                          const $rc_2832 = piece_to_string(next2);
-                                                          $t49891 = $rc_2832;
+                                                          const $rc_2833 = piece_to_string(next2);
+                                                          $t49891 = $rc_2833;
                                                         }
                                                         $eff = Js$Dom$set_attr(el, "data-next", $t49891);
                                                       }
@@ -14178,8 +14178,8 @@ function is_paused() {
       $t49986 = get_str_attr($t49985, "data-paused", "false");
     }
     {
-      const $rc_2841 = ($t49986 === "true");
-      return $rc_2841;
+      const $rc_2842 = ($t49986 === "true");
+      return $rc_2842;
     }
   }
 }
@@ -14220,8 +14220,8 @@ function toggle_pause() {
         let $t49987;
         $t49987 = get_str_attr(el, "data-over", "false");
         {
-          const $rc_2842 = ($t49987 === "true");
-          over = $rc_2842;
+          const $rc_2843 = ($t49987 === "true");
+          over = $rc_2843;
         }
       }
       if (over === true) {
@@ -14358,8 +14358,8 @@ function restart() {
                             {
                               const $t803_i14824 = Authority$describe(e_i14823);
                               {
-                                const $rc_3039_i14825 = ("capability refused: " + $t803_i14824);
-                                $t804_i14826 = $rc_3039_i14825;
+                                const $rc_3040_i14825 = ("capability refused: " + $t803_i14824);
+                                $t804_i14826 = $rc_3040_i14825;
                               }
                             }
                             throw march_panic_error("panic: ", $t804_i14826);
@@ -14472,8 +14472,8 @@ function restart() {
                                 {
                                   const $t50023 = piece_to_string(next);
                                   {
-                                    const $rc_2845 = ("Next: " + $t50023);
-                                    $t50024 = $rc_2845;
+                                    const $rc_2846 = ("Next: " + $t50023);
+                                    $t50024 = $rc_2846;
                                   }
                                 }
                                 $eff = set_text_if_found("next", $t50024);
@@ -14516,8 +14516,8 @@ function restart() {
                               {
                                 let $t50027;
                                 {
-                                  const $rc_2844 = piece_to_string(piece);
-                                  $t50027 = $rc_2844;
+                                  const $rc_2845 = piece_to_string(piece);
+                                  $t50027 = $rc_2845;
                                 }
                                 $eff = Js$Dom$set_attr(el, "data-piece", $t50027);
                               }
@@ -14548,8 +14548,8 @@ function restart() {
                               {
                                 let $t50031;
                                 {
-                                  const $rc_2843 = piece_to_string(next);
-                                  $t50031 = $rc_2843;
+                                  const $rc_2844 = piece_to_string(next);
+                                  $t50031 = $rc_2844;
                                 }
                                 $eff = Js$Dom$set_attr(el, "data-next", $t50031);
                               }
@@ -14649,8 +14649,8 @@ function restore_from_request() {
                                   let $t50074;
                                   $t50074 = get_str_attr(req, "data-over", "false");
                                   {
-                                    const $rc_2851 = ($t50074 === "true");
-                                    over = $rc_2851;
+                                    const $rc_2852 = ($t50074 === "true");
+                                    over = $rc_2852;
                                   }
                                 }
                                 {
@@ -14658,8 +14658,8 @@ function restore_from_request() {
                                   {
                                     const $t50075 = get_str_attr(req, "data-paused", "false");
                                     {
-                                      const $rc_2850 = ($t50075 === "true");
-                                      paused = $rc_2850;
+                                      const $rc_2851 = ($t50075 === "true");
+                                      paused = $rc_2851;
                                     }
                                   }
                                   {
@@ -14764,8 +14764,8 @@ function restore_from_request() {
                                             {
                                               const $t50077 = String(score);
                                               {
-                                                const $rc_2849 = ("Score: " + $t50077);
-                                                $t50078 = $rc_2849;
+                                                const $rc_2850 = ("Score: " + $t50077);
+                                                $t50078 = $rc_2850;
                                               }
                                             }
                                             $eff = set_text_if_found("score", $t50078);
@@ -14782,8 +14782,8 @@ function restore_from_request() {
                                                 $t50080 = String($t50079);
                                               }
                                               {
-                                                const $rc_2848 = ("Level: " + $t50080);
-                                                $t50081 = $rc_2848;
+                                                const $rc_2849 = ("Level: " + $t50080);
+                                                $t50081 = $rc_2849;
                                               }
                                             }
                                             $eff = set_text_if_found("level", $t50081);
@@ -14796,12 +14796,12 @@ function restore_from_request() {
                                             {
                                               let $t50082;
                                               {
-                                                const $rc_2847 = piece_to_string(next);
-                                                $t50082 = $rc_2847;
+                                                const $rc_2848 = piece_to_string(next);
+                                                $t50082 = $rc_2848;
                                               }
                                               {
-                                                const $rc_2846 = ("Next: " + $t50082);
-                                                $t50083 = $rc_2846;
+                                                const $rc_2847 = ("Next: " + $t50082);
+                                                $t50083 = $rc_2847;
                                               }
                                             }
                                             $eff = set_text_if_found("next", $t50083);
@@ -14916,8 +14916,8 @@ function handle_key(ev) {
     {
       const ev_i13549 = ev;
       {
-        const $rc_2782_i13550 = dom_event_key$clo._0(dom_event_key$clo, ev);
-        key = $rc_2782_i13550;
+        const $rc_2783_i13550 = dom_event_key$clo._0(dom_event_key$clo, ev);
+        key = $rc_2783_i13550;
       }
     }
     {
@@ -14941,8 +14941,8 @@ function handle_key(ev) {
           {
             const ev_i13547 = ev;
             {
-              const $rc_2783_i13548 = dom_prevent_default$clo._0(dom_prevent_default$clo, ev);
-              $eff = $rc_2783_i13548;
+              const $rc_2784_i13548 = dom_prevent_default$clo._0(dom_prevent_default$clo, ev);
+              $eff = $rc_2784_i13548;
             }
           }
         } else if ($t50101 === false) {
@@ -15296,8 +15296,8 @@ function Array$from_list$List_Int(xs) {
                     {
                       const $t11231 = { $: "TrieEmpty" };
                       {
-                        const $rc_3037 = { $: "PVec", _0: n, _1: 0, _2: $t11231, _3: tail };
-                        return $rc_3037;
+                        const $rc_3038 = { $: "PVec", _0: n, _1: 0, _2: $t11231, _3: tail };
+                        return $rc_3038;
                       }
                     }
                   } else {
@@ -15330,8 +15330,8 @@ function Array$from_list$List_Int(xs) {
                           {
                             const shift = $p11249._1;
                             {
-                              const $rc_3033 = { $: "PVec", _0: n, _1: shift, _2: root, _3: tail };
-                              return $rc_3033;
+                              const $rc_3034 = { $: "PVec", _0: n, _1: shift, _2: root, _3: tail };
+                              return $rc_3034;
                             }
                           }
                         }
@@ -15433,8 +15433,8 @@ function Array$get$PVec_Int$Int(v, idx) {
                           {
                             const $t10966 = ((idx - tail_offset) < 4611686018427387904 && (idx - tail_offset) >= -4611686018427387904 ? (idx - tail_offset) : march_int_ovf((idx - tail_offset), 1));
                             {
-                              const $rc_3038 = Array$lst_nth$List_Int$Int(tail, $t10966);
-                              return $rc_3038;
+                              const $rc_3039 = Array$lst_nth$List_Int$Int(tail, $t10966);
+                              return $rc_3039;
                             }
                           }
                         } else {
@@ -16010,8 +16010,8 @@ function Array$trie_get$TrieNode_Int$Int$Int($tco_a0, $tco_a1, $tco_a2) {
           {
             const $t10800 = ((idx | 0) === idx && (31 | 0) === 31 ? (idx & 31) : march_int_and(idx, 31));
             {
-              const $rc_3108 = Array$lst_nth$List_Int$Int(values, $t10800);
-              return $rc_3108;
+              const $rc_3109 = Array$lst_nth$List_Int$Int(values, $t10800);
+              return $rc_3109;
             }
           }
         }
@@ -16278,8 +16278,8 @@ function Array$trie_update_down$TrieNode_Int$Int$List_T_List_TrieNode_Int_Int$In
               }
             }
             {
-              const $rc_3128 = Array$trie_update_up$TrieNode_Int$List_T_List_TrieNode_Int_Int($t10816, path);
-              return $rc_3128;
+              const $rc_3129 = Array$trie_update_up$TrieNode_Int$List_T_List_TrieNode_Int_Int($t10816, path);
+              return $rc_3129;
             }
           }
         }
@@ -16568,12 +16568,12 @@ function $jp7_Authority_parse_option$apply$0_Authority_parse_option($clo) {
                         {
                           let $t1702;
                           {
-                            const $rc_3148 = march_string_join(ms, ",");
-                            $t1702 = $rc_3148;
+                            const $rc_3149 = march_string_join(ms, ",");
+                            $t1702 = $rc_3149;
                           }
                           {
-                            const $rc_3147 = ("methods=" + $t1702);
-                            $t1703 = $rc_3147;
+                            const $rc_3148 = ("methods=" + $t1702);
+                            $t1703 = $rc_3148;
                           }
                         }
                         {
@@ -16906,8 +16906,8 @@ function $lam0_TetrisLogic_clear_lines$apply$0_TetrisLogic_clear_lines($clo, y) 
         {
           const $t49761_i14599 = { $: "$Clo_$lam0_TetrisLogic_row_full$0_TetrisLogic_row_full", _0: $lam0_TetrisLogic_row_full$apply$0_TetrisLogic_row_full, _1: board, _2: y };
           {
-            const $rc_2828_i14600 = List$all$List_Int$Fn_Int_Bool($t49757_i14598, $t49761_i14599);
-            $t49769 = $rc_2828_i14600;
+            const $rc_2829_i14600 = List$all$List_Int$Fn_Int_Bool($t49757_i14598, $t49761_i14599);
+            $t49769 = $rc_2829_i14600;
           }
         }
       }
@@ -16981,12 +16981,12 @@ function $lam0_string_to_int_list$apply$0_string_to_int_list($clo, x) {
   {
     let $t49783;
     {
-      const $rc_3723 = march_string_to_int(x);
-      $t49783 = $rc_3723;
+      const $rc_3724 = march_string_to_int(x);
+      $t49783 = $rc_3724;
     }
     {
-      const $rc_3722 = Option$unwrap_or$Option_Int$Int($t49783, 0);
-      return $rc_3722;
+      const $rc_3723 = Option$unwrap_or$Option_Int$Int($t49783, 0);
+      return $rc_3723;
     }
   }
 }
@@ -17041,8 +17041,8 @@ function $lam0__lam0_render_board$apply$1_render_board($clo, x) {
               {
                 const $t49843 = String(y);
                 {
-                  const $rc_3724 = march_string_concat_n("cell-", $t49842, "-", $t49843);
-                  id = $rc_3724;
+                  const $rc_3725 = march_string_concat_n("cell-", $t49842, "-", $t49843);
+                  id = $rc_3725;
                 }
               }
             }
@@ -17155,8 +17155,8 @@ function $lam0_render_falling$apply$0_render_falling($clo, c) {
                         {
                           const $t49859 = String(y);
                           {
-                            const $rc_3725 = march_string_concat_n("cell-", $t49858, "-", $t49859);
-                            id = $rc_3725;
+                            const $rc_3726 = march_string_concat_n("cell-", $t49858, "-", $t49859);
+                            id = $rc_3726;
                           }
                         }
                       }
@@ -17248,8 +17248,8 @@ function $lam0_tick$apply$0_tick($clo, board, piece, rot, x, y, next, score, lin
         }
         if ($t49994 === true) {
           {
-            const $rc_3726 = lock_and_advance(board, piece, rot, x, y, next, score, lines, rng);
-            return $rc_3726;
+            const $rc_3727 = lock_and_advance(board, piece, rot, x, y, next, score, lines, rng);
+            return $rc_3727;
           }
         } else if ($t49994 === false) {
           {
@@ -17400,8 +17400,8 @@ function $lam0_hard_drop$apply$0_hard_drop($clo, board, piece, rot, x, y, next, 
         let final_y;
         final_y = fall_from(board, cells, x, y);
         {
-          const $rc_3727 = lock_and_advance(board, piece, rot, x, final_y, next, score, lines, rng);
-          return $rc_3727;
+          const $rc_3728 = lock_and_advance(board, piece, rot, x, final_y, next, score, lines, rng);
+          return $rc_3728;
         }
       }
     }
@@ -17468,8 +17468,8 @@ function $lam0__lam0_build_board_dom$apply$1_build_board_dom($clo, x) {
               {
                 const $t50097 = String(y);
                 {
-                  const $rc_3728 = march_string_concat_n("cell-", $t50096, "-", $t50097);
-                  $t50098 = $rc_3728;
+                  const $rc_3729 = march_string_concat_n("cell-", $t50096, "-", $t50097);
+                  $t50098 = $rc_3729;
                 }
               }
             }
