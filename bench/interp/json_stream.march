@@ -18,7 +18,7 @@ pfn build_records(n, acc) do
   end
 end
 
-fn main(_cap_console : Cap(IO.Console)) do
+fn main() needs IO.Console do
   let n = 2000
   let src = string_join(build_records(n, Nil), "")
   let total = run_chunked(src, 0, JsonStream.start_ndjson(), 0)

@@ -9,7 +9,7 @@ mod HttpHello do
     end
   end
 
-  fn main(_cap_netlisten : Cap(IO.NetListen)) do
+  fn main() needs IO.NetListen do
     Authority.must(HttpServer.new(8080)
     |> HttpServer.plug(router)
     |> HttpServer.listen())

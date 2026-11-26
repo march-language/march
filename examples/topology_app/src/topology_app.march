@@ -38,14 +38,14 @@ mod TopologyApp do
     type Env = { factor : Int }
 
     -- The pool hook: runs on every node of the pool before any offer opens.
-    fn start(_con : Cap(IO.Console), _node : Cap(ClusterNode.Live)) : Env do
+    fn start(_node : Cap(ClusterNode.Live)) : Env do
       println("back: hook ran")
       { factor: 10 }
     end
 
     -- Echo.Server, bound to a function: the pool's environment, the session,
     -- the role's grant (`role Server needs IO.Console`), the entry state.
-    fn serve_one(env : Env, s : Cap(Session.Live), con : Cap(IO.Console), st : Echo_Server.Entry) : Echo_Server.Yield do
+    fn serve_one(env : Env, s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
       Echo_Server.recv_Ask(s, st, fn (n, st1) ->
         println("back: echo " ++ int_to_string(n))
         Echo_Server.close(s, Echo_Server.send_Answer(s, st1, n * env.factor)))

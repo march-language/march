@@ -50,7 +50,7 @@ let sleeper_src = {|mod Sleeper do
       lines(i + 1, n)
     end
   end
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     lines(1, 50)
     println("ready")
     sleep_ms(600000)

@@ -354,7 +354,7 @@ let cap_fix_before = {|mod Shapes do
     helper()
   end
 
-  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+  fn main() needs IO.Console, IO.Clock do
     greet("world")
     show(Some(1))
     println(later() > 0)
@@ -392,7 +392,7 @@ let cap_fix_after = {|mod Shapes do
     ()
   end
 
-  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+  fn main() needs IO.Console, IO.Clock do
     greet("world")
     show(Some(1))
     println(later() > 0)
@@ -427,7 +427,7 @@ let test_fix_paths_only_filters_codes () =
     println("hello, " ++ name)
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     greet("world", 1)
   end
 end
@@ -1109,7 +1109,7 @@ let test_run_interpreted_passes_ffi_sources () =
         \  extern \"shim\" : Cap(Ffi) do\n\
         \    fn triple(x: Int): Int = \"forge_run_ffi_triple\"\n\
         \  end\n\n\
-        \  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do\n\
+        \  fn main() : Unit needs IO.Console, IO.Foreign do\n\
         \    println(int_to_string(triple(14)))\n\
         \    ()\n\
         \  end\n\

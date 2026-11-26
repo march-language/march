@@ -16,7 +16,7 @@ pfn go(i : Int, n : Int, acc : Int) : Int do
   end end
 end
 
-pfn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
+pfn main() : Unit needs IO.Console, IO.Spawn do
   println(int_to_string(go(0, 100000, 0)))
   ()
 end

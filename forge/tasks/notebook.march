@@ -440,7 +440,7 @@ end
 
 -- ── Main entry point ──────────────────────────────────────────────────────────
 
-fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_filewrite : Cap(IO.FileWrite), _cap_process : Cap(IO.Process)) do
+fn main() needs IO.Console, IO.FileRead, IO.FileWrite, IO.Process do
   let input_path = match Authority.must(System.env("FORGE_NB_INPUT")) do
     Some(p) -> p
     None    ->

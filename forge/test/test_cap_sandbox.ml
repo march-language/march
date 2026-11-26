@@ -386,7 +386,7 @@ let scope_fixture ~modname ~decl ~inside ~outside =
   needs IO.Console
   needs %s
 
-  fn main(_c : Cap(IO.Console), _w : Cap(IO.FileWrite)) : Unit do
+  fn main() : Unit needs IO.Console, IO.FileWrite do
     let outside = "%s"
     match Authority.must(File.write("%s", "x")) do
       Ok(_) -> println("inscope=0")

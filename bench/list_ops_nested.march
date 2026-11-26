@@ -71,7 +71,7 @@ mod Ops do
   end
 end
 
-pfn main(_cap_console : Cap(IO.Console)) : Unit do
+pfn main() : Unit needs IO.Console do
   let n     = 1000000
   let xs    = Ops.irange(1, n)
   let ys    = Ops.imap(xs, fn x -> x * 2)

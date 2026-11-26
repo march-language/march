@@ -89,7 +89,7 @@ mod ActorPing do
     if total >= n do total else wait_done(a, b, n) end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let n = 1000000
     let a = Game.new_player()
     let b = Game.new_player()

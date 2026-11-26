@@ -43,7 +43,7 @@ mod CompileTimeProbe do
     List.fold_left(xs, 0, fn (acc, x) -> acc + sig_target(x, 0))
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let xs = List.range(1, 100)
     let b = { v: use_a(xs), w: 7 } -- BENCH:FIELD_INIT
     println(b.v + use_b(xs))

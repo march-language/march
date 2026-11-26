@@ -26,9 +26,9 @@ mod UpgradeApp do
     answer2: Server -> Client : Int
   end
 
-  -- The hook keeps its capabilities so a later version's role body can
+  -- The hook keeps the node so a later version's role body can
   -- start sessions of its own (fixtures/upgrade/live).
-  type Env = { io : Cap(IO), node : Cap(ClusterNode.Live) }
+  type Env = { node : Cap(ClusterNode.Live) }
 
   actor Tally do
     state { total : Int }
@@ -36,14 +36,14 @@ mod UpgradeApp do
     on Add(n : Int) do { total: state.total + n } end
   end
 
-  fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Env do
+  fn start(node : Cap(ClusterNode.Live)) : Env do
     let t = spawn(Tally)
     let _ = Task.async(fn () -> feed(t, 0))
     -- Named state the OLD version creates: a later version's code must find
     -- it (a hot patch used to carry its own vault registry and could not).
     let st = Authority.must(Vault.new("upgrade_state"))
     Vault.set(st, "base", 100)
-    { io: io, node: node }
+    { node: node }
   end
 
   fn feed(t : Pid(TallyState), i : Int) : Int do

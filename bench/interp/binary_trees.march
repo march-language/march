@@ -20,7 +20,7 @@ mod BinaryTrees do
     if i == 0 do acc else iter(i - 1, acc + check(make(10))) end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println("checksum=" ++ int_to_string(iter(4, 0)))
     ()
   end

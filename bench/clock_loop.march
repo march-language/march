@@ -16,7 +16,7 @@ pfn go(i : Int, n : Int, acc : Int) : Int do
   else go(i + 1, n, acc + Authority.must(System.now_ms()) % 2 + 1) end
 end
 
-pfn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) : Unit do
+pfn main() : Unit needs IO.Console, IO.Clock do
   println(int_to_string(go(0, 10000000, 0)))
   ()
 end

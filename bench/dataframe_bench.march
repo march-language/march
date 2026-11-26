@@ -175,7 +175,7 @@ end
 
 -- ── Main ────────────────────────────────────────────────────────────────────
 
-fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
+fn main() : Unit needs IO.Clock, IO.Console do
   Authority.ignore(println("DataFrame benchmarks"))
   println("Generating data...")
   let df1k    = make_frame(1000)

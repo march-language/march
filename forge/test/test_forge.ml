@@ -2675,7 +2675,7 @@ let write_rust_ffi_project ?(with_c_source = false) dir =
     \    fn rusty_add(a : Int, b : Int) : Int = \"rusty_add\"\n\
     \    fn rusty_tag_roundtrip(n : Int) : Int = \"rusty_tag_roundtrip\"\n\
     \  end\n\n\
-    \  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) do\n\
+    \  fn main() needs IO.Console, IO.Foreign do\n\
     \    println(\"add=\" ++ int_to_string(rusty_add(40, 2)))\n\
     \    println(\"roundtrip=\" ++ int_to_string(rusty_tag_roundtrip(-7)))\n\
     \  end\n\
@@ -2760,7 +2760,7 @@ let test_compiled_run_end_to_end () =
        [ "mod ForgeRunE2e do";
          "  needs IO.Console";
          "";
-         "  fn main(_cap : Cap(IO.Console)) : () do";
+         "  fn main() : () needs IO.Console do";
          "    println(\"forge-run-e2e-ok\")";
          "    ()";
          "  end";
@@ -2940,7 +2940,7 @@ let test_interpreted_file_run_argv_excludes_compiler () =
        [ "mod ArgvCheck do";
          "  needs IO";
          "";
-         "  fn main(_cap : Cap(IO)) : () do";
+         "  fn main() : () needs IO do";
          "    println(to_string(List.length(Authority.must(System.argv()))))";
          "    ()";
          "  end";
@@ -3072,7 +3072,7 @@ let test_js_entrypoint_selects_js_main () =
     String.concat "\n"
       [ "mod " ^ name ^ " do";
         "  needs IO.Console";
-        "  fn main(_c : Cap(IO.Console)) : Unit do";
+        "  fn main() : Unit needs IO.Console do";
         "    println(\"" ^ text ^ "\")";
         "    ()";
         "  end";
@@ -3134,7 +3134,7 @@ let test_bench_links_ffi_sources () =
          "    fn answer() : Int = \"forge_bench_ffi_answer\"";
          "  end";
          "";
-         "  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do";
+         "  fn main() : Unit needs IO.Console, IO.Foreign do";
          "    println(\"answer=\" ++ int_to_string(answer()))";
          "    ()";
          "  end";

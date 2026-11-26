@@ -31,7 +31,7 @@ pfn repeat(arr, k : Int, n : Int, acc : Int) : Int do
   else repeat(arr, k - 1, n, acc + indexed(arr, 0, n, 0)) end
 end
 
-pfn main(_cap_console : Cap(IO.Console)) : Unit do
+pfn main() : Unit needs IO.Console do
   let a = arith(0, 300000000, 0)
   let n = 1000000
   let arr = fill(native_int_arr_make(n, 0), 0, n)

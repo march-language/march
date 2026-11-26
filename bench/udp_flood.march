@@ -144,7 +144,7 @@ mod UdpFloodBench do
     end
   end
 
-  fn main(_cap : Cap(IO)) : () do
+  fn main() : () needs IO do
     lockstep(64, 64, 64000)
     lockstep(1200, 64, 32000)
     flood(64, 64, 128000)

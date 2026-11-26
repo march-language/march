@@ -66,7 +66,7 @@ fn churn(w : Wide, i : Int, acc : Int) : Int do
   end
 end
 
-fn main(_cap_console : Cap(IO.Console)) : Unit do
+fn main() : Unit needs IO.Console do
   let w = make(7)
   let total = churn(w, 30000000, 0)
   println(int_to_string(total))

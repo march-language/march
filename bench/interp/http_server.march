@@ -15,7 +15,7 @@ mod HttpBench do
     end
   end
 
-  fn main(_cap : Cap(IO.NetListen)) do
+  fn main() needs IO.NetListen do
     Authority.must(HttpServer.new(18080)
     |> HttpServer.plug(router)
     |> HttpServer.listen())

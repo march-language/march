@@ -26,7 +26,7 @@ mod BranchAggregate do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = 50000000
     println(int_to_string(go(0, n, 0)))
   end

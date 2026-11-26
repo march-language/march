@@ -94,8 +94,7 @@ mod HttpsHello do
     end
   end
 
-  fn main(_l : Cap(IO.NetListen), _p : Cap(IO.Process), _w : Cap(IO.WebSocket),
-          _s : Cap(IO.Spawn), _f : Cap(IO.FileRead)) do
+  fn main() needs IO.NetListen, IO.Process, IO.WebSocket, IO.Spawn, IO.FileRead do
     let https_port = env_int("HTTPS_PORT", 443)
     Authority.must(HttpServer.new(https_port)
     |> HttpServer.tls(HttpServer.TlsFiles(
