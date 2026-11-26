@@ -2158,6 +2158,10 @@ and apply_inner (fn_val : value) (args : value list) : value =
        let's initialiser called it ([module_init]). *)
     let saved_init = !module_init in
     if saved_init then module_init := false;
+    (* The capture oracle (test instrumentation; [None] normally). *)
+    let tracked =
+      match !Eval_prim.capture_oracle with Some o -> o.co_enter (span_of_expr body) | None -> false
+    in
     (* [call_return_hook] is a no-op natively; in the browser REPL it is the
        stack bounce on the return path (see [Eval_prim.call_return_hook]).
        It runs in [~finally] so an exception unwinding a deep recursion (a
@@ -2168,6 +2172,7 @@ and apply_inner (fn_val : value) (args : value list) : value =
           closure_prefix_override := saved;
           if saved_init then module_init := true;
           (match saved_cap with Some s -> Eval_builtins.cap_slot := s | None -> ());
+          (if tracked then match !Eval_prim.capture_oracle with Some o -> o.co_leave () | None -> ());
           !call_return_hook ())
       (fun () -> eval_expr env' body)
 
@@ -2280,7 +2285,19 @@ and eval_expr_inner (env : env) (e : expr) : value =
   | EVar n ->  (* E-Var — core-march.md §4.2 *)
     let v = lookup n.txt env in
     if !callee_var then (callee_var := false; v)
-    else (match v with VBuiltin _ -> capture_named_value n.txt v | _ -> v)
+    else (match v with
+        | VBuiltin _ -> (
+          let v' = capture_named_value n.txt v in
+          (* The capture oracle: a named function read as a value is a
+             function value from here on. *)
+          match !Eval_prim.capture_oracle, v' with
+          | Some o, VBuiltin (bname, f) ->
+            VBuiltin
+              ( bname,
+                fun args ->
+                  if o.co_enter n.span then Fun.protect ~finally:o.co_leave (fun () -> f args) else f args )
+          | _ -> v')
+        | _ -> v)
 
   | EHole (name, _) ->
     let label = match name with Some n -> "?" ^ n.txt | None -> "?" in
@@ -2764,6 +2781,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
      | Some (def, env_ref) ->
        let pid = !next_pid in
        next_pid := pid + 1;
+       (match !Eval_prim.capture_oracle with Some o -> o.co_spawned pid | None -> ());
        (* The actor's own `init` params, in scope in its init expression and
           in its supervise block's child `init` arguments. *)
        let init_names =
@@ -3350,8 +3368,9 @@ let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
                         (fun () ->
                            (* Under the actor's own authority, not the
                               pass's caller's (ocap phase 4, design §7). *)
+                           Eval_prim.oracle_actor pid (fun () ->
                            Eval_runtime.with_actor_authority inst.ai_authority
-                             (fun () -> !eval_expr_hook handler_env handler.ah_body))
+                             (fun () -> !eval_expr_hook handler_env handler.ah_body)))
                 with
                 | new_state ->
                   inst.ai_state <- new_state;
@@ -3909,8 +3928,9 @@ let shutdown_actor_pid (pid : int) : unit =
               [("state", inst.ai_state)] @ param_bindings
               @ [("self", VPid pid)] @ !(inst.ai_env_ref)
             in
-            (match Eval_runtime.with_actor_authority inst.ai_authority
-                     (fun () -> !eval_expr_hook handler_env handler.ah_body) with
+            (match Eval_prim.oracle_actor pid (fun () ->
+                     Eval_runtime.with_actor_authority inst.ai_authority
+                       (fun () -> !eval_expr_hook handler_env handler.ah_body)) with
              | new_state -> inst.ai_state <- new_state
              | exception _ -> ());
             current_pid := prev_pid

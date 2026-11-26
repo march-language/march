@@ -28,3 +28,12 @@ specs/lang/capabilities.md.
   loop for 2 s per close.
 - A use that saw READY and was preempted for more than 2 s before its `recv` still
   reaches a recycled number: a narrow window, accepted.
+
+## 2026-11-25: the stranded count itself is fixed; the drain's timeout path is what is left
+
+The runtime now leaves the uses a caught panic jumped out of, and the ones a dead green
+thread was inside (`specs/progress/2026-11-25-handle-use-left-on-caught-panic.md`). That
+removes the usual cause of a drain timing out. Still open, both in
+`march_handle_close_drain`'s timeout branch: (a) the sticky fd-wait cancel that outlives the
+descriptor, and (b) the 2 s stall of the event-loop thread. A use that is merely slow (not
+abandoned) can still reach both.

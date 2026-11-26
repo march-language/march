@@ -252,7 +252,12 @@ mod Authority do
   -- The result is a CapAuthRef (the builtins' opaque type, which has no
   -- declaration to name in an annotation).
   fn enter_fn(layer : Layer) do
-    if top_is_frame(cap_layers(), layer) do cap_save()
+    if top_is_frame(cap_layers(), layer) do
+      -- Entering the authority in force changes nothing, and what comes
+      -- back holds no reference to it, so a panic that skips the restore
+      -- leaves nothing behind (a bare `cap_save()` here would).
+      let cur = cap_save()
+      cap_enter(cur)
     else cap_push(layer) end
   end
 

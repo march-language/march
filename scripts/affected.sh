@@ -91,7 +91,7 @@ owner_of_test_module() {
     march_test_stdlib_suite) echo stdlib ;;
     march_test_snapshots|run_snapshots) echo @test/runtest-run_snapshots ;;
     march_test_helpers) echo FULL ;;
-    run_compiler|run_eval|run_codegen|run_stdlib|run_errors|run_test_reports|run_cap_conformance|run_authority|run_dep_grants|test_stdlib_march|test_jit|test_refinecheck)
+    run_compiler|run_eval|run_codegen|run_stdlib|run_errors|run_test_reports|run_cap_conformance|run_authority|run_dep_grants|run_captures|test_stdlib_march|test_jit|test_refinecheck)
       echo "${stanza#run_}" ;;
     "") ;;
     *) echo "@test/runtest-$stanza" ;;
@@ -127,9 +127,10 @@ classify() {
     lib/typecheck/*|lib/modules/*|lib/resolver/*)
       # dep_grants: the resolver's module-conflict check and the type
       # checker's grant check (ocap phase 6) are driven end to end there.
-      add SUITES compiler eval codegen stdlib stdlib_march errors refinecheck dep_grants $ALL_LSP
+      # captures: capture inference (ocap phase 8a) lives in lib/typecheck.
+      add SUITES compiler eval codegen stdlib stdlib_march errors refinecheck dep_grants captures $ALL_LSP
       add ORACLES types refine
-      reason "$f" "front-end suites + refinecheck + dep_grants, types+refine oracles" ;;
+      reason "$f" "front-end suites + refinecheck + dep_grants + captures, types+refine oracles" ;;
     lib/errors/*)
       add SUITES compiler errors test_reports $ALL_LSP; add ORACLES types
       reason "$f" "compiler, errors, test_reports, lsp; types oracle" ;;
@@ -147,7 +148,8 @@ classify() {
     lib/jit/*|lib/repl/*)
       add SUITES test_jit compiler eval; reason "$f" "jit, compiler, eval" ;;
     lib/eval/*)
-      add SUITES eval stdlib stdlib_march compiler test_reports cap_conformance authority
+      # captures: the soundness oracle's hooks are in the interpreter.
+      add SUITES eval stdlib stdlib_march compiler test_reports cap_conformance authority captures
       note "lib/eval: the ir oracle cannot see the interpreter; bench/run_interp_bench.sh --modes interp for perf"
       reason "$f" "eval, stdlib, stdlib_march, compiler, test_reports" ;;
 
@@ -164,8 +166,9 @@ classify() {
       add CHECKS specs/lang/refine/check_refine.sh
       reason "$f" "refinecheck, compiler, errors; must-reject corpus; refine oracle" ;;
     lib/caps/*)
-      # dep_grants.ml (ocap phase 6) has its own runner.
-      add SUITES compiler codegen dep_grants; reason "$f" "compiler, codegen, dep_grants" ;;
+      # dep_grants.ml (ocap phase 6) and capture_set.ml (phase 8a) have their
+      # own runners.
+      add SUITES compiler codegen dep_grants captures; reason "$f" "compiler, codegen, dep_grants, captures" ;;
     lib/ctxesc/*|lib/effects/*|lib/cas/*|lib/driver/*)
       add SUITES compiler codegen; reason "$f" "compiler, codegen" ;;
     lib/search/*|lib/query/*)
@@ -179,8 +182,8 @@ classify() {
     lsp/*)
       add SUITES $ALL_LSP; reason "$f" "lsp suites" ;;
     bin/*)
-      add SUITES compiler codegen errors test_jit test_reports dep_grants
-      reason "$f" "compiler, codegen, errors, jit, test_reports, dep_grants" ;;
+      add SUITES compiler codegen errors test_jit test_reports dep_grants captures
+      reason "$f" "compiler, codegen, errors, jit, test_reports, dep_grants, captures" ;;
 
     # ── stdlib: every program reads it ────────────────────────────────────
     stdlib/*)
@@ -195,8 +198,10 @@ classify() {
     test/stdlib/*) add SUITES stdlib_march; reason "$f" "stdlib_march" ;;
     test/errors/*) add SUITES errors; reason "$f" "errors" ;;
     test/dep_grants/*) add SUITES dep_grants; reason "$f" "dep_grants" ;;
+    test/captures/*) add SUITES captures; reason "$f" "captures" ;;
     test/test_reports/*) add SUITES test_reports; reason "$f" "test_reports" ;;
-    test/cap_conformance/*) add SUITES cap_conformance; reason "$f" "cap_conformance" ;;
+    # The capture oracle runs over the conformance fixtures too.
+    test/cap_conformance/*) add SUITES cap_conformance captures; reason "$f" "cap_conformance, captures" ;;
     test/two_node/*)
       note "two-node: scripts/two-node.sh <scenario> (not run here)"; reason "$f" "two-node (note only)" ;;
     test/dune) FULL=1; reason "$f" "FULL (test wiring)" ;;

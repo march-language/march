@@ -1,0 +1,27 @@
+-- Static authority: a closure created inside a literal restrict is narrowed
+-- by it; a value returned by a call inside one is not (design 6.2); a
+-- closure made outside keeps its own set.
+mod Restrict do
+  needs IO.Console, IO.FileRead
+
+  fn reader() do
+    fn p -> File.read(p)
+  end
+
+  fn scoped() needs IO.FileRead("/srv/") do
+    fn p -> File.read(p)
+  end
+
+  fn main() do
+    let outside = fn s -> println(s)
+    let created = restrict IO.FileRead("/srv/data/") do
+      fn p -> File.read(p)
+    end
+    let returned = restrict IO.FileRead("/srv/data/") do reader() end
+    let brought = restrict IO.FileRead("/srv/data/"), IO.Console do
+      fn s -> outside(s)
+    end
+    let by_clause = scoped()
+    (created, returned, brought, by_clause)
+  end
+end

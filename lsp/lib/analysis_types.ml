@@ -196,6 +196,10 @@ type t = {
   (** Line index + source for UTF-16<->byte column conversion. *)
   type_map    : (Ast.span, Tc.ty) Hashtbl.t;
   (** Span → inferred type. *)
+  captures    : March_typecheck.Capture.result Lazy.t;
+  (** Capture inference (ocap phase 8a): the set each function value, and
+      each value holding one, can reach.  Forced by the first hover that
+      needs it, never by diagnostics. *)
   def_map     : (string, Ast.span) Hashtbl.t;
   (** Name → definition span (go-to-definition). *)
   use_map     : (Ast.span, string) Hashtbl.t;

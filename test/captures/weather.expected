@@ -1,0 +1,8 @@
+8:11   lambda in `new`  needs IO.NetConnect("api.weather.com/v1/")
+         IO.NetConnect("api.weather.com/v1/")  calls `HttpClient.get` (9:12)
+17:13  let fetch : String -> Result(String, String) needs c1
+26:8   let weather : Weather.Client needs IO.NetConnect("api.weather.com/v1/")
+fn main : () -> Result((), CapError) needs IO.Console, IO.NetConnect("api.weather.com/v1/")
+fn new : () -> (Weather.Client needs IO.NetConnect("api.weather.com/v1/"))
+fn print : (Weather.Client needs c1) -> Result((), CapError) needs IO.Console, c1
+1 function value, 0 not tracked

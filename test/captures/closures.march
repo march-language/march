@@ -1,0 +1,21 @@
+-- A closure that captures a closure, one that creates a closure, a named
+-- function used as a value, a local fn, and the eta-lambda that stands for a
+-- partial application (March has none).
+mod Closures do
+  needs IO.Console, IO.FileRead
+
+  pfn greet(greeting, name) do println(greeting ++ ", " ++ name) end
+
+  fn main() do
+    let say = fn s -> println(s)
+    let calls_it = fn x -> say(x)
+    let holds_it = fn () -> say
+    let makes_one = fn () -> fn s -> println(s)
+    let hello = fn name -> greet("hello", name)
+    let reads = List.map(["/srv/a"], File.read)
+    fn go(n : Int) : Result((), CapError) do
+      if n == 0 do say("done") else go(n - 1) end
+    end
+    (calls_it, holds_it, makes_one, hello, reads, go)
+  end
+end
