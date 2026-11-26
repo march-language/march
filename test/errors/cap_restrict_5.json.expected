@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/cap_restrict_5.march","start_line":13,"start_col":14,"end_line":13,"end_col":25,"message":"`Actor.debug` needs `Actor.Debug`, which the restrict at cap_restrict_5.march:11 does not allow.\nhelp: add `Actor.Debug` to the restrict, or move the call out of the block.","code":"cap_restrict","fix":null,"labels":[],"notes":[],"category":"CAPABILITY"}

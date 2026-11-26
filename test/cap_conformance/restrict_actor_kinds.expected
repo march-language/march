@@ -1,0 +1,4 @@
+mint: allowed | Actor.Introspect: allowed | Actor.Debug: Actor.Debug refused by the restrict at restrict_actor_kinds.march:26 (Actor.Introspect) | IO.Console: IO.Console refused by the restrict at restrict_actor_kinds.march:26 (Actor.Introspect)
+mint: allowed | Actor.Debug: allowed | Actor.Introspect: Actor.Introspect refused by the restrict at restrict_actor_kinds.march:34 (Actor.Debug)
+Actor.Introspect: allowed | Actor.Debug: allowed
+exit 0

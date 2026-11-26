@@ -1390,6 +1390,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Roles, topologies and `restrict` handle the actor kinds** (object capabilities, phase
+  7). `role R needs Actor.Introspect` (or `Actor.Debug`) is now accepted, and a role whose
+  code reaches `Actor.introspect()`, `Actor.pid_from_int` or `Actor.debug()` without that
+  grant is a compile-time `role_grant_exceeded` error instead of passing the check and being
+  refused only at run time. A topology app's generated `main` requests the actor kinds its
+  roles are granted, and a pool's written caps bound them. `restrict Actor.Introspect do ...
+  end` (and `Actor.Debug`) now works; it was rejected as an unknown constructor.
 - **An HTTP connection that reuses a closed connection's descriptor number works.** When
   closing a connection timed out waiting for a task still using its socket, the next
   connection given the same descriptor number had every wait on its socket fail until it

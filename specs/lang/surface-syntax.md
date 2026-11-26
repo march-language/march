@@ -1150,7 +1150,8 @@ end
 -- label: `@[endpoints]` then names the message `Item` (`send_Item`,
 -- `recv_Item`) instead of `Msg_Prod_Cons_1`. A branch's head message is
 -- named by the branch label and takes no label of its own.
--- `role R needs IO.X, ...` grants the role's code those capabilities (see
+-- `role R needs IO.X, ...` grants the role's code those capabilities (IO
+-- kinds, or `Actor.Introspect` / `Actor.Debug`; see
 -- choreography.md, "Per-role grants"); it must come before the first
 -- message step, and `role` is a soft keyword, an identifier elsewhere.
 protocol Stream do
