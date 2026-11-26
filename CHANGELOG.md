@@ -1385,6 +1385,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Recursion through scoped functions no longer overflows the stack.** A function whose
+  whole body is a `restrict` block, calling itself, and two functions with scoped `needs`
+  clauses that tail-call each other, used one stack frame per call in a compiled program,
+  and 100,000 calls died with SIGBUS. Both now loop like an unscoped tail call, with the
+  same authority in force.
 - **`Logger.with_scope(fields, fn -> ...)` runs in the interpreter.** A thunk written with
   no parameter matched the declared type and ran compiled, but the interpreter stopped
   with "arity mismatch: expected 0 args, got 1". `Logger.with_span` and a direct

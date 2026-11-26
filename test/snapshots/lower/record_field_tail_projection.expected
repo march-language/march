@@ -8,10 +8,10 @@ type Authority.Layer = Layer(CapLimit, String, List(CapEntry))
 fn List.all(xs : List('a), pred : ('a) -> Bool) : Bool =
   case xs of
   Nil() -> true
-  Cons($f1712, $f1713) -> let t : '_ = $f1713 in
-let h : '_ = $f1712 in
-let $t1711 : '_ = pred(h) in
-case $t1711 of
+  Cons($f1743, $f1744) -> let t : '_ = $f1744 in
+let h : '_ = $f1743 in
+let $t1742 : '_ = pred(h) in
+case $t1742 of
   True() -> List.all(t, pred)
   _ -> false
   _ -> panic("non-exhaustive pattern match")
@@ -20,10 +20,10 @@ case $t1711 of
 fn List.any(xs : List('a), pred : ('a) -> Bool) : Bool =
   case xs of
   Nil() -> false
-  Cons($f1705, $f1706) -> let t : '_ = $f1706 in
-let h : '_ = $f1705 in
-let $t1704 : '_ = pred(h) in
-case $t1704 of
+  Cons($f1736, $f1737) -> let t : '_ = $f1737 in
+let h : '_ = $f1736 in
+let $t1735 : '_ = pred(h) in
+case $t1735 of
   True() -> true
   _ -> List.any(t, pred)
   _ -> panic("non-exhaustive pattern match")
@@ -42,12 +42,12 @@ alloc Cons(h, $t97)
 fn List.chunks(xs : List('a), size : Int) : List(List('a)) =
   let go : (List('a), List(List('a))) -> List(List('a)) = letrec [go] in
 go in
-let $t1856 : '_ = <=(size, 0) in
-case $t1856 of
+let $t1887 : '_ = <=(size, 0) in
+case $t1887 of
   True() -> __panic_site("stdlib/list.march", 1035, 20, 63);
 panic("List.chunks: size must be positive")
-  _ -> let $t1857 : '_ = alloc Nil() in
-go(xs, $t1857)
+  _ -> let $t1888 : '_ = alloc Nil() in
+go(xs, $t1888)
 
 ## List.concat
 fn List.concat(xss : List(List('a))) : List('a) =
@@ -55,8 +55,8 @@ fn List.concat(xss : List(List('a))) : List('a) =
 prepend_reversed in
 let go : (List(List('a)), List('a)) -> List('a) = letrec [go] in
 go in
-let $t1674 : '_ = alloc Nil() in
-go(xss, $t1674)
+let $t1705 : '_ = alloc Nil() in
+go(xss, $t1705)
 
 ## List.dedup
 fn List.dedup(xs : List('a)) : List('a) =
@@ -64,32 +64,32 @@ fn List.dedup(xs : List('a)) : List('a) =
 go in
 case xs of
   Nil() -> alloc Nil()
-  Cons($f1968, $f1969) -> let t : '_ = $f1969 in
-let h : '_ = $f1968 in
-let $t1967 : '_ = let $t1966 : '_ = alloc Nil() in
-alloc Cons(h, $t1966) in
-go(t, h, $t1967)
+  Cons($f1999, $f2000) -> let t : '_ = $f2000 in
+let h : '_ = $f1999 in
+let $t1998 : '_ = let $t1997 : '_ = alloc Nil() in
+alloc Cons(h, $t1997) in
+go(t, h, $t1998)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.drop
 fn List.drop(xs : List('a), n : Int) : List('a) =
-  let $t1797 : '_ = <=(n, 0) in
-case $t1797 of
+  let $t1828 : '_ = <=(n, 0) in
+case $t1828 of
   True() -> xs
   _ -> case xs of
   Nil() -> alloc Nil()
-  Cons($f1799, $f1800) -> let t : '_ = $f1800 in
-let $t1798 : '_ = -(n, 1) in
-List.drop(t, $t1798)
+  Cons($f1830, $f1831) -> let t : '_ = $f1831 in
+let $t1829 : '_ = -(n, 1) in
+List.drop(t, $t1829)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.drop_last
 fn List.drop_last(xs : List('a)) : List('a) =
-  let $t1846 : '_ = List.reverse(xs) in
-case $t1846 of
+  let $t1877 : '_ = List.reverse(xs) in
+case $t1877 of
   Nil() -> alloc Nil()
-  Cons($f1847, $f1848) -> let rest : '_ = $f1848 in
-let ig : '_ = $f1847 in
+  Cons($f1878, $f1879) -> let rest : '_ = $f1879 in
+let ig : '_ = $f1878 in
 List.reverse(rest)
   _ -> panic("non-exhaustive pattern match")
 
@@ -97,10 +97,10 @@ List.reverse(rest)
 fn List.drop_while(xs : List('a), pred : ('a) -> Bool) : List('a) =
   case xs of
   Nil() -> alloc Nil()
-  Cons($f1814, $f1815) -> let t : '_ = $f1815 in
-let h : '_ = $f1814 in
-let $t1813 : '_ = pred(h) in
-case $t1813 of
+  Cons($f1845, $f1846) -> let t : '_ = $f1846 in
+let h : '_ = $f1845 in
+let $t1844 : '_ = pred(h) in
+case $t1844 of
   True() -> List.drop_while(t, pred)
   _ -> xs
   _ -> panic("non-exhaustive pattern match")
@@ -119,8 +119,8 @@ fn List.empty() : List('a) =
 fn List.enumerate(xs : List('a)) : List((Int, 'a)) =
   let go : (List('a), Int, List((Int, 'a))) -> List((Int, 'a)) = letrec [go] in
 go in
-let $t1915 : '_ = alloc Nil() in
-go(xs, 0, $t1915)
+let $t1946 : '_ = alloc Nil() in
+go(xs, 0, $t1946)
 
 ## List.filter
 fn List.filter(xs : List('a), pred : ('a) -> Bool) : List('a) =
@@ -139,13 +139,13 @@ alloc Cons(h, $t135)
 fn List.filter_map(xs : List('a), f : ('a) -> Option('b)) : List('b) =
   case xs of
   Nil() -> alloc Nil()
-  Cons($f1635, $f1636) -> let t : '_ = $f1636 in
-let h : '_ = $f1635 in
-let $t1632 : '_ = f(h) in
-case $t1632 of
-  Some($f1634) -> let v : '_ = $f1634 in
-let $t1633 : '_ = List.filter_map(t, f) in
-alloc Cons(v, $t1633)
+  Cons($f1666, $f1667) -> let t : '_ = $f1667 in
+let h : '_ = $f1666 in
+let $t1663 : '_ = f(h) in
+case $t1663 of
+  Some($f1665) -> let v : '_ = $f1665 in
+let $t1664 : '_ = List.filter_map(t, f) in
+alloc Cons(v, $t1664)
   None() -> List.filter_map(t, f)
   _ -> panic("non-exhaustive pattern match")
   _ -> panic("non-exhaustive pattern match")
@@ -154,10 +154,10 @@ alloc Cons(v, $t1633)
 fn List.find(xs : List('a), pred : ('a) -> Bool) : Option('a) =
   case xs of
   Nil() -> alloc None()
-  Cons($f1690, $f1691) -> let t : '_ = $f1691 in
-let h : '_ = $f1690 in
-let $t1689 : '_ = pred(h) in
-case $t1689 of
+  Cons($f1721, $f1722) -> let t : '_ = $f1722 in
+let h : '_ = $f1721 in
+let $t1720 : '_ = pred(h) in
+case $t1720 of
   True() -> alloc Some(h)
   _ -> List.find(t, pred)
   _ -> panic("non-exhaustive pattern match")
@@ -193,18 +193,18 @@ List.flat_map_go($t121, t, f)
 fn List.fold_left(xs : List('a), acc : 'b, f : ('b) -> ('a) -> 'b) : 'b =
   case xs of
   Nil() -> acc
-  Cons($f1642, $f1643) -> let t : '_ = $f1643 in
-let h : '_ = $f1642 in
-let $t1641 : '_ = f(acc, h) in
-List.fold_left(t, $t1641, f)
+  Cons($f1673, $f1674) -> let t : '_ = $f1674 in
+let h : '_ = $f1673 in
+let $t1672 : '_ = f(acc, h) in
+List.fold_left(t, $t1672, f)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.fold_right
 fn List.fold_right(xs : List('a), acc : 'b, f : ('a) -> ('b) -> 'b) : 'b =
-  let $t1648 : '_ = List.reverse(xs) in
-let $t1650 : ('_, '_) -> '_ = letrec [$lam0_fold_right] in
+  let $t1679 : '_ = List.reverse(xs) in
+let $t1681 : ('_, '_) -> '_ = letrec [$lam0_fold_right] in
 $lam0_fold_right in
-List.fold_left($t1648, acc, $t1650)
+List.fold_left($t1679, acc, $t1681)
 
 ## List.head
 fn List.head(xs : List('a)) : 'a =
@@ -227,8 +227,8 @@ alloc Some(h)
 fn List.intersperse(xs : List('a), sep : 'a) : List('a) =
   let go : (List('a), List('a)) -> List('a) = letrec [go] in
 go in
-let $t1688 : '_ = alloc Nil() in
-go(xs, $t1688)
+let $t1719 : '_ = alloc Nil() in
+go(xs, $t1719)
 
 ## List.is_empty
 fn List.is_empty(xs : List('a)) : Bool =
@@ -277,10 +277,10 @@ alloc Cons($t104, $t105)
 fn List.max_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f1950, $f1951) -> let r : '_ = $f1951 in
-let x : '_ = $f1950 in
-let $t1949 : '_ = >(x, m) in
-case $t1949 of
+  Cons($f1981, $f1982) -> let r : '_ = $f1982 in
+let x : '_ = $f1981 in
+let $t1980 : '_ = >(x, m) in
+case $t1980 of
   True() -> List.max_onto(r, x)
   _ -> List.max_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
@@ -290,25 +290,25 @@ fn List.maximum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1209, 18, 55);
 panic("List.maximum_int: empty list")
-  Cons($f1943, $f1944) -> let t : '_ = $f1944 in
-let h : '_ = $f1943 in
+  Cons($f1974, $f1975) -> let t : '_ = $f1975 in
+let h : '_ = $f1974 in
 List.max_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.member
 fn List.member(xs : List('a), x : 'a) : Bool =
-  let $t1957 : ('_) -> '_ = letrec [$lam0_member] in
+  let $t1988 : ('_) -> '_ = letrec [$lam0_member] in
 $lam0_member in
-List.any(xs, $t1957)
+List.any(xs, $t1988)
 
 ## List.min_onto
 fn List.min_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f1937, $f1938) -> let r : '_ = $f1938 in
-let x : '_ = $f1937 in
-let $t1936 : '_ = <(x, m) in
-case $t1936 of
+  Cons($f1968, $f1969) -> let r : '_ = $f1969 in
+let x : '_ = $f1968 in
+let $t1967 : '_ = <(x, m) in
+case $t1967 of
   True() -> List.min_onto(r, x)
   _ -> List.min_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
@@ -318,8 +318,8 @@ fn List.minimum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1186, 18, 55);
 panic("List.minimum_int: empty list")
-  Cons($f1930, $f1931) -> let t : '_ = $f1931 in
-let h : '_ = $f1930 in
+  Cons($f1961, $f1962) -> let t : '_ = $f1962 in
+let h : '_ = $f1961 in
 List.min_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
 
@@ -352,118 +352,118 @@ List.nth_opt(t, $t75)
 
 ## List.partition
 fn List.partition(xs : List('a), pred : ('a) -> Bool) : (List('a), List('a)) =
-  let $t1833 : '_ = alloc Nil() in
-let $t1834 : '_ = alloc Nil() in
-List.partition_go(xs, pred, $t1833, $t1834)
+  let $t1864 : '_ = alloc Nil() in
+let $t1865 : '_ = alloc Nil() in
+List.partition_go(xs, pred, $t1864, $t1865)
 
 ## List.partition_go
 fn List.partition_go(lst : List('a), pred : ('a) -> Bool, yes : List('a), no : List('a)) : (List('a), List('a)) =
   case lst of
-  Nil() -> let $t1835 : '_ = List.reverse(yes) in
-let $t1836 : '_ = List.reverse(no) in
-($t1835, $t1836)
-  Cons($f1840, $f1841) -> let t : '_ = $f1841 in
-let h : '_ = $f1840 in
-let $t1837 : '_ = pred(h) in
-case $t1837 of
-  True() -> let $t1838 : '_ = alloc Cons(h, yes) in
-List.partition_go(t, pred, $t1838, no)
-  _ -> let $t1839 : '_ = alloc Cons(h, no) in
-List.partition_go(t, pred, yes, $t1839)
+  Nil() -> let $t1866 : '_ = List.reverse(yes) in
+let $t1867 : '_ = List.reverse(no) in
+($t1866, $t1867)
+  Cons($f1871, $f1872) -> let t : '_ = $f1872 in
+let h : '_ = $f1871 in
+let $t1868 : '_ = pred(h) in
+case $t1868 of
+  True() -> let $t1869 : '_ = alloc Cons(h, yes) in
+List.partition_go(t, pred, $t1869, no)
+  _ -> let $t1870 : '_ = alloc Cons(h, no) in
+List.partition_go(t, pred, yes, $t1870)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.pfilter
 fn List.pfilter(xs : List('a), pred : ('a) -> Bool) : List('a) =
   let t : '_ = pmap_threshold() in
-let $t1614 : '_ = let $t1612 : '_ = let $t1611 : '_ = List.length(xs) in
-<=($t1611, t) in
-case $t1612 of
+let $t1645 : '_ = let $t1643 : '_ = let $t1642 : '_ = List.length(xs) in
+<=($t1642, t) in
+case $t1643 of
   True() -> true
-  _ -> let $t1613 : '_ = List.spawn_allowed() in
-not($t1613) in
-case $t1614 of
+  _ -> let $t1644 : '_ = List.spawn_allowed() in
+not($t1644) in
+case $t1645 of
   True() -> List.filter(xs, pred)
   _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t1618 : ('_) -> '_ = letrec [$lam0_pfilter] in
+let tasks : '_ = let $t1649 : ('_) -> '_ = letrec [$lam0_pfilter] in
 $lam0_pfilter in
-List.map(cs, $t1618) in
-let $t1621 : '_ = let $t1620 : ('_) -> '_ = letrec [$lam1_pfilter] in
+List.map(cs, $t1649) in
+let $t1652 : '_ = let $t1651 : ('_) -> '_ = letrec [$lam1_pfilter] in
 $lam1_pfilter in
-List.map(tasks, $t1620) in
-List.concat($t1621)
+List.map(tasks, $t1651) in
+List.concat($t1652)
 
 ## List.pmap
 fn List.pmap(xs : List('a), f : ('a) -> 'b) : List('b) =
   let t : '_ = pmap_threshold() in
-let $t1587 : '_ = let $t1585 : '_ = let $t1584 : '_ = List.length(xs) in
-<=($t1584, t) in
-case $t1585 of
+let $t1618 : '_ = let $t1616 : '_ = let $t1615 : '_ = List.length(xs) in
+<=($t1615, t) in
+case $t1616 of
   True() -> true
-  _ -> let $t1586 : '_ = List.spawn_allowed() in
-not($t1586) in
-case $t1587 of
+  _ -> let $t1617 : '_ = List.spawn_allowed() in
+not($t1617) in
+case $t1618 of
   True() -> List.map(xs, f)
   _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t1591 : ('_) -> '_ = letrec [$lam0_pmap] in
+let tasks : '_ = let $t1622 : ('_) -> '_ = letrec [$lam0_pmap] in
 $lam0_pmap in
-List.map(cs, $t1591) in
-let $t1594 : '_ = let $t1593 : ('_) -> '_ = letrec [$lam1_pmap] in
+List.map(cs, $t1622) in
+let $t1625 : '_ = let $t1624 : ('_) -> '_ = letrec [$lam1_pmap] in
 $lam1_pmap in
-List.map(tasks, $t1593) in
-List.concat($t1594)
+List.map(tasks, $t1624) in
+List.concat($t1625)
 
 ## List.pmap_n
 fn List.pmap_n(xs : List('a), f : ('a) -> 'b, max_concurrency : Int) : List('b) =
   let n : '_ = List.length(xs) in
-let $t1597 : '_ = let $t1595 : '_ = ==(n, 0) in
-case $t1595 of
+let $t1628 : '_ = let $t1626 : '_ = ==(n, 0) in
+case $t1626 of
   True() -> true
-  _ -> let $t1596 : '_ = List.spawn_allowed() in
-not($t1596) in
-case $t1597 of
+  _ -> let $t1627 : '_ = List.spawn_allowed() in
+not($t1627) in
+case $t1628 of
   True() -> List.map(xs, f)
-  _ -> let cap : '_ = let $t1598 : '_ = <(max_concurrency, 1) in
-case $t1598 of
+  _ -> let cap : '_ = let $t1629 : '_ = <(max_concurrency, 1) in
+case $t1629 of
   True() -> 1
   _ -> max_concurrency in
-let csize : '_ = let $t1601 : '_ = let $t1600 : '_ = let $t1599 : '_ = /(n, cap) in
-*($t1599, cap) in
-==($t1600, n) in
-case $t1601 of
+let csize : '_ = let $t1632 : '_ = let $t1631 : '_ = let $t1630 : '_ = /(n, cap) in
+*($t1630, cap) in
+==($t1631, n) in
+case $t1632 of
   True() -> /(n, cap)
-  _ -> let $t1602 : '_ = /(n, cap) in
-+($t1602, 1) in
-let csize2 : '_ = let $t1603 : '_ = <(csize, 1) in
-case $t1603 of
+  _ -> let $t1633 : '_ = /(n, cap) in
++($t1633, 1) in
+let csize2 : '_ = let $t1634 : '_ = <(csize, 1) in
+case $t1634 of
   True() -> 1
   _ -> csize in
 let cs : '_ = List.chunks(xs, csize2) in
-let tasks : '_ = let $t1607 : ('_) -> '_ = letrec [$lam0_pmap_n] in
+let tasks : '_ = let $t1638 : ('_) -> '_ = letrec [$lam0_pmap_n] in
 $lam0_pmap_n in
-List.map(cs, $t1607) in
-let $t1610 : '_ = let $t1609 : ('_) -> '_ = letrec [$lam1_pmap_n] in
+List.map(cs, $t1638) in
+let $t1641 : '_ = let $t1640 : ('_) -> '_ = letrec [$lam1_pmap_n] in
 $lam1_pmap_n in
-List.map(tasks, $t1609) in
-List.concat($t1610)
+List.map(tasks, $t1640) in
+List.concat($t1641)
 
 ## List.preduce
 fn List.preduce(xs : List('a), identity : 'a, combine : ('a) -> ('a) -> 'a) : 'a =
   let t : '_ = pmap_threshold() in
-let $t1625 : '_ = let $t1623 : '_ = let $t1622 : '_ = List.length(xs) in
-<=($t1622, t) in
-case $t1623 of
+let $t1656 : '_ = let $t1654 : '_ = let $t1653 : '_ = List.length(xs) in
+<=($t1653, t) in
+case $t1654 of
   True() -> true
-  _ -> let $t1624 : '_ = List.spawn_allowed() in
-not($t1624) in
-case $t1625 of
+  _ -> let $t1655 : '_ = List.spawn_allowed() in
+not($t1655) in
+case $t1656 of
   True() -> List.fold_left(xs, identity, combine)
   _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t1629 : ('_) -> '_ = letrec [$lam0_preduce] in
+let tasks : '_ = let $t1660 : ('_) -> '_ = letrec [$lam0_preduce] in
 $lam0_preduce in
-List.map(cs, $t1629) in
-let partials : '_ = let $t1631 : ('_) -> '_ = letrec [$lam1_preduce] in
+List.map(cs, $t1660) in
+let partials : '_ = let $t1662 : ('_) -> '_ = letrec [$lam1_preduce] in
 $lam1_preduce in
-List.map(tasks, $t1631) in
+List.map(tasks, $t1662) in
 List.fold_left(partials, identity, combine)
 
 ## List.product_int
@@ -474,10 +474,10 @@ fn List.product_int(xs : List(Int)) : Int =
 fn List.product_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f1924, $f1925) -> let t : '_ = $f1925 in
-let x : '_ = $f1924 in
-let $t1923 : '_ = *(acc, x) in
-List.product_onto(t, $t1923)
+  Cons($f1955, $f1956) -> let t : '_ = $f1956 in
+let x : '_ = $f1955 in
+let $t1954 : '_ = *(acc, x) in
+List.product_onto(t, $t1954)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.range
@@ -534,8 +534,8 @@ List.reverse_onto(t, $t90)
 fn List.scan_left(xs : List('a), acc : 'b, f : ('b) -> ('a) -> 'b) : List('b) =
   let go : ('b, List('a), List('b)) -> List('b) = letrec [go] in
 go in
-let $t1659 : '_ = alloc Nil() in
-go(acc, xs, $t1659)
+let $t1690 : '_ = alloc Nil() in
+go(acc, xs, $t1690)
 
 ## List.singleton
 fn List.singleton(x : 'a) : List('a) =
@@ -554,24 +554,24 @@ let sort_loop : (List(List('a))) -> List('a) = letrec [sort_loop] in
 sort_loop in
 let to_singletons : (List('a), List(List('a))) -> List(List('a)) = letrec [to_singletons] in
 to_singletons in
-let $t1786 : '_ = let $t1785 : '_ = alloc Nil() in
-to_singletons(xs, $t1785) in
-sort_loop($t1786)
+let $t1817 : '_ = let $t1816 : '_ = alloc Nil() in
+to_singletons(xs, $t1816) in
+sort_loop($t1817)
 
 ## List.spawn_allowed
 fn List.spawn_allowed() : Bool =
-  let $t1581 : '_ = Authority.check("IO.Spawn", "") in
-case $t1581 of
-  Ok($f1582) -> true
-  Err($f1583) -> false
+  let $t1612 : '_ = Authority.check("IO.Spawn", "") in
+case $t1612 of
+  Ok($f1613) -> true
+  Err($f1614) -> false
   _ -> panic("non-exhaustive pattern match")
 
 ## List.split_at
 fn List.split_at(xs : List('a), n : Int) : (List('a), List('a)) =
   let go : (List('a), Int, List('a)) -> (List('a), List('a)) = letrec [go] in
 go in
-let $t1832 : '_ = alloc Nil() in
-go(xs, n, $t1832)
+let $t1863 : '_ = alloc Nil() in
+go(xs, n, $t1863)
 
 ## List.sum_int
 fn List.sum_int(xs : List(Int)) : Int =
@@ -581,10 +581,10 @@ fn List.sum_int(xs : List(Int)) : Int =
 fn List.sum_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f1917, $f1918) -> let t : '_ = $f1918 in
-let x : '_ = $f1917 in
-let $t1916 : '_ = +(acc, x) in
-List.sum_onto(t, $t1916)
+  Cons($f1948, $f1949) -> let t : '_ = $f1949 in
+let x : '_ = $f1948 in
+let $t1947 : '_ = +(acc, x) in
+List.sum_onto(t, $t1947)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.tail
@@ -606,33 +606,33 @@ alloc Some(t)
 
 ## List.take
 fn List.take(xs : List('a), n : Int) : List('a) =
-  let $t1787 : '_ = alloc Nil() in
-List.take_onto(xs, n, $t1787)
+  let $t1818 : '_ = alloc Nil() in
+List.take_onto(xs, n, $t1818)
 
 ## List.take_onto
 fn List.take_onto(lst : List('a), k : Int, acc : List('a)) : List('a) =
-  let $t1788 : '_ = <=(k, 0) in
-case $t1788 of
+  let $t1819 : '_ = <=(k, 0) in
+case $t1819 of
   True() -> List.reverse(acc)
   _ -> case lst of
   Nil() -> List.reverse(acc)
-  Cons($f1791, $f1792) -> let t : '_ = $f1792 in
-let h : '_ = $f1791 in
-let $t1789 : '_ = -(k, 1) in
-let $t1790 : '_ = alloc Cons(h, acc) in
-List.take_onto(t, $t1789, $t1790)
+  Cons($f1822, $f1823) -> let t : '_ = $f1823 in
+let h : '_ = $f1822 in
+let $t1820 : '_ = -(k, 1) in
+let $t1821 : '_ = alloc Cons(h, acc) in
+List.take_onto(t, $t1820, $t1821)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.take_while
 fn List.take_while(xs : List('a), pred : ('a) -> Bool) : List('a) =
   case xs of
   Nil() -> alloc Nil()
-  Cons($f1807, $f1808) -> let t : '_ = $f1808 in
-let h : '_ = $f1807 in
-let $t1805 : '_ = pred(h) in
-case $t1805 of
-  True() -> let $t1806 : '_ = List.take_while(t, pred) in
-alloc Cons(h, $t1806)
+  Cons($f1838, $f1839) -> let t : '_ = $f1839 in
+let h : '_ = $f1838 in
+let $t1836 : '_ = pred(h) in
+case $t1836 of
+  True() -> let $t1837 : '_ = List.take_while(t, pred) in
+alloc Cons(h, $t1837)
   _ -> alloc Nil()
   _ -> panic("non-exhaustive pattern match")
 
@@ -640,23 +640,23 @@ alloc Cons(h, $t1806)
 fn List.unzip(pairs : List(('a, 'b))) : (List('a), List('b)) =
   let go : (List(('a, 'b)), List('a), List('b)) -> (List('a), List('b)) = letrec [go] in
 go in
-let $t1904 : '_ = alloc Nil() in
-let $t1905 : '_ = alloc Nil() in
-go(pairs, $t1904, $t1905)
+let $t1935 : '_ = alloc Nil() in
+let $t1936 : '_ = alloc Nil() in
+go(pairs, $t1935, $t1936)
 
 ## List.zip
 fn List.zip(xs : List('a), ys : List('b)) : List(('a, 'b)) =
   let go : (List('a), List('b), List(('a, 'b))) -> List(('a, 'b)) = letrec [go] in
 go in
-let $t1872 : '_ = alloc Nil() in
-go(xs, ys, $t1872)
+let $t1903 : '_ = alloc Nil() in
+go(xs, ys, $t1903)
 
 ## List.zip_with
 fn List.zip_with(xs : List('a), ys : List('b), f : ('a) -> ('b) -> 'c) : List('c) =
   let go : (List('a), List('b), List('c)) -> List('c) = letrec [go] in
 go in
-let $t1887 : '_ = alloc Nil() in
-go(xs, ys, $t1887)
+let $t1918 : '_ = alloc Nil() in
+go(xs, ys, $t1918)
 
 ## closed
 fn closed(ms : List({ addr : String, node_id : String }), id : String) : List(String) =
@@ -695,8 +695,8 @@ let $t15 : String = let $t14 : String = int_to_string(0) in
 { node_id = $t13, addr = $t15 } in
 let $t17 : List({ addr : String, node_id : String }) = alloc List.Nil({ addr : String, node_id : String })() in
 alloc List.Cons($t16, $t17) in
-let $t1976 : String = let $t1975 : Int = let $t1974 : List(String) = closed(ms, "n0") in
-List.length($t1974) in
-int_to_string($t1975) in
-println($t1976)
+let $t2007 : String = let $t2006 : Int = let $t2005 : List(String) = closed(ms, "n0") in
+List.length($t2005) in
+int_to_string($t2006) in
+println($t2007)
 

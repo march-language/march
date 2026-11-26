@@ -1,0 +1,196 @@
+-- types (9) --
+type Authority.Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String)) | HostAt(String, String, Bool, Int) | PathsAt(List(String))
+type Authority.CapEntry = CapEntry(String, Arg)
+type Authority.Layer = Layer(CapLimit, String, List(CapEntry))
+closure $Clo_$jp1_parse$0_Authority_parse(Ptr(Unit), '_)
+closure $Clo_$jp2_parse$1_Authority_parse(Ptr(Unit), () -> '_)
+closure $Clo_$jp3_parse$2_Authority_parse(Ptr(Unit), () -> '_)
+closure $Clo_$jp7_parse_option$0_Authority_parse_option(Ptr(Unit), '_, String)
+closure $Clo_$jp7_method_words$0_Authority_method_words(Ptr(Unit), '_, '_, List(String))
+closure $Clo_$jp3_method_words$1_Authority_method_words(Ptr(Unit))
+-- fns (17) --
+## $jp1_parse$apply$0_Authority_parse
+fn $jp1_parse$apply$0_Authority_parse($clo : Ptr(Unit)) : '_ =
+  let toks : '_ = $clo.$fv1 in
+dec_rc $clo;
+let $t686 : '_ = alloc Nil() in
+inc_rc toks;
+Authority.parse_entries(toks, $t686)
+
+## $jp2_parse$apply$1_Authority_parse
+fn $jp2_parse$apply$1_Authority_parse($clo : Ptr(Unit)) : '_ =
+  let $jp_clo692 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+inc_rc $jp_clo692;
+call_ptr $jp_clo692()
+
+## $jp3_method_words$apply$1_Authority_method_words
+fn $jp3_method_words$apply$1_Authority_method_words($clo : Ptr(Unit)) : '_ =
+  alloc Err("`methods(...)` is not closed")
+
+## $jp3_parse$apply$2_Authority_parse
+fn $jp3_parse$apply$2_Authority_parse($clo : Ptr(Unit)) : '_ =
+  let $jp_clo694 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+inc_rc $jp_clo694;
+call_ptr $jp_clo694()
+
+## $jp7_method_words$apply$0_Authority_method_words
+fn $jp7_method_words$apply$0_Authority_method_words($clo : Ptr(Unit)) : '_ =
+  let $f967 : '_ = $clo.$fv1 in
+let $f968 : '_ = $clo.$fv2 in
+let acc : List(String) = $clo.$fv3 in
+dec_rc $clo;
+let $jp_clo976 : () -> '_ = alloc $Clo_$jp3_method_words$1_Authority_method_words($jp3_method_words$apply$1_Authority_method_words) in
+case $f968 of
+  Cons($f977, $f978) -> case $f977 of
+  ")"() -> dec_rc $jp_clo976;
+let rest : '_ = $f978 in
+let m : '_ = inc_rc $f967;
+$f967 in
+let $t962 : '_ = Authority.is_option_name(m) in
+case $t962 of
+  True() -> dec_rc $t962;
+let $t965 : '_ = let $t963 : '_ = inc_rc acc;
+alloc Cons(m, acc) in
+let $t964 : '_ = alloc Nil() in
+Authority.rev($t963, $t964) in
+let $t966 : ('_, '_) = inc_rc rest;
+($t965, rest) in
+alloc Ok($t966)
+  _ -> dec_rc $t962;
+dec_rc m;
+alloc Err("`methods(...)` takes HTTP method names")
+  _ -> call_ptr $jp_clo976()
+  _ -> call_ptr $jp_clo976()
+
+## $jp7_parse_option$apply$0_Authority_parse_option
+fn $jp7_parse_option$apply$0_Authority_parse_option($clo : Ptr(Unit)) : '_ =
+  let $f937 : '_ = $clo.$fv1 in
+let name : String = $clo.$fv2 in
+dec_rc $clo;
+let more : '_ = inc_rc $f937;
+$f937 in
+let $t920 : '_ = ==(name, "methods") in
+case $t920 of
+  True() -> dec_rc $t920;
+let $t922 : '_ = let $t921 : '_ = alloc Nil() in
+Authority.method_words(more, $t921) in
+case $t922 of
+  Err($f926) -> dec_rc $t922;
+let e : '_ = $f926 in
+alloc Err(e)
+  Ok($f927) -> dec_rc $t922;
+case $f927 of
+  $Tuple2($f928, $f929) -> dec_rc $f927;
+let rest : '_ = $f929 in
+let ms : '_ = $f928 in
+let $t924 : '_ = let $t923 : '_ = let $rc_151 : '_ = string_join(ms, ",") in
+dec_rc ms;
+$rc_151 in
+let $rc_150 : '_ = ++("methods=", $t923) in
+dec_rc $t923;
+$rc_150 in
+let $t925 : ('_, '_) = ($t924, rest) in
+alloc Ok($t925)
+  _ -> dec_rc $f927;
+panic("non-exhaustive pattern match")
+  _ -> dec_rc $t922;
+panic("non-exhaustive pattern match")
+  _ -> dec_rc $t920;
+dec_rc more;
+let $t934 : '_ = string_concat3("`", name, "(...)` takes one quoted string") in
+alloc Err($t934)
+
+## drain
+fn drain(n : Int) : Int =
+  let $t1475 : Layer = drain$restrict0$auth_layer() in
+let $t1476 : CapAuthRef = Authority.enter_fn($t1475) in
+let $t1477 : Int = drain$restrict_body(n) in
+let $t1478 : Unit = cap_restore($t1476) in
+$t1477
+
+## drain$restrict0$auth_layer
+fn drain$restrict0$auth_layer() : Layer =
+  Authority.restrict_layer(".:20", "IO.FileRead(\"/srv/\")")
+
+## drain$restrict_body
+fn drain$restrict_body(n : Int) : Int =
+  let $t1479 : Bool = ==(n, 0) in
+case $t1479 of
+  True() -> 0
+  _ -> let $t1480 : Int = -(n, 1) in
+drain$restrict_body($t1480)
+
+## main
+fn main() : () =
+  let $t1481 : Result((), CapError) = probe() in
+case $t1481 of
+  Ok($f1485) -> dec_rc $t1481;
+dec_rc $f1485;
+let $t1484 : Int = let $t1482 : Int = ping(10) in
+let $t1483 : Int = drain(10) in
++($t1482, $t1483) in
+println($t1484)
+  Err($f1486) -> dec_rc $t1481;
+dec_rc $f1486;
+println(0)
+  _ -> dec_rc $t1481;
+panic("non-exhaustive pattern match")
+
+## ping
+fn ping(n : Int) : Int =
+  let $auth_l : Layer = ping$auth_layer() in
+let $auth_saved : CapAuthRef = Authority.enter_fn($auth_l) in
+let $auth_result : Int = ping$auth(n) in
+let $auth_unit : Unit = cap_restore($auth_saved) in
+$auth_result
+
+## ping$auth
+fn ping$auth(n : Int) : Int =
+  let $t1 : Bool = ==(n, 0) in
+case $t1 of
+  True() -> 0
+  _ -> let $t2 : Int = -(n, 1) in
+let $hop_l1 : Layer = pong$auth_layer() in
+let $hop_in1 : Bool = let $rc_1 : Bool = Authority.frame_in_force($hop_l1) in
+dec_rc $hop_l1;
+$rc_1 in
+case $hop_in1 of
+  True() -> pong$auth($t2)
+  _ -> pong($t2)
+
+## ping$auth_layer
+fn ping$auth_layer() : Layer =
+  Authority.frame_layer("ping", "IO.FileRead(\"/srv/\")")
+
+## pong
+fn pong(n : Int) : Int =
+  let $auth_l : Layer = pong$auth_layer() in
+let $auth_saved : CapAuthRef = Authority.enter_fn($auth_l) in
+let $auth_result : Int = pong$auth(n) in
+let $auth_unit : Unit = cap_restore($auth_saved) in
+$auth_result
+
+## pong$auth
+fn pong$auth(n : Int) : Int =
+  let $t3 : Bool = ==(n, 0) in
+case $t3 of
+  True() -> 1
+  _ -> let $t4 : Int = -(n, 1) in
+let $hop_l2 : Layer = ping$auth_layer() in
+let $hop_in2 : Bool = let $rc_2 : Bool = Authority.frame_in_force($hop_l2) in
+dec_rc $hop_l2;
+$rc_2 in
+case $hop_in2 of
+  True() -> ping$auth($t4)
+  _ -> ping($t4)
+
+## pong$auth_layer
+fn pong$auth_layer() : Layer =
+  Authority.frame_layer("pong", "IO.FileRead(\"/srv/x\")")
+
+## probe
+fn probe() : Result((), CapError) =
+  Authority.check("IO.FileRead", "/srv/x")
+

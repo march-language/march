@@ -85,12 +85,12 @@ case $f926 of
   $Tuple2($f927, $f928) -> dec_rc $f926;
 let rest : '_ = $f928 in
 let ms : '_ = $f927 in
-let $t923 : '_ = let $t922 : '_ = let $rc_148 : '_ = string_join(ms, ",") in
+let $t923 : '_ = let $t922 : '_ = let $rc_149 : '_ = string_join(ms, ",") in
 dec_rc ms;
-$rc_148 in
-let $rc_147 : '_ = ++("methods=", $t922) in
+$rc_149 in
+let $rc_148 : '_ = ++("methods=", $t922) in
 dec_rc $t922;
-$rc_147 in
+$rc_148 in
 let $t924 : ('_, '_) = ($t923, rest) in
 alloc Ok($t924)
   _ -> dec_rc $f926;
@@ -125,16 +125,16 @@ fn count_in$auth_layer() : Layer =
 
 ## main
 fn main() : () =
-  let $t1443 : Result((), CapError) = probe() in
-case $t1443 of
-  Ok($f1445) -> dec_rc $t1443;
-dec_rc $f1445;
-let $t1444 : Int = count_in(5, 0) in
-println($t1444)
-  Err($f1446) -> dec_rc $t1443;
-dec_rc $f1446;
+  let $t1474 : Result((), CapError) = probe() in
+case $t1474 of
+  Ok($f1476) -> dec_rc $t1474;
+dec_rc $f1476;
+let $t1475 : Int = count_in(5, 0) in
+println($t1475)
+  Err($f1477) -> dec_rc $t1474;
+dec_rc $f1477;
 println(0)
-  _ -> dec_rc $t1443;
+  _ -> dec_rc $t1474;
 panic("non-exhaustive pattern match")
 
 ## probe

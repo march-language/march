@@ -95,6 +95,7 @@ let corpus = [
   "auth_frame",                      "auth_frame.march";
   "auth_capture",                    "auth_capture.march";
   "auth_restrict",                   "auth_restrict.march";
+  "auth_tail_hop",                   "auth_tail_hop.march";
 ]
 
 (* ── Path resolution ────────────────────────────────────────────────────

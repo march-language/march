@@ -23,3 +23,9 @@ What to do: when the tail call's target re-enters the same restrict (same `where
 top, which `top_is_frame` already detects), retarget it past the entry so the recursion stays a
 loop; or make the restore a continuation the callee inherits, which would fix the mutual
 function-frame case as well. Raise `restrict_reenter_noop` to 100,000 deep once it holds.
+
+## Fixed (2026-11-26)
+
+For a restrict that is a function's whole body: `Auth_rt.outline_restrict_body`. See
+`progress/2026-11-26-ocap-scoped-tail-calls.md`. `restrict_reenter_noop` now runs 100,000
+deep in every mode.

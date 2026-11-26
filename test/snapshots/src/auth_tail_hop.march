@@ -1,0 +1,35 @@
+-- Scoped tail calls (ocap A1.3, lib/tir/auth_rt.ml).  `ping` and `pong` are
+-- framed and tail-call each other: in each `$auth` body the call becomes a
+-- test of `Authority.frame_in_force` on the callee's layer, with the
+-- callee's `$auth` body (a tail call) when its frame is in force and its
+-- wrapper otherwise.  `drain`'s whole body is a literal restrict: the body
+-- moves to `drain$restrict_body`, whose self call targets itself.  `probe`
+-- makes the lowerer load Authority (this harness links no stdlib).
+mod AuthTailHop do
+  needs IO.Console
+  needs IO.FileRead
+  fn ping(n : Int) : Int needs IO.FileRead("/srv/") do
+    if n == 0 do 0 else pong(n - 1) end
+  end
+
+  fn pong(n : Int) : Int needs IO.FileRead("/srv/x") do
+    if n == 0 do 1 else ping(n - 1) end
+  end
+
+  fn drain(n : Int) : Int do
+    restrict IO.FileRead("/srv/") do
+      if n == 0 do 0 else drain(n - 1) end
+    end
+  end
+
+  fn probe() : Result((), CapError) do
+    Authority.check("IO.FileRead", "/srv/x")
+  end
+
+  fn main() do
+    match probe() do
+    Ok(_) -> println(ping(10) + drain(10))
+    Err(_) -> println(0)
+    end
+  end
+end

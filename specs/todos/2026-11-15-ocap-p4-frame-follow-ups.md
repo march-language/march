@@ -3,7 +3,7 @@
 Open items left by Task 4 (run-time frames, lib/tir/auth_rt.ml):
 
 - Mutually tail-recursive framed fns grow the stack by one wrapper per hop
-  (decision 7): its own file, `specs/todos/2026-11-17-ocap-framed-mutual-tail-recursion.md`.
+  (decision 7): its own file, now `specs/progress/2026-11-26-ocap-framed-mutual-tail-recursion.md` (fixed for function frames 2026-11-26; grants in `specs/todos/2026-11-26-grant-frame-tail-calls.md`).
 - Interface impl methods and REPL-shell (`Lower` resumable path) fns with a
   `needs` clause get no frame, in either backend (no `note_fn_needs` there).
 - The interpreter skips the frame of any fn named `main`; compiled code
