@@ -1393,6 +1393,11 @@ git log is authoritative for exact commits.
   were bound with no type, so any argument was accepted; an ill-typed call could crash the
   REPL and an `Int` result printed as a wrong number. Only the internal `LazyNicheProbe`
   module is loaded this way today.
+- **`Logger.with_scope(fields, fn -> ...)` runs in the interpreter.** A thunk written with
+  no parameter matched the declared type and ran compiled, but the interpreter stopped
+  with "arity mismatch: expected 0 args, got 1". `Logger.with_span` and a direct
+  `try_finally` with `fn -> ...` callbacks had the same failure. Both `fn -> ...` and
+  `fn _ -> ...` now work on both.
 - **`Hamt` no longer loses a key, or hangs, when two hashes agree on their low 35 bits.**
   With a hash function that returns more than 35 bits (the builtin `hash` returns 62),
   the second of two such keys could not be found or removed, and inserting it again never
