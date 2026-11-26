@@ -206,6 +206,13 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         promote_to Parser.REVEAL ~when_:(function Parser.LOWER_IDENT _ | Parser.UPPER_IDENT _ -> true | _ -> false)
       | Parser.LOWER_IDENT "module" ->
         promote_to Parser.MODULE_KW ~when_:after_upper_ident
+      (* `scoped` marks the handle a callback receives, in a type only:
+         `f : scoped File.Handle -> r` (ocap phase 8b).  A type name follows it
+         directly there, and a name is never followed by an upper-case name on
+         the same line anywhere else (NL is a token here), so `scoped` stays
+         an ordinary name: stdlib/authority.march has a parameter called it. *)
+      | Parser.LOWER_IDENT "scoped" ->
+        promote_to Parser.SCOPED ~when_:after_upper_ident
       | Parser.LOWER_IDENT ("elif" | "elsif") ->
         promote_to Parser.ELIF ~when_:starts_condition
       (* `not` is an ordinary function name (`not(x)`, a user's own `fn not`),

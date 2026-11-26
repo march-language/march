@@ -783,6 +783,10 @@
                     {
                       "type": "STRING",
                       "value": "ghost"
+                    },
+                    {
+                      "type": "STRING",
+                      "value": "scoped"
                     }
                   ]
                 },
@@ -1198,8 +1202,22 @@
               "type": "FIELD",
               "name": "name",
               "content": {
-                "type": "SYMBOL",
-                "name": "identifier"
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "identifier"
+                  },
+                  {
+                    "type": "ALIAS",
+                    "content": {
+                      "type": "STRING",
+                      "value": "scoped"
+                    },
+                    "named": true,
+                    "value": "identifier"
+                  }
+                ]
               }
             },
             {
@@ -1817,6 +1835,10 @@
               {
                 "type": "STRING",
                 "value": "ghost"
+              },
+              {
+                "type": "STRING",
+                "value": "scoped"
               }
             ]
           },
@@ -2204,6 +2226,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "scoped_type"
+        },
+        {
+          "type": "SYMBOL",
           "name": "tuple_type"
         },
         {
@@ -2573,6 +2599,23 @@
               "value": "affine"
             }
           ]
+        },
+        {
+          "type": "FIELD",
+          "name": "type",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_type_atom"
+          }
+        }
+      ]
+    },
+    "scoped_type": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "scoped"
         },
         {
           "type": "FIELD",
@@ -5672,6 +5715,10 @@
               {
                 "type": "STRING",
                 "value": "ghost"
+              },
+              {
+                "type": "STRING",
+                "value": "scoped"
               }
             ]
           },

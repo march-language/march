@@ -402,7 +402,8 @@ mod Socket do
   result in `Ok`. `f` must itself return a `Result(a, SocketError)`; a
   connection failure is `Ok(Err(ConnectionFailed(msg)))`, a refused
   capability check the outer `Err(CapError(...))`, and in either case `f` is
-  not called. The socket is closed when `f` returns or panics.
+  not called. The socket is closed when `f` returns or panics, and it is
+  scoped: the compiler rejects a callback that lets it out (`capture_escape`).
 
   ## Examples
 
@@ -410,7 +411,7 @@ mod Socket do
         let? _ = Socket.write(s, "HEAD / HTTP/1.0\r\n\r\n")
         Socket.recv(s, 4096))
   """
-  fn with_connection(host : String, port : Int, f : Socket -> Result(a, SocketError)) : Result(Result(a, SocketError), CapError) do
+  fn with_connection(host : String, port : Int, f : scoped Socket -> Result(a, SocketError)) : Result(Result(a, SocketError), CapError) do
     let? c = connect(host, port)
     match c do
     Err(e) -> Ok(Err(e))

@@ -122,7 +122,7 @@ let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
     | Ast.TyArrow (a, b) -> ty a; ty b
     | Ast.TyTuple ts -> List.iter ty ts
     | Ast.TyRecord flds -> List.iter (fun (_, t) -> ty t) flds
-    | Ast.TyLinear (_, t) -> ty t
+    | Ast.TyLinear (_, t) | Ast.TyScoped t -> ty t
     | Ast.TyNatOp (_, a, b) -> ty a; ty b
     | Ast.TyChan (a, b) -> add a.Ast.txt; add b.Ast.txt
     | Ast.TyRefine (base, _, _) -> ty base
@@ -220,7 +220,7 @@ let unqualified_module_deps
     | Ast.TyArrow (a, b) -> ty a; ty b
     | Ast.TyTuple ts -> List.iter ty ts
     | Ast.TyRecord flds -> List.iter (fun (_, t) -> ty t) flds
-    | Ast.TyLinear (_, t) -> ty t
+    | Ast.TyLinear (_, t) | Ast.TyScoped t -> ty t
     | Ast.TyNatOp (_, a, b) -> ty a; ty b
     | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> ()
     | Ast.TyRefine (base, _, _) -> ty base

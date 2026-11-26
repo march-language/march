@@ -731,7 +731,7 @@ and eval_operand ~(lookup : string -> V.value option) (e : A.expr) : V.value opt
 let rec refinement_free ~(seen : string list) (ty : A.ty) : bool =
   match ty with
   | A.TyRefine _ -> false
-  | A.TyLinear (_, t) -> refinement_free ~seen t
+  | A.TyLinear (_, t) | A.TyScoped t -> refinement_free ~seen t
   | A.TyVar _ | A.TyArrow _ | A.TyNat _ | A.TyNatOp _ | A.TyChan _ -> true
   | A.TyTuple ts -> List.for_all (refinement_free ~seen) ts
   | A.TyRecord fs -> List.for_all (fun (_, t) -> refinement_free ~seen t) fs

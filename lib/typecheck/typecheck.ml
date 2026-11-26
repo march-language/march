@@ -6433,7 +6433,7 @@ let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_sp
     | Ast.TyCon (_, ts) | Ast.TyTuple ts -> List.concat_map refine_uses ts
     | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) -> refine_uses a @ refine_uses b
     | Ast.TyRecord fs -> List.concat_map (fun (_, t) -> refine_uses t) fs
-    | Ast.TyLinear (_, t) -> refine_uses t
+    | Ast.TyLinear (_, t) | Ast.TyScoped t -> refine_uses t
     | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> []
   in
   let param_tys = List.filter_map (function
@@ -6533,7 +6533,7 @@ let signature_tyvar_span (def : Ast.fn_def) v =
     | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) ->
       (match find a with Some s -> Some s | None -> find b)
     | Ast.TyRecord fs -> List.find_map (fun (_, t) -> find t) fs
-    | Ast.TyLinear (_, t) | Ast.TyRefine (t, _, _) -> find t
+    | Ast.TyLinear (_, t) | Ast.TyScoped t | Ast.TyRefine (t, _, _) -> find t
   in
   let params = match def.fn_clauses with
     | c :: _ -> List.filter_map (function
@@ -7250,6 +7250,7 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
     | Ast.TyRecord fs      ->
       TRecord (List.map (fun ((n : Ast.name), ft) -> (n.txt, lenient_ty ft)) fs)
     | Ast.TyLinear (l, t') -> TLin (l, lenient_ty t')
+    | Ast.TyScoped t' -> lenient_ty t'
     | Ast.TyNat _ | Ast.TyNatOp _ | Ast.TyChan _ -> fresh_var 1
     | Ast.TyRefine (base, _, _) -> lenient_ty base
   in
@@ -13112,7 +13113,7 @@ let check_nonregular_types (errors : Err.ctx) (decls : Ast.decl list) : unit =
       1 + List.fold_left (fun m a -> max m (depth a)) 0 args
     | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) -> 1 + max (depth a) (depth b)
     | Ast.TyRecord fs -> 1 + List.fold_left (fun m (_, a) -> max m (depth a)) 0 fs
-    | Ast.TyLinear (_, a) | Ast.TyRefine (a, _, _) -> depth a
+    | Ast.TyLinear (_, a) | Ast.TyScoped a | Ast.TyRefine (a, _, _) -> depth a
     | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> 1
   in
   let rec subst (s : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
@@ -13123,6 +13124,7 @@ let check_nonregular_types (errors : Err.ctx) (decls : Ast.decl list) : unit =
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst s a, subst s b)
     | Ast.TyRecord fs -> Ast.TyRecord (List.map (fun (n, a) -> (n, subst s a)) fs)
     | Ast.TyLinear (l, a) -> Ast.TyLinear (l, subst s a)
+    | Ast.TyScoped a -> Ast.TyScoped (subst s a)
     | Ast.TyRefine (a, b, p) -> Ast.TyRefine (subst s a, b, p)
     | Ast.TyNatOp (o, a, b) -> Ast.TyNatOp (o, subst s a, subst s b)
     | Ast.TyNat _ | Ast.TyChan _ -> t
@@ -13171,7 +13173,7 @@ let check_nonregular_types (errors : Err.ctx) (decls : Ast.decl list) : unit =
             | Ast.TyCon (_, args) | Ast.TyTuple args -> List.iter visit args
             | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) -> visit a; visit b
             | Ast.TyRecord fs -> List.iter (fun (_, a) -> visit a) fs
-            | Ast.TyLinear (_, a) | Ast.TyRefine (a, _, _) -> visit a
+            | Ast.TyLinear (_, a) | Ast.TyScoped a | Ast.TyRefine (a, _, _) -> visit a
             | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> ()
         in
         visit (Ast.TyCon (name, List.map (fun p -> Ast.TyVar p) params));
@@ -13366,6 +13368,10 @@ let check_alias_shadows_module errors (decls : Ast.decl list) : unit =
     [--reflect-report]'s R5 (lib/refinecheck/refine_reflect.ml): the driver's
     [--check] path keeps no env to read them from. *)
 let last_nonexhaustive_match_spans : Ast.span list ref = ref []
+
+(* Filled in below, where the capture pass is in scope ([check_capture_escapes]). *)
+let capture_escape_hook : (raise_on_failure:bool -> env -> Err.ctx -> Ast.decl list -> unit) ref =
+  ref (fun ~raise_on_failure:_ _ _ _ -> ())
 
 let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
@@ -13843,8 +13849,132 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   check_nonregular_types errors m.Ast.mod_decls;
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
   last_nonexhaustive_match_spans := !(final_env.nonexhaustive_match_spans);
+  !capture_escape_hook ~raise_on_failure:true final_env errors m.Ast.mod_decls;
   (errors, type_map, { final_env with record_names_snapshot = record_names_dump ();
                                       json_derive_sites })
+
+(* ── Scoped handles (ocap phase 8b) ──────────────────────────────────────
+   A handle that a function with a `scoped` callback parameter hands out may
+   not leave the callback (specs/2026-11-11-ocap-capture-checking-design.md
+   §7).  The capture pass finds it; this turns each finding into the
+   `capture_escape` error.  The pass runs only for a program whose own code
+   names such a function, and only when the program typechecked: its input
+   is the solved type of every expression. *)
+
+let capture_escape_message (e : Capture.escape) : string * string list =
+  let subject = if e.Capture.e_label = "" then "The handle" else Printf.sprintf "`%s`" e.Capture.e_label in
+  let it = if e.Capture.e_label = "" then "the handle" else Printf.sprintf "`%s`" e.Capture.e_label in
+  let value =
+    match e.Capture.e_shape with
+    | Capture.Itself -> "it"
+    | Capture.Function -> "this function captures it and"
+    | Capture.Holder "" -> "a value that holds it"
+    | Capture.Holder n when String.length n > 4 && String.sub n (String.length n - 4) 4 = "_Msg" ->
+      "the message that holds it"
+    | Capture.Holder n when String.contains n '$' -> "a value that holds it"
+    | Capture.Holder n -> Printf.sprintf "the `%s` that holds it" n
+  in
+  let route =
+    match e.Capture.e_route with
+    | Capture.Returned -> "is returned"
+    | Capture.Table -> "is stored in a table"
+    | Capture.Message -> "is sent to an actor"
+    | Capture.Actor -> "is given to a spawned actor"
+    | Capture.Registry -> Printf.sprintf "is kept by `%s`" e.Capture.e_what
+    | Capture.Untracked -> "is passed to code the compiler cannot follow"
+  in
+  let steps =
+    List.filter_map
+      (fun (why, (sp : Ast.span)) ->
+         if sp = Ast.dummy_span || Typecheck_builtins.span_is_stdlib sp then None
+         else if String.length why > 13 && String.sub why 0 13 = "is the handle" then None
+         else if sp = e.Capture.e_open_at then None
+         else Some (Printf.sprintf "line %d: %s" sp.Ast.start_line why))
+      e.Capture.e_why
+  in
+  ( Printf.sprintf "%s cannot leave the `%s` callback, but %s %s." subject e.Capture.e_open value route,
+    [ Printf.sprintf "%s is a scoped handle: it is only good until the `%s` callback returns (line %d)."
+        subject e.Capture.e_open e.Capture.e_open_at.Ast.start_line ]
+    @ (match steps with
+       | [] -> []
+       | _ -> [ Printf.sprintf "How %s gets there: %s." it (String.concat "; " steps) ])
+    @ [ "Read what you need inside the callback and return the data instead." ] )
+
+let capture_fault_for_test = Sys.getenv_opt "MARCH_CAPTURE_FAULT" <> None
+
+let check_capture_escapes ~(raise_on_failure : bool) (env : env) (errors : Err.ctx) (decls : Ast.decl list)
+    : unit =
+  let rec declares_scoped (ds : Ast.decl list) : string list =
+    List.concat_map
+      (function
+        | Ast.DMod (_, _, inner, _) -> declares_scoped inner
+        | Ast.DFn (def, _) when Ast.scoped_params_of_attrs def.Ast.fn_attrs <> [] -> [ def.Ast.fn_name.Ast.txt ]
+        | _ -> [])
+      ds
+  in
+  let bare n = match String.rindex_opt n '.' with Some i -> String.sub n (i + 1) (String.length n - i - 1) | None -> n in
+  let scoped_names =
+    List.sort_uniq compare
+      (Hashtbl.fold (fun k _ acc -> bare k :: acc) env.scoped_params (List.map bare (declares_scoped decls)))
+  in
+  (* Does the program's own code name one of them?  Every body, by its free
+     names (a local of the same name only runs the pass for nothing). *)
+  let names_one (e : Ast.expr) : bool = List.exists (fun n -> List.mem (bare n) scoped_names) (free_vars_expr [] e) in
+  let fn_names_one (def : Ast.fn_def) : bool =
+    List.exists
+      (fun (c : Ast.fn_clause) -> names_one c.Ast.fc_body || Option.fold ~none:false ~some:names_one c.Ast.fc_guard)
+      def.Ast.fn_clauses
+  in
+  let rec refers (ds : Ast.decl list) : bool =
+    List.exists
+      (fun (d : Ast.decl) ->
+         match d with
+         | Ast.DMod (_, _, inner, _) | Ast.DDescribe (_, inner, _) -> refers inner
+         | Ast.DFn (def, sp) -> (not (Typecheck_builtins.span_is_stdlib sp)) && fn_names_one def
+         | Ast.DLet (_, b, sp) -> (not (Typecheck_builtins.span_is_stdlib sp)) && names_one b.Ast.bind_expr
+         | Ast.DTest (t, sp) -> (not (Typecheck_builtins.span_is_stdlib sp)) && names_one t.Ast.test_body
+         | Ast.DSetup (e, sp) | Ast.DSetupAll (e, sp) -> (not (Typecheck_builtins.span_is_stdlib sp)) && names_one e
+         | Ast.DActor (_, _, a, sp) ->
+           (not (Typecheck_builtins.span_is_stdlib sp))
+           && (names_one a.Ast.actor_init
+               || List.exists
+                    (fun (h : Ast.actor_handler) -> names_one h.Ast.ah_body)
+                    (a.Ast.actor_handlers @ Option.to_list a.Ast.actor_on_stop))
+         | Ast.DImpl (impl, sp) ->
+           (not (Typecheck_builtins.span_is_stdlib sp))
+           && List.exists (fun (_, def) -> fn_names_one def) impl.Ast.impl_methods
+         | Ast.DInterface (iface, sp) ->
+           (not (Typecheck_builtins.span_is_stdlib sp))
+           && List.exists
+                (fun (md : Ast.method_decl) -> Option.fold ~none:false ~some:names_one md.Ast.md_default)
+                iface.Ast.iface_methods
+         | _ -> false)
+      ds
+  in
+  if scoped_names <> [] && (not (Err.has_errors errors)) && refers decls
+     && Sys.getenv_opt "MARCH_CAPTURE_ESCAPE" <> Some "off"
+  then begin
+    match
+      if capture_fault_for_test then failwith "MARCH_CAPTURE_FAULT";
+      (Capture.analyse env decls).Capture.escapes
+    with
+    | escapes ->
+      List.iter
+        (fun (e : Capture.escape) ->
+           let message, notes = capture_escape_message e in
+           Err.report errors
+             { Err.severity = Err.Error; span = e.Capture.e_at; message; labels = []; notes;
+               code = Err.Code.capture_escape; fix = None })
+        escapes
+    | exception exn ->
+      let msg = Printf.sprintf "internal compiler error in the scoped-handle check: %s" (Printexc.to_string exn) in
+      (* Never a silent accept.  The editor and the REPL get a diagnostic, not
+         a dead server; a build stops. *)
+      if raise_on_failure then failwith msg
+      else Err.error ~code:Err.Code.internal_error errors ~span:Ast.dummy_span msg
+  end
+
+let () = capture_escape_hook := check_capture_escapes
 
 let check_module ?errors (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
   let (errs, type_map, _env) = check_module_core ?errors m in
@@ -14104,6 +14234,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
   (* Pass 3: tail-call enforcement *)
   check_nonregular_types errors m.Ast.mod_decls;
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
+  check_capture_escapes ~raise_on_failure:false final_env errors m.Ast.mod_decls;
   (errors, type_map)
 
 (** Like [check_module_with_env] but also returns the final typing env.

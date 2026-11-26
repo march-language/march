@@ -1,0 +1,14 @@
+exit: 1
+-- CAPABILITY ------------- errors/capture_escape_7.march
+
+`s` cannot leave the `Socket.with_connection` callback, but the `Result` that holds it is returned. [capture_escape]
+
+11 |     let live = Socket.with_connection("example.com", 80, fn s -> Ok(session(s, "ada")))
+                                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `s` is a scoped handle: it is only good until the `Socket.with_connection` callback returns (line 11).
+    How `s` gets there: line 11: calls `session`.
+    Read what you need inside the callback and return the data instead.
+    run `march --explain capture_escape`
+
+

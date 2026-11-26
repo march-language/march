@@ -1,0 +1,8 @@
+mod Main do
+  needs IO.FileRead
+
+  fn main() do
+    let reader = File.with_open("notes.txt", fn h -> fn () -> File.read_line(h))
+    ()
+  end
+end

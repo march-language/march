@@ -1577,6 +1577,7 @@ ty_atom    ::= INT
              | upper_name
              | "linear" ty_atom
              | "affine" ty_atom
+             | "scoped" ty_atom                                 (* a callback's handle parameter; see below *)
              | "(" ")"
              | "(" ty ")"
              | "(" ty "," separated_nonempty_list(",", ty) ")"
@@ -1586,6 +1587,12 @@ ty_atom    ::= INT
 
 ty_record_field ::= lower_name ":" ty
 ```
+
+`scoped` is a soft keyword: the token filter promotes the identifier `scoped` to the
+marker only when an upper-case name follows it on the same line, so it stays an ordinary
+name everywhere else. The marker is well-formed only as the parameter of an arrow that is
+the type of a function's own parameter (`body : scoped File.Handle -> r`); desugaring
+removes it there, and one written anywhere else is the `scoped_misplaced` error.
 
 (`parser.mly:910–958`.) Four strata, tightest-to-loosest read bottom-up
 exactly as printed (`ty_atom` binds tightest, `ty`'s bare arrow is loosest):

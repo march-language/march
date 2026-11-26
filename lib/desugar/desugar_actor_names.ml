@@ -175,6 +175,7 @@ let rename_ty tbl ~root cur =
     | TyTuple ts -> TyTuple (List.map ty ts)
     | TyRecord fs -> TyRecord (List.map (fun (n, t) -> (n, ty t)) fs)
     | TyLinear (l, t) -> TyLinear (l, ty t)
+    | TyScoped t -> TyScoped (ty t)
     | TyNatOp (o, a, b) -> TyNatOp (o, ty a, ty b)
     | TyRefine (t, b, e) -> TyRefine (ty t, b, e)
     | TyVar _ | TyNat _ | TyChan _ -> t

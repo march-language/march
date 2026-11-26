@@ -102,7 +102,7 @@ let rec lower_ty (t : Ast.ty) : Tir.ty =
   | Ast.TyRecord fields                   ->
     let fs = List.map (fun (n, t) -> (n.Ast.txt, lower_ty t)) fields in
     Tir.TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) fs)
-  | Ast.TyLinear (_, t)                   -> lower_ty t  (* linearity tracked on var *)
+  | Ast.TyLinear (_, t) | Ast.TyScoped t                   -> lower_ty t  (* linearity tracked on var *)
   | Ast.TyNat n                           -> Tir.TCon ("Nat", [Tir.TCon (string_of_int n, [])])
   | Ast.TyNatOp _                         -> Tir.TCon ("NatOp", [])  (* placeholder *)
   | Ast.TyChan _                          -> Tir.TCon ("Chan", [])   (* lowered to opaque Chan ptr *)

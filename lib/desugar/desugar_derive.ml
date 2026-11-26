@@ -162,6 +162,7 @@ let rec respan_ty (t : ty) : ty =
   | TyTuple ts           -> TyTuple (List.map respan_ty ts)
   | TyRecord fs          -> TyRecord (List.map (fun (n, t) -> (respan_name n, respan_ty t)) fs)
   | TyLinear (l, t)      -> TyLinear (l, respan_ty t)
+  | TyScoped t      -> TyScoped (respan_ty t)
   | TyNat _ as t         -> t
   | TyNatOp (op, a, b)   -> TyNatOp (op, respan_ty a, respan_ty b)
   | TyChan (a, b)        -> TyChan (respan_name a, respan_name b)

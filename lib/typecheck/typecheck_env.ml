@@ -884,6 +884,11 @@ type env = {
       still populated — Task 8 reads it to attribute a whole-program grant
       violation to the user's call chain — but nothing currently checks it.
       [main] is excluded regardless — [check_main_grant] owns it. *)
+  scoped_params : (string, int list) Hashtbl.t;
+  (** Functions with a `scoped` callback parameter (`body : scoped
+      File.Handle -> r`, ocap phase 8b): qualified name (the [cap_qname]
+      convention, as [fn_refs]) to the 0-based indices of those parameters.
+      The capture pass gives each use of such a function a tracked name. *)
   fn_bound_points : (string, fn_bound) Hashtbl.t;
   (** Functions declaring a per-function capability bound
       ([fn f(x) needs IO.Console do]) or inheriting one from an interface
@@ -1019,6 +1024,7 @@ let make_env errors type_map = {
   fn_row_bodies = Hashtbl.create 64;
   role_grants = Hashtbl.create 8;
   fn_grant_points = Hashtbl.create 16;
+  scoped_params = Hashtbl.create 4;
   fn_bound_points = Hashtbl.create 16;
   restrict_owners = Hashtbl.create 4;
   grant_owners = Hashtbl.create 1;

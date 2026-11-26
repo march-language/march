@@ -1718,9 +1718,10 @@ around passes authority around, and the plain type `String -> ()` does not say h
 compiler now infers that for every function value and for every value that holds one. It is
 called the value's **capture set**: an upper bound on what the value can do when it is called.
 
-The sets are inferred. Nothing is written in source yet and nothing is rejected because of
-them: this is the first step of capture checking (design:
-`specs/2026-11-11-ocap-capture-checking-design.md`). You can read them in two places.
+The sets are inferred, and nothing is written in source for them. One thing is rejected because
+of them: a scoped handle that leaves its callback (see "Scoped handles" below). The rest of
+capture checking comes later (design: `specs/2026-11-11-ocap-capture-checking-design.md`). You
+can read the sets in two places.
 
 **In the editor.** Hover shows a value's type with its set after `needs`:
 
@@ -1767,6 +1768,48 @@ How to read it:
 A function value made by module-level code captures nothing at run time and runs under its
 caller's authority, so its set is everything it can reach and a module-level `restrict` does
 not narrow it.
+
+### Scoped handles: a handle that may not leave its callback
+
+`File.with_open`, `File.with_open_write` and `Socket.with_connection` open a resource, hand it
+to a callback, and close it when the callback returns. The handle the callback receives is a
+**scoped handle**: it is only good until the callback returns. The compiler tracks it through
+the capture sets, and a callback that lets it out is a build error, in every mode:
+
+```march
+File.with_open("notes.txt", fn h -> fn () -> File.read_line(h))
+-- error: `h` cannot leave the `File.with_open` callback, but this function
+--        captures it and is returned. [capture_escape]
+```
+
+A scoped handle shows in a capture set by its name, after the scopes: the closure above has
+the set `h`. No scope covers a name, not even `IO`, so the handle cannot be handed to anything
+that would keep it. It leaves the callback, and is rejected, when the callback:
+
+- returns it, or returns a function, record, tuple, list or task that holds it;
+- stores it in a `Vault` table, sends it to an actor, or gives it to a spawned actor;
+- hands a function that captured it to something that runs it later (a signal watcher);
+- passes it to code the compiler does not follow (a function value that is `not tracked`).
+
+Everything else is allowed inside the callback: reading and writing, passing the handle to
+other functions, building local values around it, and starting a task that uses it as long as
+the task is awaited before the callback returns. The check follows the handle into the
+functions it is passed to, so a helper two calls away that stores it is found too.
+
+A handle opened with `File.open` or `Socket.connect` is an ordinary handle. It is not tracked
+and can go anywhere; closing it is up to you.
+
+To give your own function a scoped callback, write `scoped` before the callback's parameter
+type:
+
+```march
+fn with_log(path : String, body : scoped File.Handle -> r) : Result(Result(r, FileError), CapError) do
+  File.with_open_write(path, File.Append, body)
+end
+```
+
+`scoped` is written only there (anywhere else is `scoped_misplaced`), and it is an ordinary
+name outside a type.
 
 ## Capability inference hints
 

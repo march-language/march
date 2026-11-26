@@ -343,13 +343,15 @@ mod File do
   Open `path` for reading, pass the handle to `f`, and close it when `f`
   returns or panics. Returns `Ok(Ok(f_result))`, the open's `Ok(Err(FileError))`,
   or `Err(CapError(...))` when the open is refused.
-  The handle must not be used after `f` returns: it is closed.
+  The handle is scoped: it is closed when `f` returns, so the compiler rejects
+  a callback that lets it out (returns it, stores it, sends it, or returns a
+  function that holds it) with `capture_escape`.
 
   ## Examples
 
       File.with_open("notes.txt", fn h -> File.read_line(h))
   """
-  fn with_open(path : String, f : File.Handle -> a) : Result(Result(a, FileError), CapError) do
+  fn with_open(path : String, f : scoped File.Handle -> a) : Result(Result(a, FileError), CapError) do
     let? _ = Authority.check("IO.FileRead", path)
     let performed = match open_raw(path) do
     Err(e) -> Err(e)
@@ -367,14 +369,15 @@ mod File do
   Like `with_open`, for writing: opens `path` with `open_write(path, mode)`,
   passes the handle to `f`, and closes it when `f` returns or panics. If
   writing the buffered bytes out at that close fails, the result is
-  `Ok(Err(IoError(msg)))` instead of `f`'s result.
+  `Ok(Err(IoError(msg)))` instead of `f`'s result. The handle is scoped, as
+  in `with_open`: it may not leave `f`.
 
   ## Examples
 
       File.with_open_write("out.txt", File.Truncate, fn h ->
         File.write_to(h, "hello\n"))
   """
-  fn with_open_write(path : String, mode : WriteMode, f : File.Handle -> a) : Result(Result(a, FileError), CapError) do
+  fn with_open_write(path : String, mode : WriteMode, f : scoped File.Handle -> a) : Result(Result(a, FileError), CapError) do
     let? _ = Authority.check("IO.FileWrite", path)
     let performed = match open_write_raw(path, mode) do
     Err(e) -> Err(e)

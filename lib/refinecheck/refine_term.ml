@@ -247,7 +247,7 @@ let rec ty_cons (t : A.ty) : string list =
   | A.TyArrow (a, b) -> ty_cons a @ ty_cons b
   | A.TyTuple ts -> List.concat_map ty_cons ts
   | A.TyRecord fs -> List.concat_map (fun (_, t) -> ty_cons t) fs
-  | A.TyLinear (_, t) | A.TyRefine (t, _, _) -> ty_cons t
+  | A.TyLinear (_, t) | A.TyScoped t | A.TyRefine (t, _, _) -> ty_cons t
   | A.TyVar _ | A.TyNat _ | A.TyNatOp _ | A.TyChan _ -> []
 
 (** [reaches c t]: type [c]'s definition mentions [t], directly or through
@@ -1335,7 +1335,7 @@ let nonpositive_types (decls : A.decl list) : SS.t =
     | A.TyVar v -> on_var ~left v.A.txt
     | A.TyTuple ts -> List.iter (w ~left) ts
     | A.TyRecord fs -> List.iter (fun (_, t) -> w ~left t) fs
-    | A.TyLinear (_, t) | A.TyRefine (t, _, _) -> w ~left t
+    | A.TyLinear (_, t) | A.TyScoped t | A.TyRefine (t, _, _) -> w ~left t
     | A.TyNat _ | A.TyNatOp _ | A.TyChan _ -> ()
   in
   let changed = ref true in

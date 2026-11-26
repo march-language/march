@@ -316,6 +316,7 @@ let rec fmt_ty = function
     Printf.sprintf "{ %s }" (String.concat ", " (List.map f flds))
   | TyLinear (lin, t)        ->
     (match lin with Unrestricted | Ghost -> "" | Linear -> "linear " | Affine -> "affine ") ^ fmt_ty t
+  | TyScoped t               -> "scoped " ^ fmt_ty_atom t
   | TyNat n                  -> string_of_int n
   | TyNatOp (op, a, b)       ->
     let s = match op with NatAdd -> "+" | NatMul -> "*" in

@@ -215,7 +215,7 @@ let rec show_ty ?(f : facts option) ?(path = []) (t : ty) : string =
   | TyTuple [] -> "()"
   | TyTuple ts -> "(" ^ String.concat ", " (List.map go ts) ^ ")"
   | TyRecord fs -> "{ " ^ String.concat ", " (List.map (fun ((n : name), t) -> n.txt ^ " : " ^ go t) fs) ^ " }"
-  | TyLinear (_, t) -> go t
+  | TyLinear (_, t) | TyScoped t -> go t
   | TyNat n -> string_of_int n
   | TyNatOp (_, a, b) -> go a ^ " op " ^ go b
   | TyChan (a, b) -> "Chan(" ^ a.txt ^ ", " ^ b.txt ^ ")"

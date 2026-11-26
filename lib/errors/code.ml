@@ -122,6 +122,8 @@ let mint_cap_invalid = "mint_cap_invalid"
 let mock_handler_field = "mock_handler_field"
 let mock_outside_test = "mock_outside_test"
 let mock_scope_invalid = "mock_scope_invalid"
+let scoped_misplaced = "scoped_misplaced"
+let capture_escape = "capture_escape"
 let missing_impl = "missing_impl"
 let missing_method = "missing_method"
 let missing_superclass_impl = "missing_superclass_impl"
@@ -357,6 +359,8 @@ let all = [
   mock_handler_field;
   mock_outside_test;
   mock_scope_invalid;
+  scoped_misplaced;
+  capture_escape;
   missing_impl;
   missing_method;
   missing_superclass_impl;
@@ -542,7 +546,7 @@ let category_table : (string * string list) list = [
     dep_grant_exceeded; dep_grant_invalid; dep_grant_scope; extern_cap_missing;
     extern_needs_foreign; import_cap_missing; invalid_cap_scope;
     io_not_allowed; mint_cap_invalid; mock_handler_field; mock_outside_test;
-    mock_scope_invalid; proof_cap_foreign;
+    mock_scope_invalid; scoped_misplaced; capture_escape; proof_cap_foreign;
     proof_cap_mint_private; proof_cap_return; role_grant_exceeded;
     role_grant_too_wide; role_grant_unverified; root_cap_reference;
     undeclared_requirement; unknown_capability; unused_needs ];

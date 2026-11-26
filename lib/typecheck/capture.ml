@@ -34,13 +34,58 @@ type reason = { why : string; rspan : Ast.span }
 
 type edge = {
   dst : svar;
+  names : bool;  (** false: tracked names do not travel along it *)
   narrow : S.t option;  (** the source is narrowed by this before it flows *)
   ground_only : bool;  (** an instantiation's link back to its scheme *)
   ewhy : reason option;
 }
 
+(* ── scoped handles (ocap phase 8b, design §7) ─────────────────────────────
+
+   Each use of a function with a `scoped` callback parameter makes one tracked
+   name and puts it in the set of the handle the callback receives.  The
+   solver carries it wherever the handle flows.  An escape position is a set
+   that must not hold a tracked name once everything is solved. *)
+
+type route =
+  | Returned  (** the callback's result *)
+  | Table  (** written to a table *)
+  | Message  (** sent to an actor *)
+  | Actor  (** given to a spawned actor *)
+  | Registry  (** kept by a builtin that runs or reads it later *)
+  | Untracked  (** passed to code the pass cannot follow *)
+
+(* What the value at an escape position is, for the message. *)
+type shape = Itself | Function | Holder of string
+
+type sink = {
+  k_vars : svar list;
+  k_route : route;
+  k_at : Ast.span;
+  k_what : string;  (** the builtin or the callee, when the message names one *)
+  k_shape : shape;
+  k_cond : svar option;  (** only when this set is of unknown origin *)
+}
+
+type scoped_use = {
+  u_name : S.name;
+  u_open : string;  (** the scoped function, as written *)
+  u_at : Ast.span;
+  u_cb : Ast.span option;  (** the callback argument, when the use is a call *)
+  u_result : svar list;
+  u_shape : shape;
+  u_seeds : svar list;  (** where the name starts *)
+}
+
 type store = {
   mutable next : int;
+  mutable sinks : sink list;
+  mutable uses : scoped_use list;
+  mutable next_name : int;
+  effects : (svar, unit) Hashtbl.t;
+      (** variables that stand for what running a function does, not for what
+          a value holds: a tracked name never enters one (running a function
+          that holds a handle does not make the caller hold it) *)
   consts : (svar, S.t) Hashtbl.t;
   const_why : (svar, (S.t * reason) list) Hashtbl.t;
   succ : (svar, edge list) Hashtbl.t;
@@ -49,7 +94,7 @@ type store = {
 }
 
 let new_store () =
-  { next = 0; consts = Hashtbl.create 1024; const_why = Hashtbl.create 256; succ = Hashtbl.create 1024;
+  { next = 0; sinks = []; uses = []; next_name = 0; effects = Hashtbl.create 256; consts = Hashtbl.create 1024; const_why = Hashtbl.create 256; succ = Hashtbl.create 1024;
     unknown_causes = Hashtbl.create 8; unknown_at = [] }
 
 let add_const (st : store) ?why (v : svar) (c : S.t) : unit =
@@ -62,11 +107,11 @@ let add_const (st : store) ?why (v : svar) (c : S.t) : unit =
     | None -> ()
   end
 
-let add_edge (st : store) ?narrow ?(ground_only = false) ?why (u : svar) (v : svar) : unit =
+let add_edge (st : store) ?narrow ?(ground_only = false) ?(names = true) ?why (u : svar) (v : svar) : unit =
   if u <> v then begin
     let es = Option.value ~default:[] (Hashtbl.find_opt st.succ u) in
-    if not (List.exists (fun e -> e.dst = v && e.narrow = narrow && e.ground_only = ground_only) es) then
-      Hashtbl.replace st.succ u ({ dst = v; narrow; ground_only; ewhy = why } :: es)
+    if not (List.exists (fun e -> e.dst = v && e.narrow = narrow && e.ground_only = ground_only && e.names = names) es) then
+      Hashtbl.replace st.succ u ({ dst = v; names; narrow; ground_only; ewhy = why } :: es)
   end
 
 let add_unknown (st : store) (v : svar) ~(cause : string) (sp : Ast.span) : unit =
@@ -98,6 +143,9 @@ let solve (st : store) ~(ground : bool) (seeds : svar list) : (svar, S.t) Hashtb
       (fun e ->
          if ground || not e.ground_only then begin
            let incoming = match e.narrow with Some by -> S.narrow cu ~by | None -> cu in
+           let incoming =
+             if e.names && not (Hashtbl.mem st.effects e.dst) then incoming else S.without_names incoming
+           in
            let old =
              match Hashtbl.find_opt value e.dst with
              | Some x -> x
@@ -186,7 +234,12 @@ type st = {
   annot : (Ast.span, T.t) Hashtbl.t;
   binders : (Ast.span, string * string) Hashtbl.t;  (** a `let` or pattern variable: its name, its owner *)
   fn_iface : (string, scheme list) Hashtbl.t;
-  unsound : [ `Drop_callee_effect | `Drop_arg_flow | `Narrow_values ] option;
+  scoped : (string, int list) Hashtbl.t;
+      (** functions with a `scoped` callback parameter: key to parameter indices *)
+  none_recorded : bool;
+      (** the checker recorded no reach body for the program's own functions
+          (the editor's and the REPL's entry point) *)
+  unsound : [ `Drop_callee_effect | `Drop_arg_flow | `Narrow_values | `Escape ] option;
 }
 
 type ctx = {
@@ -241,7 +294,7 @@ let rec flow (s : st) ?why (src : T.t) (dst : T.t) : unit =
   match src, dst with
   | _, T.Plain | T.Plain, _ | _, T.Opaque -> ()
   | T.Opaque, d ->
-    List.iter (fun v -> add_const st v S.unknown) (T.svars d)
+    List.iter (fun v -> add_const st v S.unknown_origin) (T.svars d)
   | T.Hole { h_ty = Some t; _ }, d -> flow s ?why t d
   | T.Hole ({ h_ty = None; _ } as h), d -> h.h_out <- d :: h.h_out
   | a, T.Hole ({ h_ty = None; _ } as h) -> h.h_in <- a :: h.h_in
@@ -263,7 +316,7 @@ let rec flow (s : st) ?why (src : T.t) (dst : T.t) : unit =
     List.iter (fun (n, x) -> match List.assoc_opt n b with Some y -> flow s ?why x y | None -> ()) a
   | T.Var (_, h1), T.Var (_, h2) -> edge h1 h2
   | a, b ->
-    if T.has_opaque a then List.iter (fun v -> add_const st v S.unknown) (T.svars b);
+    if T.has_opaque a then List.iter (fun v -> add_const st v S.unknown_origin) (T.svars b);
     cross a b
 
 let fill_hole (s : st) (h : T.hole) (t : T.t) : unit =
@@ -283,6 +336,10 @@ let scan_decls (s : st) (decls : Ast.decl list) : unit =
     if not (Hashtbl.mem s.env.fn_row_bodies key) then
       Hashtbl.replace s.extra_bodies key (Option.value ~default:[] (Hashtbl.find_opt s.extra_bodies key) @ [ body ])
   in
+  (* Only when the checker recorded no function body at all for the program
+     (see the impl case below): otherwise the body is already there under
+     the checker's own key, and walking it twice would report twice. *)
+  let add_unrecorded key body = if s.none_recorded then add_body key body in
   let param_name = function
     | Ast.FPNamed p | Ast.FPDefault (p, _) -> p.Ast.param_name.Ast.txt
     | Ast.FPPat (Ast.PatVar n) -> n.Ast.txt
@@ -293,6 +350,9 @@ let scan_decls (s : st) (decls : Ast.decl list) : unit =
       (fun (decl : Ast.decl) ->
          (match decl with
           | Ast.DFn (def, _) ->
+            (match Ast.scoped_params_of_attrs def.Ast.fn_attrs with
+             | [] -> ()
+             | is -> Hashtbl.replace s.scoped (qual prefix def.Ast.fn_name.Ast.txt) is);
             List.iter
               (fun (cl : Ast.fn_clause) ->
                  add_body (qual prefix def.Ast.fn_name.Ast.txt) (List.map param_name cl.Ast.fc_params, cl.Ast.fc_body))
@@ -313,6 +373,35 @@ let scan_decls (s : st) (decls : Ast.decl list) : unit =
           | Ast.DSetup (e, sp) | Ast.DSetupAll (e, sp) ->
             add_body (qual prefix (Printf.sprintf "$setup@%d:%d" sp.Ast.start_line sp.Ast.start_col)) ([], e)
           | Ast.DDescribe (_, inner, _) -> go prefix inner
+          (* An impl method and an interface default body.  Where the checker
+             recorded reach bodies they are there under the impl's own key;
+             a checker entry point that records none (the editor, the REPL)
+             gets them here under a key of their own, so their bodies are
+             walked and a scoped handle that leaves a callback in one is seen. *)
+          | Ast.DImpl (impl, sp) ->
+            if not (Typecheck_builtins.span_is_stdlib sp) then
+              List.iter
+                (fun ((m : Ast.name), (def : Ast.fn_def)) ->
+                   List.iter
+                     (fun (cl : Ast.fn_clause) ->
+                        add_unrecorded
+                          (qual prefix
+                             (Printf.sprintf "$impl@%d:%d.%s" sp.Ast.start_line sp.Ast.start_col m.Ast.txt))
+                          (List.map param_name cl.Ast.fc_params, cl.Ast.fc_body))
+                     def.Ast.fn_clauses)
+                impl.Ast.impl_methods
+          | Ast.DInterface (iface, sp) ->
+            if not (Typecheck_builtins.span_is_stdlib sp) then
+              List.iter
+                (fun (md : Ast.method_decl) ->
+                   match md.Ast.md_default with
+                   | Some body ->
+                     add_unrecorded
+                       (qual prefix
+                          (Printf.sprintf "$default@%d:%d.%s" sp.Ast.start_line sp.Ast.start_col md.Ast.md_name.Ast.txt))
+                       ([], body)
+                   | None -> ())
+                iface.Ast.iface_methods
           | _ -> ());
          match decl with
         | Ast.DMod (n, _, inner, _) -> go (qual prefix n.Ast.txt) inner
@@ -457,6 +546,8 @@ let fresh_result_builtins : string list =
     "panic_"; "unreachable_"; "todo_";
     (* a fresh, empty container *)
     "vault_new"; "ring_buf_make";
+    (* a fresh handle: an ordinary handle holds nothing (design §4.4) *)
+    "handle_new";
     (* a pid: holding one adds nothing to a set (design §2) *)
     "pid_of_int"; "actor_whereis";
     (* decoded or logged data: no function value can come out of it *)
@@ -562,7 +653,7 @@ let map_tvar (s : st) (i : inst) (id : int) (hv : svar) (t : T.t) : unit =
        which is how a function value conjured inside it (read from a table
        opened by name) reaches the caller as not tracked. *)
     List.iter (fun v -> add_edge s.store hv' v) (T.held t);
-    if T.has_opaque t then add_const s.store hv' S.unknown
+    if T.has_opaque t then add_const s.store hv' S.unknown_origin
   end
 
 (* Bind the scheme's type variables from an argument's annotated type. *)
@@ -616,9 +707,76 @@ let rec subst (s : st) (i : inst) (formal : T.t) (hm : ty option) : T.t =
    link each instance variable back to the scheme's for grounding. *)
 let finish_inst (s : st) (i : inst) (sc : scheme) ~(why : reason) : unit =
   List.iter (fun v -> ignore (inst_var s i v)) sc.sc_iface;
+  Hashtbl.replace s.store.effects (inst_var s i sc.sc_val) ();
   List.iter (fun (v, c) -> add_const s.store ~why (inst_var s i v) c) sc.sc_bounds;
   List.iter (fun (u, v) -> add_edge s.store (inst_var s i u) (inst_var s i v)) sc.sc_flows;
   Hashtbl.iter (fun v v' -> add_edge s.store ~ground_only:true v' v) i.i_fresh
+
+(* ── scoped handles: names and escape positions ─────────────────────────── *)
+
+let rec shape_of (s : st) (t : T.t) : shape =
+  match t with
+  | T.Hole { h_ty = Some t'; _ } -> shape_of s t'
+  | T.Arrow _ -> Function
+  | T.Con (n, [], Some _) when T.is_handle n -> Itself
+  | T.Con (n, _, _) -> Holder (T.bare n)
+  | _ -> Holder ""
+
+(* What a value holds, for an escape position: unlike [T.held], a function's
+   parameters do not count and neither does its result, but the function's own
+   set does (it captured the handle). *)
+let add_sink (s : st) ?(what = "") ?cond (route : route) (sp : Ast.span) (ts : T.t list) : unit =
+  if s.unsound <> Some `Escape then
+    List.iter
+      (fun t ->
+         match T.held t with
+         | [] -> ()
+         | vars ->
+           s.store.sinks <-
+             { k_vars = vars; k_route = route; k_at = sp; k_what = what; k_shape = shape_of s t; k_cond = cond }
+             :: s.store.sinks)
+      ts
+
+(* A use of the function [key], whose instantiated parameter types are
+   [params]: one tracked name per `scoped` callback parameter. *)
+let mark_scoped (s : st) ~(key : string) ~(written : string) ~(sp : Ast.span) ~(label : int -> string)
+    ?(cb : int -> Ast.span option = fun _ -> None) (params : T.t list) : unit =
+  match Hashtbl.find_opt s.scoped key with
+  | None -> ()
+  | Some idxs when s.unsound <> Some `Escape ->
+    List.iter
+      (fun k ->
+         match Option.map resolve_holes (List.nth_opt params k) with
+         | Some (T.Arrow (p, r, _)) ->
+           let seeds = T.held p in
+           if seeds <> [] then begin
+             s.store.next_name <- s.store.next_name + 1;
+             let name = { S.label = label k; id = s.store.next_name } in
+             List.iter
+               (fun v ->
+                  add_const s.store v (S.of_name name)
+                    ~why:{ why = Printf.sprintf "is the handle `%s` hands its callback" written; rspan = sp })
+               seeds;
+             s.store.uses <-
+               { u_name = name; u_open = written; u_at = sp; u_cb = cb k; u_result = T.svars r; u_shape = shape_of s r;
+                 u_seeds = seeds }
+               :: s.store.uses
+           end
+         | _ -> ())
+      idxs
+  | Some _ -> ()
+
+(* Builtins that keep an argument after they return (design §7.1). *)
+let retaining_builtin (name : string) : (route * bool) option =
+  (* the route, and whether the message names the builtin *)
+  if List.mem name [ "send"; "actor_send_after"; "actor_cast"; "actor_call" ] then Some (Message, false)
+  else if String.length name > 6 && String.sub name 0 6 = "vault_" then Some (Table, false)
+  else if
+    List.mem name
+      [ "signal_watch"; "diag_observe"; "delivery_failed_watch"; "logger_add_field"; "logger_add_context";
+        "mock_register" ]
+  then Some (Registry, true)
+  else None
 
 (* ── the walk ───────────────────────────────────────────────────────────── *)
 
@@ -801,13 +959,17 @@ and walk_inner (s : st) (c : ctx) (e : Ast.expr) : T.t =
             may be anywhere in the value. *)
          List.iter
            (fun a ->
-              if T.has_opaque a then List.iter (fun v -> add_const s.store v S.unknown) (T.svars r);
+              if T.has_opaque a then List.iter (fun v -> add_const s.store v S.unknown_origin) (T.svars r);
               List.iter (fun u -> List.iter (fun v -> add_edge s.store u v) (T.svars r)) (T.svars a))
            ats));
     r
   | Ast.EAtom (_, args, sp) ->
     let ats = List.map (walk s c) args in
-    if List.for_all (fun a -> a = T.Plain) ats then T.Plain else unmodelled s c sp ~cause:"an atom holding a function value"
+    if List.for_all (fun a -> a = T.Plain) ats then T.Plain
+    else begin
+      add_sink s Untracked sp ~what:"an atom" ats;
+      unmodelled s c sp ~cause:"an atom holding a function value"
+    end
   | Ast.ETuple (es, _) ->
     let ts = List.map (walk s c) es in
     if List.for_all (fun a -> a = T.Plain) ts then T.Plain else T.Tuple ts
@@ -870,14 +1032,14 @@ and walk_inner (s : st) (c : ctx) (e : Ast.expr) : T.t =
     walk s { c with in_mock = true } body
   | Ast.EAnnot (ex, _, _) -> walk s c ex
   | Ast.EDbg (Some ex, _) -> walk s c ex
-  | Ast.ESend (a, b, _) ->
+  | Ast.ESend (a, b, sp) ->
     ignore (walk s c a);
-    ignore (walk s c b);
+    add_sink s Message sp [ walk s c b ];
     T.Plain
   | Ast.ESpawn (ex, sp) ->
     (match ex with
      | Ast.ECon (actor, init_args, _) ->
-       List.iter (fun a -> ignore (walk s c a)) init_args;
+       add_sink s Actor sp (List.map (walk s c) init_args);
        charge_actor s c actor.Ast.txt sp
      | other -> ignore (walk s c other));
     of_span s sp
@@ -933,6 +1095,8 @@ and walk_block (s : st) (c : ctx) (es : Ast.expr list) : T.t =
 and walk_fn_value ?(self : Ast.name option) (s : st) (c : ctx) ~(params : Ast.name list) ~(body : Ast.expr)
     : T.t * svar =
   let set = fresh s and own = fresh s and valv = fresh s in
+  Hashtbl.replace s.store.effects own ();
+  Hashtbl.replace s.store.effects valv ();
   let holes = List.map (fun (n : Ast.name) -> (n, T.new_hole ())) params in
   (* The function's type exists before its body is walked, so a local fn's
      calls to itself flow their arguments into its real parameters and take
@@ -952,7 +1116,7 @@ and walk_fn_value ?(self : Ast.name option) (s : st) (c : ctx) ~(params : Ast.na
   in
   (* What a function value creates is in the set of the one that creates it
      (design §6.1). *)
-  (match c.lams with (_, outer) :: _ -> add_edge s.store set outer | [] -> ());
+  (match c.lams with (_, outer) :: _ -> add_edge s.store ~names:false set outer | [] -> ());
   if c.in_mock then
     add_unknown s.store set
       ~cause:"created inside a mock block: it keeps the mock, whose handler may run in place of an operation"
@@ -1029,7 +1193,7 @@ and walk_var (s : st) (c : ctx) (n : Ast.name) : T.t =
 and named_value (s : st) (c : ctx) (n : Ast.name) (key : string) : T.t =
   let set = fresh s in
   let why = { why = Printf.sprintf "is `%s`" n.Ast.txt; rspan = n.Ast.span } in
-  (match c.lams with (_, outer) :: _ -> add_edge s.store set outer | [] -> ());
+  (match c.lams with (_, outer) :: _ -> add_edge s.store ~names:false set outer | [] -> ());
   let hm = ty_at s n.Ast.span in
   let peel ty = match Option.map repr ty with Some (TArrow (a, b)) -> (Some a, Some b) | _ -> (None, None) in
   let build ~(params : T.t list) ~(result : T.t) ~(sub : T.t -> ty option -> T.t) : T.t option =
@@ -1057,6 +1221,8 @@ and named_value (s : st) (c : ctx) (n : Ast.name) (key : string) : T.t =
           (fun sc ->
              let i = { i_fresh = Hashtbl.create 8; i_mapped = Hashtbl.create 4 } in
              let t = build ~params:sc.sc_params ~result:sc.sc_result ~sub:(subst s i) in
+             mark_scoped s ~key ~written:n.Ast.txt ~sp:n.Ast.span ~label:(fun _ -> "")
+               (List.map (fun p -> subst s i p None) sc.sc_params);
              finish_inst s i sc ~why;
              (match t with
               | Some _ ->
@@ -1074,6 +1240,7 @@ and named_value (s : st) (c : ctx) (n : Ast.name) (key : string) : T.t =
         List.filter_map
           (fun a ->
              let t = build ~params:a.a_params ~result:a.a_result ~sub:(fun t _ -> t) in
+             mark_scoped s ~key ~written:n.Ast.txt ~sp:n.Ast.span ~label:(fun _ -> "") a.a_params;
              add_edge s.store ~narrow:c.auth a.a_own set;
              add_edge s.store a.a_val set;
              t)
@@ -1128,6 +1295,9 @@ and apply_value (s : st) (c : ctx) (ft : T.t) (args : T.t list) (sp : Ast.span) 
     | T.Arrow (p, r, set), a :: rest ->
       if s.unsound <> Some `Drop_callee_effect then add_edge s.store ~why set c.valv;
       if s.unsound <> Some `Drop_arg_flow then flow s a p;
+      (* A function value of unknown origin may do anything with what it is
+         handed (design §7; the plan's Q3). *)
+      add_sink s Untracked sp ~what ~cond:set [ a ];
       if rest = [] then r else go r rest
     | T.Plain, _ -> T.Plain
     | _ ->
@@ -1136,6 +1306,7 @@ and apply_value (s : st) (c : ctx) (ft : T.t) (args : T.t list) (sp : Ast.span) 
       if plain_at s sp && List.for_all (fun a -> a = T.Plain) args && ft = T.Plain then T.Plain
       else begin
         add_unknown s.store c.valv ~cause:"a call of a value whose function type the pass could not rebuild" sp;
+        add_sink s Untracked sp ~what args;
         T.Opaque
       end
   in
@@ -1194,6 +1365,17 @@ and charge_kind (s : st) (c : ctx) (kind_expr : Ast.expr) (sp : Ast.span) : unit
     | _ -> ())
   | _ -> add_unknown s.store c.own ~cause:"an authority check of a computed kind" sp
 
+(* The source name of the handle a scoped callback receives: the lambda's
+   parameter, or the parameter of the named function passed. *)
+and scoped_label (s : st) (c : ctx) (args : Ast.expr list) (k : int) : string =
+  match List.nth_opt args k with
+  | Some (Ast.ELam (p :: _, _, _)) -> p.Ast.param_name.Ast.txt
+  | Some (Ast.EVar f) when not (List.mem_assoc f.Ast.txt c.scope) -> (
+    match Option.map (bodies_of s) (resolve s c.owner f.Ast.txt) with
+    | Some ((p :: _, _) :: _) -> p
+    | _ -> "")
+  | _ -> ""
+
 and call_named (s : st) (c : ctx) (n : Ast.name) (key : string) (args : Ast.expr list) (ats : T.t list)
     (sp : Ast.span) : T.t =
   let why = { why = Printf.sprintf "calls `%s`" n.Ast.txt; rspan = sp } in
@@ -1227,10 +1409,13 @@ and call_named (s : st) (c : ctx) (n : Ast.name) (key : string) (args : Ast.expr
           List.iteri
             (fun k p ->
                match List.nth_opt ats k with
-               | Some a -> if s.unsound <> Some `Drop_arg_flow then flow s a (subst s i p None)
+               | Some a -> if s.unsound <> Some `Drop_arg_flow then flow s ~why a (subst s i p None)
                | None -> ())
             sc.sc_params;
           let r = subst s i sc.sc_result (if nargs <= List.length sc.sc_params then result_ty else None) in
+          mark_scoped s ~key ~written:n.Ast.txt ~sp ~label:(scoped_label s c args)
+            ~cb:(fun k -> Option.map span_of_expr (List.nth_opt args k))
+            (List.map (fun p -> subst s i p None) sc.sc_params);
           finish_inst s i sc ~why;
           add_const s.store ~why c.own (scope_own sc.sc_own lit);
           List.iter
@@ -1246,6 +1431,9 @@ and call_named (s : st) (c : ctx) (n : Ast.name) (key : string) (args : Ast.expr
        (fun a ->
           if s.unsound <> Some `Drop_arg_flow then
             List.iteri (fun k p -> match List.nth_opt ats k with Some x -> flow s x p | None -> ()) a.a_params;
+          mark_scoped s ~key ~written:n.Ast.txt ~sp ~label:(scoped_label s c args)
+            ~cb:(fun k -> Option.map span_of_expr (List.nth_opt args k))
+            a.a_params;
           add_edge s.store ~why a.a_own c.own;
           add_edge s.store ~why a.a_val c.valv;
           (* Inside a recursive group the kind parameters are not final. *)
@@ -1291,7 +1479,7 @@ and builtin_flows ?(name = "") (s : st) (c : ctx) (ats : T.t list) (sp : Ast.spa
   let arg_vars = List.concat_map T.svars ats in
   if List.exists T.has_opaque ats then begin
     add_unknown s.store c.valv ~cause:"a builtin handed a value the pass does not model" sp;
-    List.iter (fun v -> add_const s.store v S.unknown) (T.svars join)
+    List.iter (fun v -> add_const s.store v S.unknown_origin) (T.svars join)
   end;
   (* A builtin calls only what it can see is a function: an arrow, or a
      declared value holding one.  A value of a type variable is opaque to it. *)
@@ -1300,6 +1488,7 @@ and builtin_flows ?(name = "") (s : st) (c : ctx) (ats : T.t list) (sp : Ast.spa
     | T.Plain | T.Opaque | T.Var _ | T.Hole { h_ty = None; _ } -> []
     | T.Hole { h_ty = Some t'; _ } -> callable t'
     | T.Arrow (a, b, v) -> (v :: callable a) @ callable b
+    | T.Con (n, _, _) when T.is_handle n -> []
     | T.Con (_, args, so) -> Option.to_list so @ List.concat_map callable args
     | T.Tuple ts -> List.concat_map callable ts
     | T.Record fs -> List.concat_map (fun (_, x) -> callable x) fs
@@ -1322,18 +1511,21 @@ and builtin_flows ?(name = "") (s : st) (c : ctx) (ats : T.t list) (sp : Ast.spa
       match t with
       | T.Arrow (a, b, v) ->
         add_unknown s.store v ~cause:"a function value a builtin returned from nowhere the pass can see" sp;
+        add_const s.store v S.unknown_origin;
         conjured a;
         conjured b
       | T.Con (n, args, so) ->
         (match so with
          | Some v when T.declared s.d n ->
-           add_unknown s.store v ~cause:"a function value a builtin returned from nowhere the pass can see" sp
+           add_unknown s.store v ~cause:"a function value a builtin returned from nowhere the pass can see" sp;
+           add_const s.store v S.unknown_origin
          | _ -> ());
         List.iter conjured args
       | T.Tuple ts -> List.iter conjured ts
       | T.Record fs -> List.iter (fun (_, x) -> conjured x) fs
       | T.Var (_, v) ->
-        add_unknown s.store v ~cause:"a function value a builtin returned from nowhere the pass can see" sp
+        add_unknown s.store v ~cause:"a function value a builtin returned from nowhere the pass can see" sp;
+        add_const s.store v S.unknown_origin
       | T.Plain | T.Opaque | T.Hole _ -> ()
     in
     conjured join
@@ -1349,6 +1541,12 @@ and call_builtin (s : st) (c : ctx) (n : Ast.name) (args : Ast.expr list) (ats :
   if List.mem n.Ast.txt dispatching_builtins then
     add_unknown s.store c.valv ~cause:"a builtin that runs callbacks registered elsewhere" sp;
   let join = if plain_at s sp then T.Plain else of_span s sp in
+  (match retaining_builtin n.Ast.txt with
+   | Some (route, named) ->
+     (* The table (or the pid) is where the value goes, not what is kept. *)
+     let kept = match route, ats with (Table | Message), _ :: rest -> rest | _ -> ats in
+     add_sink s route sp ~what:(if named then n.Ast.txt else "") kept
+   | None -> ());
   if join <> T.Plain || List.exists (fun a -> a <> T.Plain) ats then builtin_flows ~name:n.Ast.txt s c ats sp join;
   join
 
@@ -1411,8 +1609,11 @@ and state_of (s : st) (key : string) : fstate =
       List.map
         (fun (params, (body : Ast.expr)) ->
            let result = if plain_at s (span_of_expr body) then T.Plain else of_span s (span_of_expr body) in
+           let a_own = fresh s and a_val = fresh s in
+           Hashtbl.replace s.store.effects a_own ();
+           Hashtbl.replace s.store.effects a_val ();
            ( { a_params = List.map (fun _ -> T.new_hole ()) params; a_result = result;
-               a_result_ty = ty_at s (span_of_expr body); a_own = fresh s; a_val = fresh s; a_names = params;
+               a_result_ty = ty_at s (span_of_expr body); a_own; a_val; a_names = params;
                a_kind_params = [] },
              params, body ))
         bodies
@@ -1472,6 +1673,18 @@ type site = {
   s_reasons : (string * string * Ast.span) list;  (** element, why, where *)
 }
 
+(* A scoped handle that leaves its callback (design §7, §8.1 rule 1). *)
+type escape = {
+  e_label : string;  (** the handle's source name; "" when it has none *)
+  e_open : string;  (** the scoped function, as written *)
+  e_open_at : Ast.span;
+  e_route : route;
+  e_at : Ast.span;
+  e_what : string;
+  e_shape : shape;
+  e_why : (string * Ast.span) list;  (** how the handle got there, nearest the handle first *)
+}
+
 type result = {
   sites : site list;
   type_at : Ast.span -> string option;
@@ -1480,14 +1693,121 @@ type result = {
   fn_types : (string * string) list;  (** "fn f" or "let x", and its printed capture type *)
   unknown_causes : (string * int) list;  (** over everything analysed, the stdlib included *)
   unknown_at : (string * Ast.span) list;  (** each place something was not tracked, and why *)
+  escapes : escape list;  (** scoped handles that leave their callback (ocap phase 8b) *)
 }
 
 let empty : result =
-  { sites = []; type_at = (fun _ -> None); hover_type_at = (fun _ -> None); binders = []; fn_types = []; unknown_causes = []; unknown_at = [] }
+  { sites = []; type_at = (fun _ -> None); hover_type_at = (fun _ -> None); binders = []; fn_types = []; unknown_causes = []; unknown_at = [];
+    escapes = [] }
 
 let cmp_span (a : Ast.span) (b : Ast.span) =
   compare (a.Ast.file, a.Ast.start_line, a.Ast.start_col, a.Ast.end_line, a.Ast.end_col)
     (b.Ast.file, b.Ast.start_line, b.Ast.start_col, b.Ast.end_line, b.Ast.end_col)
+
+(* Every scoped handle that reaches an escape position.  [ground] is the
+   solution over the grounding edges too: a handle given to a function is
+   followed into that function's own body, so a store two calls away is seen. *)
+let find_escapes (st : store) (ground : (svar, S.t) Hashtbl.t) : escape list =
+  if st.uses = [] then []
+  else begin
+    let get v =
+      match Hashtbl.find_opt ground v with
+      | Some x -> x
+      | None -> Option.value ~default:S.empty (Hashtbl.find_opt st.consts v)
+    in
+    let user (sp : Ast.span) = sp <> Ast.dummy_span && not (Typecheck_builtins.span_is_stdlib sp) in
+    (* Why a variable holds [name]: a breadth-first search back from it to a
+       variable that has the name as a constant, collecting the reasons. *)
+    let preds : (svar, (svar * edge) list) Hashtbl.t = Hashtbl.create 1024 in
+    Hashtbl.iter
+      (fun u es ->
+         List.iter
+           (fun e -> Hashtbl.replace preds e.dst ((u, e) :: Option.value ~default:[] (Hashtbl.find_opt preds e.dst)))
+           es)
+      st.succ;
+    let holds name v = List.mem name (S.names (get v)) in
+    let path (name : S.name) (target : svar) : (string * Ast.span) list =
+      let seen = Hashtbl.create 32 in
+      let q = Queue.create () in
+      Hashtbl.replace seen target ();
+      Queue.add (target, []) q;
+      let found = ref None in
+      while !found = None && not (Queue.is_empty q) do
+        let v, acc = Queue.pop q in
+        let origin =
+          List.find_opt
+            (fun (c, _) -> List.mem name (S.names c))
+            (Option.value ~default:[] (Hashtbl.find_opt st.const_why v))
+        in
+        match origin with
+        | Some (_, r) -> found := Some ((r.why, r.rspan) :: acc)
+        | None ->
+          List.iter
+            (fun (u, e) ->
+               if (not (Hashtbl.mem seen u)) && holds name u then begin
+                 Hashtbl.replace seen u ();
+                 Queue.add (u, (match e.ewhy with Some r -> (r.why, r.rspan) :: acc | None -> acc)) q
+               end)
+            (Option.value ~default:[] (Hashtbl.find_opt preds v))
+      done;
+      List.fold_left (fun acc x -> if List.mem x acc then acc else acc @ [ x ]) [] (Option.value ~default:[] !found)
+    in
+    let use_of (n : S.name) = List.find_opt (fun u -> u.u_name = n) st.uses in
+    let out = ref [] in
+    let add (u : scoped_use) ~route ~at ~what ~shape ~(target : svar) =
+      let why = path u.u_name target in
+      (* Report in the program being checked: a position inside a library is
+         replaced by the nearest step of the path that is not. *)
+      let moved = not (user at) in
+      let at =
+        if not moved then at
+        else
+          match List.rev (List.filter (fun (_, sp) -> user sp) why) with
+          | (_, sp) :: _ -> sp
+          | [] -> if user u.u_at then u.u_at else at
+      in
+      (* What the library was handed there is not what the program wrote. *)
+      let shape = if moved then Itself else shape in
+      if not (List.exists (fun e -> e.e_route = route && e.e_at = at) !out) then
+        out :=
+          { e_label = u.u_name.S.label; e_open = u.u_open; e_open_at = u.u_at; e_route = route; e_at = at;
+            e_what = what; e_shape = shape; e_why = why }
+          :: !out
+    in
+    (* The same handle can carry two names: a function with a `scoped`
+       parameter that passes its callback on to another one.  The outer use
+       is the one the program wrote, so a name that reached another use's
+       handle is reported through that use only. *)
+    let aliased (n : S.name) (here : S.name list) : bool =
+      List.exists
+        (fun (u : scoped_use) -> u.u_name <> n && List.mem u.u_name here && List.exists (holds n) u.u_seeds)
+        st.uses
+    in
+    List.iter
+      (fun (u : scoped_use) ->
+         match List.find_opt (holds u.u_name) u.u_result with
+         | Some v when not (aliased u.u_name (S.names (get v))) ->
+           add u ~route:Returned ~at:(Option.value ~default:u.u_at u.u_cb) ~what:"" ~shape:u.u_shape ~target:v
+         | _ -> ())
+      (List.rev st.uses);
+    List.iter
+      (fun (k : sink) ->
+         let live = match k.k_cond with Some v -> S.has_unknown_origin (get v) | None -> true in
+         if live then
+           List.iter
+             (fun v ->
+                let here = S.names (get v) in
+                List.iter
+                  (fun n ->
+                     if not (aliased n here) then
+                       match use_of n with
+                       | Some u -> add u ~route:k.k_route ~at:k.k_at ~what:k.k_what ~shape:k.k_shape ~target:v
+                       | None -> ())
+                  here)
+             k.k_vars)
+      (List.rev st.sinks);
+    List.sort (fun a b -> cmp_span a.e_at b.e_at) !out
+  end
 
 let analyse ?unsound ?(all = false) (env : env) (decls : Ast.decl list) : result =
   let top = { f_depth = 0; f_root = 0; f_vars = []; f_members = [] } in
@@ -1495,6 +1815,9 @@ let analyse ?unsound ?(all = false) (env : env) (decls : Ast.decl list) : result
     { env; d = T.decls_of env; store = new_store (); states = Hashtbl.create 256; frames = []; top;
       hv = Hashtbl.create 64; known = Hashtbl.create 1024; let_keys = Hashtbl.create 64; clauses = Hashtbl.create 16; extra_bodies = Hashtbl.create 16; actors = Hashtbl.create 16;
       handler_keys = Hashtbl.create 32; sites = []; annot = Hashtbl.create 256; binders = Hashtbl.create 256; fn_iface = Hashtbl.create 256;
+      scoped = Hashtbl.copy env.scoped_params;
+      none_recorded =
+        not (Hashtbl.fold (fun k _ acc -> acc || not (Hashtbl.mem env.stdlib_fns k)) env.fn_row_bodies false);
       unsound }
   in
   scan_decls s decls;
@@ -1733,7 +2056,7 @@ let analyse ?unsound ?(all = false) (env : env) (decls : Ast.decl list) : result
   in
   { sites; type_at; hover_type_at; binders; fn_types;
     unknown_causes = List.sort compare (Hashtbl.fold (fun k n acc -> (k, n) :: acc) st.unknown_causes []);
-    unknown_at = List.rev st.unknown_at }
+    unknown_at = List.rev st.unknown_at; escapes = find_escapes st ground }
 
 (* ── `march --dump-captures` ────────────────────────────────────────────── *)
 

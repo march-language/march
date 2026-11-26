@@ -308,6 +308,9 @@ type env = {
   fn_grant_points :
     (string, string list * Typecheck_types.Ast.span)
     Hashtbl.t;
+  scoped_params : (string, int list) Hashtbl.t;
+  (** Functions with a `scoped` callback parameter (ocap phase 8b): qualified
+      name (as [fn_refs]) to the 0-based indices of those parameters. *)
   fn_bound_points : (string, fn_bound) Hashtbl.t;
   restrict_owners : (string, restrict_owner) Hashtbl.t;
   grant_owners : (string, grant_owner) Hashtbl.t;

@@ -1536,6 +1536,26 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
   | Ast.TyLinear (lin, t) ->
     TLin (lin, surface_ty env ~tvars t)
 
+  | Ast.TyScoped t ->
+    (* Desugar took every well-placed `scoped` out of the type (the callback
+       parameter of a function's own parameter), so this one is misplaced. *)
+    let rec first_span (t : Ast.ty) : Ast.span option =
+      match t with
+      | Ast.TyCon (n, _) | Ast.TyVar n -> Some n.Ast.span
+      | Ast.TyArrow (a, b) -> (match first_span a with Some s -> Some s | None -> first_span b)
+      | Ast.TyTuple ts -> List.find_map first_span ts
+      | Ast.TyRecord fs -> List.find_map (fun (_, t) -> first_span t) fs
+      | Ast.TyLinear (_, t) | Ast.TyScoped t | Ast.TyRefine (t, _, _) -> first_span t
+      | Ast.TyNatOp (_, a, _) -> first_span a
+      | Ast.TyNat _ | Ast.TyChan _ -> None
+    in
+    Err.error ~code:Err.Code.scoped_misplaced env.errors
+      ~span:(Option.value ~default:Ast.dummy_span (first_span t))
+      "`scoped` marks the handle a callback receives, so it is written only before the \
+       parameter type of a function type that is itself a function's parameter, as in \
+       `fn with_open(path : String, body : scoped File.Handle -> r)`.";
+    surface_ty env ~tvars t
+
   | Ast.TyNat n  -> TNat n
   | Ast.TyNatOp (op, a, b) ->
     TNatOp (op, surface_ty env ~tvars a, surface_ty env ~tvars b)

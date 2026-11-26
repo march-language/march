@@ -100,7 +100,7 @@ let rec of_surface st (subst : (string * TC.ty) list) (t : Ast.ty) : TC.ty =
   | Ast.TyTuple ts -> TC.TTuple (List.map (of_surface st subst) ts)
   | Ast.TyRecord fs -> TC.TRecord (List.map (fun (n, t) -> (n.Ast.txt, of_surface st subst t)) fs)
   | Ast.TyArrow (a, b) -> TC.TArrow (of_surface st subst a, of_surface st subst b)
-  | Ast.TyLinear (_, t) | Ast.TyRefine (t, _, _) -> of_surface st subst t
+  | Ast.TyLinear (_, t) | Ast.TyScoped t | Ast.TyRefine (t, _, _) -> of_surface st subst t
   | Ast.TyNat _ | Ast.TyNatOp _ | Ast.TyChan _ -> TC.TError
 
 (* The constructors of the type named [name], when the fragment can match on

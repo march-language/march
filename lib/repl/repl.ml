@@ -477,7 +477,10 @@ let repl_check_caps ~stdlib_decls ~(prior_mods : March_ast.Ast.decl list) ~src
                  d.severity = March_errors.Errors.Error && mine d)
                (March_errors.Errors.sorted errs) in
            let cap_code (d : March_errors.Errors.diagnostic) =
-             String.length d.code >= 4 && String.sub d.code 0 4 = "cap_" in
+             (String.length d.code >= 4 && String.sub d.code 0 4 = "cap_")
+             (* a scoped handle leaving its callback (ocap phase 8b): found by
+                the whole-program check, like the ceiling *)
+             || d.code = March_errors.Code.capture_escape in
            (* Only the capability errors are new here: anything else this
               declaration has, [check_decl] already reported. *)
            List.iter (fun d -> if cap_code d then March_errors.Errors.report ctx d)

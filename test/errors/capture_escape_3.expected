@@ -1,0 +1,14 @@
+exit: 1
+-- CAPABILITY ------------- errors/capture_escape_3.march
+
+`h` cannot leave the `File.with_open` callback, but it is stored in a table. [capture_escape]
+
+6 |     let _ = File.with_open("notes.txt", fn h -> Vault.put(open, "notes", h))
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `h` is a scoped handle: it is only good until the `File.with_open` callback returns (line 6).
+    How `h` gets there: line 6: calls `Vault.put`.
+    Read what you need inside the callback and return the data instead.
+    run `march --explain capture_escape`
+
+

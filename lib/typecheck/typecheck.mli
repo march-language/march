@@ -353,6 +353,7 @@ type env = {
   fn_row_bodies : (string, (string list * Ast.expr) list) Hashtbl.t;
   role_grants : (string * string, string list * Ast.span) Hashtbl.t;
   fn_grant_points : (string, string list * Ast.span) Hashtbl.t;
+  scoped_params : (string, int list) Hashtbl.t;
   fn_bound_points : (string, fn_bound) Hashtbl.t;
   restrict_owners : (string, restrict_owner) Hashtbl.t;
   grant_owners : (string, grant_owner) Hashtbl.t;
@@ -459,4 +460,5 @@ val check_letstar_repl : env -> Ast.pattern -> Ast.expr -> env
     capture set.  [decls] is the whole checked program (stdlib included).
     Adds no diagnostic.  See [Capture]. *)
 val capture_analyse :
-  ?unsound:[ `Drop_callee_effect | `Drop_arg_flow | `Narrow_values ] -> ?all:bool -> env -> Ast.decl list -> Capture.result
+  ?unsound:[ `Drop_callee_effect | `Drop_arg_flow | `Narrow_values | `Escape ] ->
+  ?all:bool -> env -> Ast.decl list -> Capture.result

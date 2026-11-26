@@ -1,0 +1,15 @@
+-- A record that holds a scoped handle, returned from the callback.
+mod EscapeRecord do
+  needs IO.FileRead, IO.Console
+
+  fn main() do
+    match File.with_open("data.txt", fn h -> { handle: h, lines: 2 }) do
+      Ok(Ok(r)) ->
+        match File.read_line(r.handle) do
+          Err(File.Closed) -> println("used after close: Err(Closed)")
+          _ -> println("the handle still worked")
+        end
+      _ -> println("open failed")
+    end
+  end
+end

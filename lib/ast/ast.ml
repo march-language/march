@@ -27,6 +27,17 @@ type linearity =
                       before the program runs ([March_desugar.Ghost]).  Never
                       the qualifier of a type ([TyLinear]). *)
 
+(** The 0-based indices of a function's parameters whose callback type has a
+    `scoped` parameter, from the attributes desugar writes ("scoped_param:<i>"). *)
+let scoped_params_of_attrs (attrs : string list) : int list =
+  let pre = "scoped_param:" in
+  let n = String.length pre in
+  List.filter_map
+    (fun a ->
+      if String.length a > n && String.sub a 0 n = pre then int_of_string_opt (String.sub a n (String.length a - n))
+      else None)
+    attrs
+
 (** Visibility qualifiers for module system. *)
 type visibility =
   | Private       (** Only visible within the defining module (default) *)
@@ -179,6 +190,13 @@ and ty =
   | TyTuple of ty list               (** Tuple type: (a, b, c) *)
   | TyRecord of (name * ty) list     (** Record type: { x : Int, y : Float } *)
   | TyLinear of linearity * ty       (** Linearity-annotated type *)
+  | TyScoped of ty
+    (** [scoped T], the parameter of a callback type in a function signature
+        (`f : scoped File.Handle -> r`): the callback is handed a handle that
+        is closed when it returns (ocap phase 8b).  Desugar removes it from a
+        function parameter's arrow and records the attribute
+        ["scoped_param:<index>"] on the function; one left anywhere else is
+        the typechecker's [scoped_misplaced] error. *)
   | TyNat of int                     (** Type-level natural literal: 3 *)
   | TyNatOp of nat_op * ty * ty      (** Type-level arithmetic: n + m, n * m *)
   | TyChan of name * name            (** Session-typed channel endpoint: Chan(Role, Protocol) *)
@@ -617,6 +635,7 @@ let rec show_ty = function
   | TyRecord flds ->
     let fs = List.map (fun (n, t) -> Printf.sprintf "%s : %s" n.txt (show_ty t)) flds in
     Printf.sprintf "{ %s }" (String.concat ", " fs)
+  | TyScoped t -> "scoped " ^ show_ty t
   | TyLinear (Linear, t) -> "linear " ^ show_ty t
   | TyLinear (Affine, t) -> "affine " ^ show_ty t
   | TyLinear ((Unrestricted | Ghost), t) -> show_ty t
@@ -732,7 +751,7 @@ let rec inspect_unprintable_ty (t : ty) : bool =
   | TyArrow _ | TyVar _ | TyChan _ -> true
   | TyCon (_, args) | TyTuple args -> List.exists inspect_unprintable_ty args
   | TyRecord fs -> List.exists (fun (_, t) -> inspect_unprintable_ty t) fs
-  | TyLinear (_, t) | TyRefine (t, _, _) -> inspect_unprintable_ty t
+  | TyLinear (_, t) | TyScoped t | TyRefine (t, _, _) -> inspect_unprintable_ty t
   | TyNat _ | TyNatOp _ -> false
 
 (** The text such a field renders as; [None] means it prints normally. *)

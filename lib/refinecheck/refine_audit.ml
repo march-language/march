@@ -188,7 +188,7 @@ let rec walk_ty (sites : site list ref) ~(origin : position) ~(origin_ty : A.ty)
      extractor strips it — [Refine_scope.unlinear], plan phase 4), so it does
      not deepen the nesting: `linear {Int | _ > 0}` is an outermost
      refinement, enforced exactly like `{Int | _ > 0}`. *)
-  | A.TyLinear (_, t) -> walk_ty sites ~origin ~origin_ty ~origin_fn ~fn_origin pos depth t
+  | A.TyLinear (_, t) | A.TyScoped t -> walk_ty sites ~origin ~origin_ty ~origin_fn ~fn_origin pos depth t
   | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> ()
 
 (* Entry point for a declared type: [pos] IS the origin here, by
@@ -532,7 +532,7 @@ let rec ty_holds_pred_at (sp : A.span) (t : A.ty) : bool =
   | A.TyCon (_, ts) | A.TyTuple ts -> List.exists (ty_holds_pred_at sp) ts
   | A.TyArrow (a, b) -> ty_holds_pred_at sp a || ty_holds_pred_at sp b
   | A.TyRecord fs -> List.exists (fun (_, t) -> ty_holds_pred_at sp t) fs
-  | A.TyLinear (_, t) -> ty_holds_pred_at sp t
+  | A.TyLinear (_, t) | A.TyScoped t -> ty_holds_pred_at sp t
   | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> false
 
 (* The declared type the [Type_arg] rule asks [elem_refinement] about: the

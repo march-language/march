@@ -361,7 +361,7 @@ let rec ty_vars acc (t : Ast.ty) =
   | Ast.TyCon (_, args) | Ast.TyTuple args -> List.fold_left ty_vars acc args
   | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) -> ty_vars (ty_vars acc a) b
   | Ast.TyRecord flds -> List.fold_left (fun acc (_, t) -> ty_vars acc t) acc flds
-  | Ast.TyLinear (_, t) | Ast.TyRefine (t, _, _) -> ty_vars acc t
+  | Ast.TyLinear (_, t) | Ast.TyScoped t | Ast.TyRefine (t, _, _) -> ty_vars acc t
   | Ast.TyNat _ | Ast.TyChan _ -> acc
 
 let rec map_ty_vars f (t : Ast.ty) : Ast.ty =
@@ -374,6 +374,7 @@ let rec map_ty_vars f (t : Ast.ty) : Ast.ty =
   | Ast.TyNatOp (op, a, b) -> Ast.TyNatOp (op, go a, go b)
   | Ast.TyRecord flds -> Ast.TyRecord (List.map (fun (n, t) -> (n, go t)) flds)
   | Ast.TyLinear (l, t) -> Ast.TyLinear (l, go t)
+  | Ast.TyScoped t -> Ast.TyScoped (go t)
   | Ast.TyRefine (t, b, p) -> Ast.TyRefine (go t, b, p)
   | Ast.TyNat _ | Ast.TyChan _ -> t
 

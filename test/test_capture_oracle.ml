@@ -235,6 +235,9 @@ let test_sweep_stdlib () =
       output_string oc "mod SweepHello do\n  needs IO.Console\n  fn main() do println(\"hello\") end\nend\n");
   let rc, text, pass = forced ~mode:"all" file in
   if rc <> 0 || crashed text then Alcotest.failf "the pass failed over the stdlib (exit %d):\n%s" rc text;
+  (* ocap phase 8b: no stdlib function lets a scoped handle out. *)
+  if Test_captures.contains text "[capture-escape]" then
+    Alcotest.failf "a scoped handle leaves its callback inside the stdlib:\n%s" text;
   Printf.printf "capture pass over every stdlib function: %.3fs\n%!" pass;
   Alcotest.(check bool) "the pass ran" true (pass >= 0.0);
   Alcotest.(check bool) "within 10 seconds" true (pass < 10.0)
@@ -268,6 +271,40 @@ let test_sweep_programs () =
     (fst !worst) (snd !worst);
   Alcotest.(check bool) "programs were swept" true (!n > 50)
 
+(* ── escape pairs (ocap phase 8b) ───────────────────────────────────────────
+
+   Each program in test/captures/escape lets a scoped handle out of its
+   callback and then uses it.  The checker must reject it, and with the check
+   switched off (MARCH_CAPTURE_ESCAPE=off, for this test only) the same
+   program must run and find the handle closed: every rejection here is a
+   real use of a closed handle, not a guess. *)
+
+let run_in (dir : string) ?(env = "") (flags : string) (name : string) : int * string =
+  let out = Filename.concat dir (name ^ ".out") in
+  let rc =
+    Sys.command
+      (Printf.sprintf "cd %s && HOME=%s %s %s %s %s > %s 2>&1" (Filename.quote dir)
+         (Filename.quote (Filename.concat (Lazy.force Test_captures.work_dir) "home"))
+         env (Filename.quote compiler_exe) flags (Filename.quote name) (Filename.quote out))
+  in
+  (rc, read_file out)
+
+let escape_scratch =
+  lazy
+    (let work = Lazy.force Test_captures.work_dir in
+     let scratch = Filename.concat work "escape_pairs" in
+     ignore (Sys.command (Printf.sprintf "cp -R %s %s" (Filename.quote (find_dir "captures/escape")) (Filename.quote scratch)));
+     scratch)
+
+let test_escape_pair (name : string) () =
+  let dir = Lazy.force escape_scratch in
+  let rc, text = run_in dir "--check" name in
+  Alcotest.(check int) ("the checker rejects it:\n" ^ text) 1 rc;
+  Alcotest.(check bool) ("with capture_escape:\n" ^ text) true (Test_captures.contains text "[capture_escape]");
+  let rc, text = run_in dir ~env:"MARCH_CAPTURE_ESCAPE=off" "" name in
+  Alcotest.(check int) ("with the check off it runs:\n" ^ text) 0 rc;
+  Alcotest.(check string) "and finds the handle closed" "used after close: Err(Closed)\n" text
+
 let tests =
   let fixtures = march_files (find_dir "captures/oracle") in
   [ ( "capture_oracle",
@@ -279,6 +316,10 @@ let tests =
             (test_red "drop_arg_flow" "capture_laundered.march");
           Alcotest.test_case "red: arriving values narrowed by a restrict" `Quick
             (test_red "narrow_values" "capture_restrict_mixed.march") ] );
+    ( "escape_pairs",
+      List.map
+        (fun f -> Alcotest.test_case f `Quick (test_escape_pair f))
+        (march_files (find_dir "captures/escape")) );
     ( "capture_sweep",
       [ Alcotest.test_case "every stdlib function" `Quick test_sweep_stdlib;
         Alcotest.test_case "bench and examples" `Slow test_sweep_programs ] ) ]

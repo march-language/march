@@ -104,7 +104,7 @@ let rec has_refine (t : A.ty) =
   | A.TyCon (_, args) | A.TyTuple args -> List.exists has_refine args
   | A.TyArrow (a, b) | A.TyNatOp (_, a, b) -> has_refine a || has_refine b
   | A.TyRecord fs -> List.exists (fun (_, t) -> has_refine t) fs
-  | A.TyLinear (_, t) -> has_refine t
+  | A.TyLinear (_, t) | A.TyScoped t -> has_refine t
   | A.TyVar _ | A.TyNat _ | A.TyChan _ -> false
 
 (* Every name a binder anywhere in [e] introduces. *)
@@ -192,7 +192,7 @@ let rec ast_sort ~(adts : string -> bool) (t : A.ty) : string option =
   | A.TyArrow _ -> Some "a function type"
   | A.TyNat _ | A.TyNatOp _ -> Some "a type-level number"
   | A.TyChan _ -> Some "a channel"
-  | A.TyRefine _ | A.TyLinear _ -> None
+  | A.TyRefine _ | A.TyLinear _ | A.TyScoped _ -> None
 
 let rec ty_sort ~(adts : string -> bool) (t : T.ty) : string option =
   match T.repr t with
@@ -3047,7 +3047,7 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
       | A.TyCon (_, args) | A.TyTuple args -> List.iter ty args
       | A.TyArrow (a, b) | A.TyNatOp (_, a, b) -> ty a; ty b
       | A.TyRecord fs -> List.iter (fun (_, t) -> ty t) fs
-      | A.TyLinear (_, t) -> ty t
+      | A.TyLinear (_, t) | A.TyScoped t -> ty t
       | A.TyVar _ | A.TyNat _ | A.TyChan _ -> ()
     in
     List.iter (Option.iter ty) u.RT.u_param_tys;

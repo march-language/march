@@ -1,0 +1,13 @@
+exit: 1
+-- CAPABILITY ------------- errors/capture_escape_6.march
+
+`h` cannot leave the `File.with_open` callback, but it is passed to code the compiler cannot follow. [capture_escape]
+
+10 |             Some(count) -> count(h)
+                                ^^^^^^^^
+
+    `h` is a scoped handle: it is only good until the `File.with_open` callback returns (line 6).
+    Read what you need inside the callback and return the data instead.
+    run `march --explain capture_escape`
+
+

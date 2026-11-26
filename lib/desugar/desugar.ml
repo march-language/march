@@ -825,7 +825,7 @@ let rec ty_mentions_var (x : string) (t : ty) : bool =
   | TyCon (_, ts) | TyTuple ts -> List.exists (ty_mentions_var x) ts
   | TyArrow (a, b) | TyNatOp (_, a, b) -> ty_mentions_var x a || ty_mentions_var x b
   | TyRecord fs -> List.exists (fun (_, t) -> ty_mentions_var x t) fs
-  | TyLinear (_, t) | TyRefine (t, _, _) -> ty_mentions_var x t
+  | TyLinear (_, t) | TyScoped t | TyRefine (t, _, _) -> ty_mentions_var x t
   | TyNat _ | TyChan _ -> false
 
 let rec collect_aliases (prefix : string) (decls : decl list) =
@@ -875,6 +875,7 @@ let rec subst_tyvars (env : (string * ty) list) (t : ty) : ty =
   | TyTuple ts -> TyTuple (List.map go ts)
   | TyRecord fs -> TyRecord (List.map (fun (n, t) -> (n, go t)) fs)
   | TyLinear (l, t) -> TyLinear (l, go t)
+  | TyScoped t -> TyScoped (go t)
   | TyNatOp (op, a, b) -> TyNatOp (op, go a, go b)
   | TyRefine (b, v, e) -> TyRefine (go b, v, e)
   | TyNat _ | TyChan _ -> t
@@ -1016,6 +1017,7 @@ let rec desugar_ty (t : ty) : ty =
   | TyTuple ts         -> TyTuple (List.map desugar_ty ts)
   | TyRecord fs        -> TyRecord (List.map (fun (n, t) -> (n, desugar_ty t)) fs)
   | TyLinear (l, t)    -> TyLinear (l, desugar_ty t)
+  | TyScoped u         -> TyScoped (desugar_ty u)
   | TyNat _            -> t
   | TyNatOp (op, a, b) -> TyNatOp (op, desugar_ty a, desugar_ty b)
   | TyChan _           -> t
@@ -1385,15 +1387,32 @@ let rec desugar_expr (e : expr) : expr =
     branches below (which only ever rewrite bodies/guards) don't need their
     own copy of this. *)
 let desugar_fn_def_tys (def : fn_def) : fn_def =
-  let desugar_fn_param = function
-    | FPNamed p        -> FPNamed { p with param_ty = Option.map desugar_ty p.param_ty }
-    | FPDefault (p, e) -> FPDefault ({ p with param_ty = Option.map desugar_ty p.param_ty }, e)
+  (* `f : scoped H -> r` (ocap phase 8b): the marker leaves the type here and
+     becomes the attribute "scoped_param:<index>" ([Ast.scoped_params_of_attrs]),
+     so no later pass sees [TyScoped] in a well-formed program.  One written
+     anywhere else stays, and the typechecker reports it. *)
+  let scoped = ref [] in
+  let param_ty i (t : ty option) : ty option =
+    let t = match t with
+      | Some (TyArrow (TyScoped d, r)) ->
+        if not (List.mem i !scoped) then scoped := i :: !scoped;
+        Some (TyArrow (d, r))
+      | t -> t
+    in
+    Option.map desugar_ty t
+  in
+  let desugar_fn_param i = function
+    | FPNamed p        -> FPNamed { p with param_ty = param_ty i p.param_ty }
+    | FPDefault (p, e) -> FPDefault ({ p with param_ty = param_ty i p.param_ty }, e)
     | FPPat _ as p     -> p
   in
+  let clauses =
+    List.map (fun c -> { c with fc_params = List.mapi desugar_fn_param c.fc_params }) def.fn_clauses in
   { def with
     fn_ret_ty  = Option.map desugar_ty def.fn_ret_ty;
-    fn_clauses = List.map (fun c -> { c with fc_params = List.map desugar_fn_param c.fc_params })
-        def.fn_clauses }
+    fn_attrs   = def.fn_attrs
+                 @ List.map (fun i -> Printf.sprintf "scoped_param:%d" i) (List.sort compare !scoped);
+    fn_clauses = clauses }
 
 let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
   let def = desugar_fn_def_tys def in

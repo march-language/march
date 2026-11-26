@@ -1,0 +1,17 @@
+-- The `scoped` marker in a callback type (ocap phase 8b), and `scoped` as an
+-- ordinary name everywhere else.
+mod ScopedSyntax do
+  needs IO.FileRead
+
+  fn each_line(path : String, body : scoped File.Handle -> a) : Result(Result(a, File.FileError), CapError) do
+    File.with_open(path, body)
+  end
+
+  fn scoped(scoped : Bool) : Bool do scoped end
+
+  fn main() do
+    let scoped = scoped(true)
+    let _ = each_line("notes.txt", fn h -> File.read_line(h))
+    ()
+  end
+end

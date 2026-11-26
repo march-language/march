@@ -1748,7 +1748,7 @@ let rec field_ty_text (t : A.ty) : string =
   | A.TyVar n -> n.A.txt
   | A.TyTuple ts -> Printf.sprintf "(%s)" (String.concat ", " (List.map field_ty_text ts))
   | A.TyArrow (a, b) -> Printf.sprintf "%s -> %s" (field_ty_text a) (field_ty_text b)
-  | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> field_ty_text b
+  | A.TyRefine (b, _, _) | A.TyLinear (_, b) | A.TyScoped b -> field_ty_text b
   | A.TyRecord _ -> "a record"
   | A.TyChan _ -> "a channel"
   | A.TyNat n -> string_of_int n
@@ -2653,7 +2653,7 @@ let rec register_field_sorts_once ?(path : string = "") (decls : A.decl list) : 
           | A.TyCon (_, ts) | A.TyTuple ts -> List.fold_left tvars acc ts
           | A.TyArrow (a, b) | A.TyNatOp (_, a, b) -> tvars (tvars acc a) b
           | A.TyRecord fs -> List.fold_left (fun acc (_, t) -> tvars acc t) acc fs
-          | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> tvars acc b
+          | A.TyRefine (b, _, _) | A.TyLinear (_, b) | A.TyScoped b -> tvars acc b
           | A.TyNat _ | A.TyChan _ -> acc
         in
         (* [Within] (phase E): [c] is a registered container ALREADY
@@ -5000,7 +5000,7 @@ let rec ty_has_refinement (t : A.ty) : bool =
   | A.TyArrow (a, b) -> ty_has_refinement a || ty_has_refinement b
   | A.TyTuple ts -> List.exists ty_has_refinement ts
   | A.TyRecord fs -> List.exists (fun (_, t) -> ty_has_refinement t) fs
-  | A.TyLinear (_, t) -> ty_has_refinement t
+  | A.TyLinear (_, t) | A.TyScoped t -> ty_has_refinement t
   | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> false
 
 (* ── M-b: the @[measure] soundness gate ─────────────────────────────────────

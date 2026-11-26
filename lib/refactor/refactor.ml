@@ -135,7 +135,7 @@ let iter_names (f : site -> Ast.name -> unit) (m : Ast.module_) : unit =
     | Ast.TyArrow (a, b) -> ty a; ty b
     | Ast.TyTuple ts -> List.iter ty ts
     | Ast.TyRecord fs -> List.iter (fun (n, t) -> f SField n; ty t) fs
-    | Ast.TyLinear (_, t) -> ty t
+    | Ast.TyLinear (_, t) | Ast.TyScoped t -> ty t
     | Ast.TyNatOp (_, a, b) -> ty a; ty b
     | Ast.TyChan (r, p) -> f SType r; f SType p
     | Ast.TyNat _ -> ()
@@ -653,7 +653,7 @@ let rec surface_ty (t : Ast.ty) : string =
   | Ast.TyRecord fs     ->
     "{ " ^ String.concat ", "
              (List.map (fun (n, t) -> n.Ast.txt ^ ": " ^ surface_ty t) fs) ^ " }"
-  | Ast.TyLinear (_, t) -> "linear " ^ surface_ty t
+  | Ast.TyLinear (_, t) | Ast.TyScoped t -> "linear " ^ surface_ty t
   | Ast.TyNat n         -> string_of_int n
   | Ast.TyNatOp (op, a, b) ->
     surface_ty a ^ (match op with Ast.NatAdd -> " + " | Ast.NatMul -> " * ") ^ surface_ty b

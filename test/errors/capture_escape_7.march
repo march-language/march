@@ -1,0 +1,14 @@
+mod Main do
+  needs IO.NetConnect
+
+  type Session = Session(Socket, String)
+
+  pfn session(s : Socket, user : String) : Session do
+    Session(s, user)
+  end
+
+  fn main() do
+    let live = Socket.with_connection("example.com", 80, fn s -> Ok(session(s, "ada")))
+    ()
+  end
+end

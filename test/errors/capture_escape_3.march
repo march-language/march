@@ -1,0 +1,9 @@
+mod Main do
+  needs IO.FileRead, IO.Mut
+
+  fn main() do
+    let open : Vault(File.Handle) = Authority.must(Vault.new("open_files"))
+    let _ = File.with_open("notes.txt", fn h -> Vault.put(open, "notes", h))
+    ()
+  end
+end

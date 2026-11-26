@@ -516,7 +516,7 @@ let rec surface_ty (t : Ast.ty) : string =
   | Ast.TyRecord fs     ->
     "{ " ^ String.concat ", "
              (List.map (fun (n, t) -> n.Ast.txt ^ ": " ^ surface_ty t) fs) ^ " }"
-  | Ast.TyLinear (_, t) -> "linear " ^ surface_ty t
+  | Ast.TyLinear (_, t) | Ast.TyScoped t -> "linear " ^ surface_ty t
   | Ast.TyNat n         -> string_of_int n
   | Ast.TyNatOp (op, a, b) ->
     surface_ty a ^ (match op with Ast.NatAdd -> " + " | Ast.NatMul -> " * ")

@@ -71,7 +71,7 @@ let rec check_ty errors ~where (t : ty) : unit =
   | TyCon (_, ts) | TyTuple ts -> List.iter (check_ty errors ~where) ts
   | TyArrow (a, b) -> check_ty errors ~where a; check_ty errors ~where b
   | TyRecord fs -> List.iter (fun (_, t) -> check_ty errors ~where t) fs
-  | TyLinear (_, t) -> check_ty errors ~where t
+  | TyLinear (_, t) | TyScoped t -> check_ty errors ~where t
   | TyVar _ | TyNat _ | TyNatOp _ | TyChan _ -> ()
 
 let param_ty errors ~where (p : param) = Option.iter (check_ty errors ~where) p.param_ty
