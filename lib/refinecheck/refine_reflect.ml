@@ -2861,6 +2861,23 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
       Hashtbl.replace file_cache f t;
       t
   in
+  (* Line -> offset of its first byte, built once per file: the three span
+     readers below each rescanned the text from byte 0 for every unit.  A line
+     <= 1 starts at 0; a line past the last newline has no offset. *)
+  let line_tables : (string, int array) Hashtbl.t = Hashtbl.create 16 in
+  let line_start (f : string) (text : string) (line : int) : int option =
+    let tbl =
+      match Hashtbl.find_opt line_tables f with
+      | Some t -> t
+      | None ->
+        let acc = ref [ 0 ] in
+        String.iteri (fun i c -> if c = '\n' then acc := (i + 1) :: !acc) text;
+        let t = Array.of_list (List.rev !acc) in
+        Hashtbl.replace line_tables f t;
+        t
+    in
+    if line <= 1 then Some 0 else if line - 1 < Array.length tbl then Some tbl.(line - 1) else None
+  in
   (* The source text of a unit: from its name to the end of its last clause
      body.  Position-free, so an edit elsewhere in the file (a line inserted
      above) does not change it. *)
@@ -2876,10 +2893,7 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
     match file_text sp.A.file with
     | None -> None
     | Some text ->
-      let offset (line, col) =
-        let rec go i l = if l >= line then Some i else match String.index_from_opt text i '\n' with Some j -> go (j + 1) (l + 1) | None -> None in
-        Option.map (fun i -> i + col) (go 0 1)
-      in
+      let offset (line, col) = Option.map (fun i -> i + col) (line_start sp.A.file text line) in
       (match offset (sp.A.start_line, sp.A.start_col), offset stop with
        | Some a, Some b when a >= 0 && b >= a && b <= String.length text -> Some (String.sub text a (b - a))
        | _ -> None)
@@ -2947,10 +2961,7 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
     match file_text sp.A.file with
     | None -> ""
     | Some text ->
-      let offset (line, col) =
-        let rec go i l = if l >= line then Some i else match String.index_from_opt text i '\n' with Some j -> go (j + 1) (l + 1) | None -> None in
-        Option.map (fun i -> i + col) (go 0 1)
-      in
+      let offset (line, col) = Option.map (fun i -> i + col) (line_start sp.A.file text line) in
       (match offset (sp.A.start_line, sp.A.start_col), offset (sp.A.end_line, sp.A.end_col) with
        | Some a, Some b when a >= 0 && b >= a && b <= String.length text -> String.sub text a (b - a)
        | _ -> "")
@@ -3006,10 +3017,7 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
     match file_text sp.A.file with
     | None -> ""
     | Some text ->
-      let offset (line, col) =
-        let rec go i l = if l >= line then Some i else match String.index_from_opt text i '\n' with Some j -> go (j + 1) (l + 1) | None -> None in
-        Option.map (fun i -> i + col) (go 0 1)
-      in
+      let offset (line, col) = Option.map (fun i -> i + col) (line_start sp.A.file text line) in
       (match offset (sp.A.start_line, sp.A.start_col), offset stop with
        | Some a, Some b when a >= 0 && b >= a && b <= String.length text -> String.sub text a (b - a)
        | _ -> "")

@@ -1,0 +1,20 @@
+tuple <   true
+tuple <=  false
+tuple >   true
+tuple >=  true
+record <  true
+record <= false
+record >  true
+record >= true
+adt <     true
+adt <=    false
+adt >     true
+adt >=    false
+generic   true false true false
+3 of hearts
+<3 of spades>
+<clubs>
+[1, 2, 3]
+(1, true)
+42
+7

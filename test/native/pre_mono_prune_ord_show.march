@@ -1,0 +1,72 @@
+-- The pre-mono prune (lib/tir/dce_pre_mono.ml) drops every function the
+-- program's roots cannot reach before Mono runs. Mono mints calls by name that
+-- no body spells out: an interface method resolves to an impl, and `<` & co.
+-- on a non-scalar go through the prelude's `__ord_lt` helpers, which call
+-- `compare`. This program reaches each of those only that way, plus a function
+-- used only as a value and a local named like a top-level function.
+mod Main do
+  needs IO.Console
+
+  type Suit = Clubs | Hearts | Spades
+  derive Eq, Ord for Suit
+
+  type Card = { rank : Int, suit : Suit }
+  derive Eq, Ord for Card
+
+  -- Hand-written Show: reached only through `to_string`.
+  impl Show(Suit) do
+    fn show(s) do
+      match s do
+        | Clubs -> "clubs"
+        | Hearts -> "hearts"
+        | Spades -> "spades"
+      end
+    end
+  end
+
+  impl Show(Card) do
+    fn show(c) do int_to_string(c.rank) ++ " of " ++ to_string(c.suit) end
+  end
+
+  -- Only Mono learns the concrete type here.
+  fn lt(a, b) when Ord(a) do a < b end
+  fn le(a, b) when Ord(a) do a <= b end
+  fn gt(a, b) when Ord(a) do a > b end
+  fn ge(a, b) when Ord(a) do a >= b end
+  fn render(x) when Show(x) do "<" ++ to_string(x) ++ ">" end
+
+  -- Reached only as a value.
+  fn double(n : Int) : Int do n * 2 end
+  fn apply(f, n : Int) : Int do f(n) end
+
+  -- Never called; the prune removes it.
+  fn unused(n : Int) : Int do n + 1 end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let a : Card = { rank: 3, suit: Hearts }
+    let b : Card = { rank: 3, suit: Spades }
+    println("tuple <   " ++ bool_to_string((1, "a") < (1, "b")))
+    println("tuple <=  " ++ bool_to_string((2, 1) <= (1, 9)))
+    println("tuple >   " ++ bool_to_string((1, 2, 3) > (1, 2, 2)))
+    println("tuple >=  " ++ bool_to_string((1, 2) >= (1, 2)))
+    println("record <  " ++ bool_to_string(a < b))
+    println("record <= " ++ bool_to_string(b <= a))
+    println("record >  " ++ bool_to_string(b > a))
+    println("record >= " ++ bool_to_string(a >= a))
+    println("adt <     " ++ bool_to_string(Clubs < Spades))
+    println("adt <=    " ++ bool_to_string(Spades <= Hearts))
+    println("adt >     " ++ bool_to_string(Hearts > Clubs))
+    println("adt >=    " ++ bool_to_string(Clubs >= Hearts))
+    println("generic   " ++ bool_to_string(lt(a, b)) ++ " " ++ bool_to_string(le(Spades, Clubs))
+            ++ " " ++ bool_to_string(gt((2, 1), (1, 2))) ++ " " ++ bool_to_string(ge(a, b)))
+    println(to_string(a))
+    println(render(b))
+    println(render(Clubs))
+    println(to_string([1, 2, 3]))
+    println(to_string((1, true)))
+    println(int_to_string(apply(double, 21)))
+    let unused = 7
+    println(int_to_string(unused))
+    ()
+  end
+end

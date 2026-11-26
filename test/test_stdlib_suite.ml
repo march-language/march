@@ -9508,8 +9508,8 @@ let test_registry_register_lookup () =
   let exports : March_modules.Module_registry.module_exports = {
     me_name = "TestMod";
     me_entries = [
-      { ex_name = "foo"; ex_kind = ExFn; ex_public = true };
-      { ex_name = "Bar"; ex_kind = ExCtor ("MyType", 1); ex_public = true };
+      { ex_name = "foo"; ex_kind = ExFn; ex_public = true; ex_fn = None };
+      { ex_name = "Bar"; ex_kind = ExCtor ("MyType", 1); ex_public = true; ex_fn = None };
     ];
   } in
   March_modules.Module_registry.register "TestMod" exports;
@@ -9776,9 +9776,9 @@ let test_complete_qualified_from_registry () =
   March_modules.Module_registry.reset ();
   March_modules.Module_registry.register "TestMod"
     { me_name = "TestMod"; me_entries = [
-        { ex_name = "alpha"; ex_kind = ExFn; ex_public = true };
-        { ex_name = "beta"; ex_kind = ExFn; ex_public = true };
-        { ex_name = "secret"; ex_kind = ExFn; ex_public = false };
+        { ex_name = "alpha"; ex_kind = ExFn; ex_public = true; ex_fn = None };
+        { ex_name = "beta"; ex_kind = ExFn; ex_public = true; ex_fn = None };
+        { ex_name = "secret"; ex_kind = ExFn; ex_public = false; ex_fn = None };
       ] };
   let results = March_repl.Complete.complete "TestMod.a" [] in
   Alcotest.(check bool) "TestMod.alpha suggested" true (List.mem "TestMod.alpha" results);

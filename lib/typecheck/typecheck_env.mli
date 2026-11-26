@@ -389,6 +389,12 @@ val bare_ctors_of_type :
     ["." ^ name].  Same index as [bare_ctors_of_type]. *)
 val ctors_name_a_variant : ctor_info list StrMap.t -> string -> bool
 val split_qualified : string -> (string * string) option
+
+(** The declared scheme of a function read from the registry, built from its
+    annotations; [None] when they do not give one.  Set by [Typecheck]. *)
+val registry_fn_scheme :
+  (March_ast.Ast.fn_def -> Typecheck_types.scheme option) ref
+
 val load_module_into_env :
   string -> March_modules.Module_registry.module_exports -> env -> env
 val resolve_qualified_var :

@@ -246,7 +246,14 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
               in
               let own_key = match type_name with
                 | Some n -> Lower_state.own_module_ctor_key env n tag
-                | None -> None
+                | None ->
+                  (* No type recorded for this pattern: inside a module that
+                     declares the constructor on a type whose same-named twin
+                     gives it other fields, it is that module's own. *)
+                  (match Lower_state.ctor_shape_conflict_type
+                           env.Lower_state.mod_prefix tag with
+                   | Some n -> Lower_state.own_module_ctor_key env n tag
+                   | None -> None)
               in
               (match own_key, ty with
                | Some key, _ -> key

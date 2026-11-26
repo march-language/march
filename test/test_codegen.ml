@@ -2122,12 +2122,12 @@ let test_registry_record_field_bare_sibling_type_resolves () =
     me_name = "Widgets";
     me_entries = [
       (* A variant sibling type, referenced BARE by the record field below. *)
-      { ex_name = "Scope"; ex_kind = ExType 0; ex_public = true };
+      { ex_name = "Scope"; ex_kind = ExType 0; ex_public = true; ex_fn = None };
       (* The record whose stored field type names `Scope` by its bare name —
          exactly how the compiler serialises a same-module sibling reference. *)
       { ex_name = "Constraint";
         ex_kind = ExRecord (0, [("scope", bare_ty "Scope")]);
-        ex_public = true };
+        ex_public = true; ex_fn = None };
     ];
   };
   (* A DIFFERENT module references the qualified record type; expanding it must
@@ -22798,6 +22798,7 @@ let codegen_suites =
   @ Test_collision_set.suites (* Task 0: same-short-name type collision-set computation *)
   @ Test_ctor_tags.suites (* Task 1: globally-unique ctor tags for colliding types *)
   @ Test_trmc.suites (* TRMC Phase 1: tail-recursion-modulo-cons eligibility *)
+  @ Test_dce_pre_mono.suites (* the pre-mono prune and Mono's pruned-name tripwire *)
   @ prune_roots_tests
   @ Test_provenance.suites (* A2: provenance side table + --debug-info *)
   @ Test_kind.suites (* type kinds: the per-type table (specs/2026-09-10-type-kinds-design.md) *)

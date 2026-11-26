@@ -23,7 +23,7 @@
 (library
  (name march_test_codegen)
  (wrapped false)
- (modules test_codegen test_ir_verify test_collision_set test_ctor_tags test_trmc test_kind test_provenance test_rc_trace)
+ (modules test_codegen test_ir_verify test_collision_set test_ctor_tags test_trmc test_kind test_provenance test_rc_trace test_dce_pre_mono)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint march_driver alcotest str unix threads.posix))
 
 (library
@@ -34,7 +34,7 @@
  ; and which CI's `test` job therefore executes on both macOS and Linux.
  ; Its predecessor, test/test_http_native.sh, was wired into nothing at all,
  ; which is how a total outage of the compiled HTTP server went unnoticed.
- (modules test_stdlib_suite test_http_native test_https_native test_socket_timeout test_tls_groups)
+ (modules test_stdlib_suite test_http_native test_https_native test_socket_timeout test_tls_groups test_tls_sigpipe)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
@@ -2160,6 +2160,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/tuple_ord.expected native_tuple_ord.out)))
+
+; The pre-mono prune (lib/tir/dce_pre_mono.ml) must keep what Mono resolves
+; by name: interface impls behind `to_string`/`compare`, the prelude's
+; `__ord_lt` helpers, a fn used only as a value.
+(rule
+ (targets native_pre_mono_prune_ord_show native_pre_mono_prune_ord_show.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/pre_mono_prune_ord_show.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_pre_mono_prune_ord_show native/pre_mono_prune_ord_show.march)
+   (with-stdout-to native_pre_mono_prune_ord_show.out (system "./native_pre_mono_prune_ord_show")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/pre_mono_prune_ord_show.expected native_pre_mono_prune_ord_show.out)))
+
+; Two nested modules declare `Safe` with the same constructor name and
+; different field types; each module's own code builds and matches its own.
+(rule
+ (targets native_ctor_shape_collision native_ctor_shape_collision.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/ctor_shape_collision.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_ctor_shape_collision native/ctor_shape_collision.march)
+   (with-stdout-to native_ctor_shape_collision.out (system "./native_ctor_shape_collision")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ctor_shape_collision.expected native_ctor_shape_collision.out)))
 
 ; `<`/`<=`/`>`/`>=` on an ADT, record, newtype or unboxed ADT with an Ord
 ; impl (derived or hand-written), and in generic `when Ord(a)` code, mean

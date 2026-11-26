@@ -387,7 +387,7 @@ let fixtures =
        demand warn that the TIR checks did not run, and still run it. *)
     fx "unlowerable" [ "cap_unchecked" ] ~warn_only:true unlowerable
       ~skip:[ ("compile", "the compiled backend rejects it (compiled_unsupported)");
-              ("jit", "the JIT lowers the program itself and refuses it (an internal-error exit, not this phase's: specs/todos/2026-11-10-jit-ice-on-interpreter-only-builtin.md)") ];
+              ("jit", "the JIT lowers the program itself and refuses it as --compile does (compiled_unsupported, exit 1: test_jit.ml)") ];
   ]
 
 (* ── Modes ─────────────────────────────────────────────────────────────── *)

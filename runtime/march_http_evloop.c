@@ -282,6 +282,7 @@ static void accept_connections(int listener_fd, int evfd, int is_tls, void *pipe
                 continue;
             break;   /* unexpected error */
         }
+        march_handle_fd_accepted(cfd);   /* a stale cancel on the number goes */
 
         /* Set non-blocking and TCP_NODELAY. */
         march_set_nonblocking(cfd);

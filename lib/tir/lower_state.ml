@@ -496,6 +496,23 @@ let module_ctor_type (module_prefix : string) (ctor_name : string)
 let type_declares_ctor (type_name : string) (ctor_name : string) : bool =
   Hashtbl.mem type_ctor_tbl (type_name, ctor_name)
 
+(** [(module_prefix, ctor_name)] → the short name of the type module
+    [module_prefix] declares [ctor_name] on, when another declaration of that
+    SAME short type name gives [ctor_name] different fields (another arity or
+    other field types).  Two such declarations cannot be handed across modules
+    by shape the way [File.Seq]/[Seq.Seq] are, so each declaring module's own
+    constructions and matches can be keyed by that module.  Left bare, the key
+    reaches [Llvm_data.ctor_entry]'s suffix resolver, which picks ONE
+    candidate for every module: the other module's fields were then stored
+    and loaded at the wrong types.  Populated by
+    [compute_shared_ctor_collisions]. *)
+let ctor_shape_conflict_tbl : (string * string, string) Hashtbl.t =
+  Hashtbl.create 16
+
+let ctor_shape_conflict_type (module_prefix : string) (ctor_name : string)
+  : string option =
+  Hashtbl.find_opt ctor_shape_conflict_tbl (module_prefix, ctor_name)
+
 (** The module-qualified ctor key ("OrderedMap.Tree.Node") for [ctor_name] of
     type [type_name] when it is constructed or matched BARE inside module
     [env.mod_prefix], that module declares the type itself, AND a BARE-named
@@ -526,6 +543,12 @@ let own_module_ctor_key ?prefix (env : env) (type_name : string)
     | Some names
       when List.mem type_name names && List.mem own names
            && module_ctor_type prefix ctor_name = Some type_name ->
+      Some (own ^ "." ^ ctor_name)
+    (* No bare twin, but another declaration of this short name gives the
+       constructor different fields: see [ctor_shape_conflict_tbl]. *)
+    | Some names
+      when List.mem own names
+           && ctor_shape_conflict_type prefix ctor_name = Some type_name ->
       Some (own ^ "." ^ ctor_name)
     | _ -> None
 
@@ -649,6 +672,10 @@ let compute_shared_ctor_collisions (decls : Ast.decl list) : unit =
     if not (List.exists (fun (_, q, _, _) -> q = qualified) existing) then
       Hashtbl.replace by_short short ((prefix, qualified, vis, ctor_names) :: existing)
   in
+  (* (short type name, ctor name) -> (module_prefix, qualified type name,
+     field shape) per declaration, for [ctor_shape_conflict_tbl]. *)
+  let ctor_shapes : (string * string, (string * string * string) list) Hashtbl.t =
+    Hashtbl.create 64 in
   let rec walk prefix ds =
     List.iter (function
         | Ast.DType (vis, name, _, type_def, _)
@@ -660,6 +687,19 @@ let compute_shared_ctor_collisions (decls : Ast.decl list) : unit =
           in
           let qualified = match Lower_types.shadowing_tir_name name with
             | Some id -> id | None -> prefix ^ name.txt in
+          (match type_def with
+           | Ast.TDVariant variants ->
+             List.iter (fun (v : Ast.variant) ->
+                 let key = (name.txt, v.Ast.var_name.txt) in
+                 let shape =
+                   String.concat "," (List.map Ast.show_ty v.Ast.var_args) in
+                 let seen = Option.value ~default:[]
+                     (Hashtbl.find_opt ctor_shapes key) in
+                 if not (List.exists (fun (_, q, _) -> q = qualified) seen) then
+                   Hashtbl.replace ctor_shapes key
+                     ((prefix, qualified, shape) :: seen)
+               ) variants
+           | _ -> ());
           add_qualified prefix qualified vis ctor_names
         | Ast.DImpl (idef, _) ->
           let impl_short = match idef.Ast.impl_ty with
@@ -673,6 +713,17 @@ let compute_shared_ctor_collisions (decls : Ast.decl list) : unit =
       ) ds
   in
   walk "" decls;
+  Hashtbl.reset ctor_shape_conflict_tbl;
+  Hashtbl.iter (fun (short, ctor) decls ->
+      match decls with
+      | (_, _, shape0) :: _ :: _
+        when List.exists (fun (_, _, sh) -> not (String.equal sh shape0)) decls ->
+        List.iter (fun (prefix, _, _) ->
+            if prefix <> "" then
+              Hashtbl.replace ctor_shape_conflict_tbl (prefix, ctor) short
+          ) decls
+      | _ -> ()
+    ) ctor_shapes;
   (* Same [by_short] data, indexed the two other ways codegen needs it (see
      [module_ctor_type_tbl] / [type_ctor_tbl]). Every candidate in one
      [by_short] bucket is a DISTINCT qualified declaration ([add_qualified]

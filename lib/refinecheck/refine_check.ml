@@ -10415,6 +10415,23 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
          Hashtbl.replace file_text f t;
          t
      in
+     (* The call sites by source unit and the predicate sites by file, indexed
+        once: each lemma used to filter both whole lists.  Filled back to
+        front, so [Hashtbl.find_all] returns them in list order. *)
+     let sites_by_src : (int, int) Hashtbl.t = Hashtbl.create 1024 in
+     List.iter
+       (fun (st : Refine_term.site) ->
+         match st.Refine_term.s_target with
+         | Refine_term.S_unit v -> Hashtbl.add sites_by_src st.Refine_term.s_src v
+         | _ -> ())
+       (List.rev g.Refine_term.sites);
+     let preds_by_file : (string, A.span * int) Hashtbl.t = Hashtbl.create 64 in
+     List.iter
+       (fun ((psp : A.span), tgt) ->
+         match tgt with
+         | Refine_term.S_unit v -> Hashtbl.add preds_by_file psp.A.file (psp, v)
+         | _ -> ())
+       (List.rev g.Refine_term.pred_sites);
      let manifests = Hashtbl.create 2 in
      let manifest_for file =
        let path =
@@ -10444,20 +10461,11 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
              | [] -> sp.A.start_line
            in
            let direct =
-             List.filter_map
-               (fun (st : Refine_term.site) ->
-                 match st.Refine_term.s_target with
-                 | Refine_term.S_unit v when st.Refine_term.s_src = u.Refine_term.u_id -> Some v
-                 | _ -> None)
-               g.Refine_term.sites
+             Hashtbl.find_all sites_by_src u.Refine_term.u_id
              @ List.filter_map
-                 (fun ((psp : A.span), tgt) ->
-                   match tgt with
-                   | Refine_term.S_unit v
-                     when psp.A.file = sp.A.file && psp.A.start_line >= sp.A.start_line
-                          && psp.A.start_line <= body_end -> Some v
-                   | _ -> None)
-                 g.Refine_term.pred_sites
+                 (fun ((psp : A.span), v) ->
+                   if psp.A.start_line >= sp.A.start_line && psp.A.start_line <= body_end then Some v else None)
+                 (Hashtbl.find_all preds_by_file sp.A.file)
            in
            let sccs =
              List.concat_map
@@ -10746,6 +10754,18 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   (* L4 (§4.2): a recursive lemma the gate did not admit, and whose SCC no
      certificate made eligible for the induction hypothesis, cannot be a
      proof by induction. *)
+  (* The spans of the recursive units, collected once: each lemma used to scan
+     every unit for its own. *)
+  let recursive_spans : (A.span, unit) Hashtbl.t Lazy.t =
+    lazy
+      (let g = (Lazy.force term).Refine_term.graph in
+       let t = Hashtbl.create 256 in
+       Array.iter
+         (fun (u : Refine_term.unit_) ->
+           if Refine_term.is_recursive g u.Refine_term.u_id then Hashtbl.replace t u.Refine_term.u_span ())
+         g.Refine_term.units;
+       t)
+  in
   List.iter
     (fun (fd : A.fn_def) ->
       let sp = fd.A.fn_name.A.span in
@@ -10757,13 +10777,8 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
             defs false
         | None -> false
       in
-      let recursive =
-        let g = (Lazy.force term).Refine_term.graph in
-        Array.exists
-          (fun (u : Refine_term.unit_) -> u.Refine_term.u_span = sp && Refine_term.is_recursive g u.Refine_term.u_id)
-          g.Refine_term.units
-      in
-      let qname = match List.find_opt (fun (_, f) -> f == fd) (lemma_fns_q m.A.mod_decls) with Some (q, _) -> q | None -> fd.A.fn_name.A.txt in
+      let recursive = Hashtbl.mem (Lazy.force recursive_spans) sp in
+      let qname = match List.find_opt (fun (_, f) -> f == fd) lemmas_q with Some (q, _) -> q | None -> fd.A.fn_name.A.txt in
       let digest = Digest.to_hex (Digest.string (Marshal.to_string (fd.A.fn_ret_ty, fd.A.fn_clauses) [ Marshal.No_sharing ])) in
       lemma_rows := (sp.A.file, qname, digest, admitted && Hashtbl.mem lemma_valid sp) :: !lemma_rows;
       if admitted && Hashtbl.mem lemma_valid sp && March_typecheck.Typecheck_builtins.file_is_stdlib sp.A.file then
@@ -10786,7 +10801,7 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
         if Hashtbl.mem lemma_valid sp then
           Some (q, fd, List.exists (fun (f, n, _, a) -> a && f = sp.A.file && n = q) !lemma_rows)
         else None)
-      (lemma_fns_q m.A.mod_decls);
+      lemmas_q;
   ret_elem_demand := None;
   gate_elem_returns ~root defs m.A.mod_decls;
   (* Termination, phase 2 (design §3.3-§3.5, §9): plan the metric

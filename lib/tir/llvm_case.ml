@@ -896,7 +896,11 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
               k :: acc
             | _ -> acc
           ) ctx.Llvm_ctx.ctor_info [] in
-        match matched with
+        (* Sorted, as [Llvm_data.ctor_entry] sorts its candidates: a
+           construction keyed "Thing.Shared" and this pattern must land on
+           the same one of DcA.Thing.Shared / DcB.Thing.Shared.  Both used to
+           take [Hashtbl.fold] order and agreed only because of that. *)
+        match List.sort String.compare matched with
         | k :: _ -> k
         | [] -> ctor
       end

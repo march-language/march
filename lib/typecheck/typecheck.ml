@@ -10146,6 +10146,8 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
         | _ -> None))
   | _ -> None
 
+let () = Typecheck_env.registry_fn_scheme := prebind_fn_scheme
+
 (** Type-check a whole module.
 
     Pass 1: collect all top-level function names into the environment
