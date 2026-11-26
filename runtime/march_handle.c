@@ -415,6 +415,18 @@ int64_t march_handle_close_drain(void *h, int64_t timeout_ms) {
     return drained;
 }
 
+/* A descriptor number just came back from accept().  A drain that timed out
+ * on a borrowed box (a use still in flight after the wait) keeps the sticky
+ * fd-wait cancel on purpose, to protect that use, and the server then
+ * closed the descriptor.  The cancel is keyed by the number, so once accept
+ * hands the number to a new connection, every wait on that connection would
+ * fail with ECANCELED until its own drain forgot it: one connection broke a
+ * later, unrelated one.  The new descriptor has no use to protect yet, so
+ * the cancel goes. */
+void march_handle_fd_accepted(int64_t fd) {
+    fd_forget_cancel(fd);
+}
+
 /* Hand the descriptor over (to a TLS box, or to code that keeps raw fds):
  * close the box without releasing.  Refused (-1, nothing changes) when the
  * box is closed; when it is a TCP_BORROWED box, whose descriptor is not the

@@ -85,12 +85,12 @@ case $f18 of
   $Tuple2($f19, $f20) -> dec_rc $f18;
 let rest : '_ = $f20 in
 let ms : '_ = $f19 in
-let $t15 : '_ = let $t14 : '_ = let $rc_148 : '_ = string_join(ms, ",") in
+let $t15 : '_ = let $t14 : '_ = let $rc_149 : '_ = string_join(ms, ",") in
 dec_rc ms;
-$rc_148 in
-let $rc_147 : '_ = ++("methods=", $t14) in
+$rc_149 in
+let $rc_148 : '_ = ++("methods=", $t14) in
 dec_rc $t14;
-$rc_147 in
+$rc_148 in
 let $t16 : ('_, '_) = ($t15, rest) in
 alloc Ok($t16)
   _ -> dec_rc $f18;

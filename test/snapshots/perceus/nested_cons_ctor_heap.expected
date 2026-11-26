@@ -87,12 +87,12 @@ case $f18 of
   $Tuple2($f19, $f20) -> dec_rc $f18;
 let rest : '_ = $f20 in
 let ms : '_ = $f19 in
-let $t15 : '_ = let $t14 : '_ = let $rc_152 : '_ = string_join(ms, ",") in
+let $t15 : '_ = let $t14 : '_ = let $rc_153 : '_ = string_join(ms, ",") in
 dec_rc ms;
-$rc_152 in
-let $rc_151 : '_ = ++("methods=", $t14) in
+$rc_153 in
+let $rc_152 : '_ = ++("methods=", $t14) in
 dec_rc $t14;
-$rc_151 in
+$rc_152 in
 let $t16 : ('_, '_) = ($t15, rest) in
 alloc Ok($t16)
   _ -> dec_rc $f18;
@@ -313,20 +313,20 @@ case rows of
 case $f14 of
   Row($f16) -> let rest : List(Row) = $f15 in
 let fp : List(Int) = $f16 in
-let $t11 : String = let $t10 : Int = let $rc_150 : Int = List.length$List_Int(fp) in
+let $t11 : String = let $t10 : Int = let $rc_151 : Int = List.length$List_Int(fp) in
 dec_rc fp;
-$rc_150 in
+$rc_151 in
 int_to_string($t10) in
-let $rc_149 : () = println($t11) in
+let $rc_150 : () = println($t11) in
 dec_rc $t11;
-$rc_149;
-let $t13 : String = let $t12 : Int = let $rc_148 : Int = List.length$List_Row(rest) in
+$rc_150;
+let $t13 : String = let $t12 : Int = let $rc_149 : Int = List.length$List_Row(rest) in
 dec_rc rest;
-$rc_148 in
+$rc_149 in
 int_to_string($t12) in
-let $rc_147 : () = println($t13) in
+let $rc_148 : () = println($t13) in
 dec_rc $t13;
-$rc_147
+$rc_148
   _ -> dec_rc $f14;
 dec_rc $f15;
 panic("non-exhaustive pattern match")

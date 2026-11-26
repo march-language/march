@@ -1,0 +1,5 @@
+allowed /srv/x
+IO.FileRead("/srv/y/z") refused by function pong's needs (IO.FileRead("/srv/x"))
+allowed /srv/x
+allowed /etc/hosts
+exit 0

@@ -1,0 +1,45 @@
+-- `restrict` accepts the top-level actor kinds (ocap phase 7): inside
+-- `restrict Actor.Introspect do ... end` the program may mint the
+-- introspection capability, but the debug kind and the console are
+-- refused; inside `restrict Actor.Debug` the reverse. After each block
+-- main's own authority is back. Each block calls a function value, so its
+-- run-time frame is kept in every runtime. (A direct `Actor.debug()` inside
+-- the first block is a compile-time `cap_restrict` error:
+-- test/errors/cap_restrict_5.)
+mod RestrictActorKinds do
+  needs IO.Console
+  needs Actor.Introspect
+  needs Actor.Debug
+
+  fn verdict(r : Result(a, CapError)) : String do
+    match r do
+    Ok(_) -> "allowed"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn probe(kind : String) : String do
+    kind ++ ": " ++ verdict(Authority.check(kind, ""))
+  end
+
+  fn introspect_only() : String do
+    restrict Actor.Introspect do
+      let p = fn k -> probe(k)
+      "mint: " ++ verdict(Actor.introspect()) ++ " | " ++ p("Actor.Introspect") ++ " | "
+        ++ p("Actor.Debug") ++ " | " ++ p("IO.Console")
+    end
+  end
+
+  fn debug_only() : String do
+    restrict Actor.Debug do
+      let p = fn k -> probe(k)
+      "mint: " ++ verdict(Actor.debug()) ++ " | " ++ p("Actor.Debug") ++ " | " ++ p("Actor.Introspect")
+    end
+  end
+
+  fn main() do
+    println(introspect_only())
+    println(debug_only())
+    println(probe("Actor.Introspect") ++ " | " ++ probe("Actor.Debug"))
+  end
+end

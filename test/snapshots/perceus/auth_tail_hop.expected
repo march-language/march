@@ -1,0 +1,196 @@
+-- types (9) --
+type Authority.Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String)) | HostAt(String, String, Bool, Int) | PathsAt(List(String))
+type Authority.CapEntry = CapEntry(String, Arg)
+type Authority.Layer = Layer(CapLimit, String, List(CapEntry))
+closure $Clo_$jp1_parse$0_Authority_parse(Ptr(Unit), '_)
+closure $Clo_$jp2_parse$1_Authority_parse(Ptr(Unit), () -> '_)
+closure $Clo_$jp3_parse$2_Authority_parse(Ptr(Unit), () -> '_)
+closure $Clo_$jp7_parse_option$0_Authority_parse_option(Ptr(Unit), '_, String)
+closure $Clo_$jp7_method_words$0_Authority_method_words(Ptr(Unit), '_, '_, List(String))
+closure $Clo_$jp3_method_words$1_Authority_method_words(Ptr(Unit))
+-- fns (17) --
+## $jp1_parse$apply$0_Authority_parse
+fn $jp1_parse$apply$0_Authority_parse($clo : Ptr(Unit)) : '_ =
+  let toks : '_ = $clo.$fv1 in
+dec_rc $clo;
+let $t6 : '_ = alloc Nil() in
+inc_rc toks;
+Authority.parse_entries(toks, $t6)
+
+## $jp2_parse$apply$1_Authority_parse
+fn $jp2_parse$apply$1_Authority_parse($clo : Ptr(Unit)) : '_ =
+  let $jp_clo10 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+inc_rc $jp_clo10;
+call_ptr $jp_clo10()
+
+## $jp3_method_words$apply$1_Authority_method_words
+fn $jp3_method_words$apply$1_Authority_method_words($clo : Ptr(Unit)) : '_ =
+  alloc Err("`methods(...)` is not closed")
+
+## $jp3_parse$apply$2_Authority_parse
+fn $jp3_parse$apply$2_Authority_parse($clo : Ptr(Unit)) : '_ =
+  let $jp_clo11 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+inc_rc $jp_clo11;
+call_ptr $jp_clo11()
+
+## $jp7_method_words$apply$0_Authority_method_words
+fn $jp7_method_words$apply$0_Authority_method_words($clo : Ptr(Unit)) : '_ =
+  let $f8 : '_ = $clo.$fv1 in
+let $f9 : '_ = $clo.$fv2 in
+let acc : List(String) = $clo.$fv3 in
+dec_rc $clo;
+let $jp_clo13 : () -> '_ = alloc $Clo_$jp3_method_words$1_Authority_method_words($jp3_method_words$apply$1_Authority_method_words) in
+case $f9 of
+  Cons($f14, $f15) -> case $f14 of
+  ")"() -> dec_rc $jp_clo13;
+let rest : '_ = $f15 in
+let m : '_ = inc_rc $f8;
+$f8 in
+let $t3 : '_ = Authority.is_option_name(m) in
+case $t3 of
+  True() -> dec_rc $t3;
+let $t6 : '_ = let $t4 : '_ = inc_rc acc;
+alloc Cons(m, acc) in
+let $t5 : '_ = alloc Nil() in
+Authority.rev($t4, $t5) in
+let $t7 : ('_, '_) = inc_rc rest;
+($t6, rest) in
+alloc Ok($t7)
+  _ -> dec_rc $t3;
+dec_rc m;
+alloc Err("`methods(...)` takes HTTP method names")
+  _ -> call_ptr $jp_clo13()
+  _ -> call_ptr $jp_clo13()
+
+## $jp7_parse_option$apply$0_Authority_parse_option
+fn $jp7_parse_option$apply$0_Authority_parse_option($clo : Ptr(Unit)) : '_ =
+  let $f26 : '_ = $clo.$fv1 in
+let name : String = $clo.$fv2 in
+dec_rc $clo;
+let more : '_ = inc_rc $f26;
+$f26 in
+let $t11 : '_ = ==(name, "methods") in
+case $t11 of
+  True() -> dec_rc $t11;
+let $t13 : '_ = let $t12 : '_ = alloc Nil() in
+Authority.method_words(more, $t12) in
+case $t13 of
+  Err($f17) -> dec_rc $t13;
+let e : '_ = $f17 in
+alloc Err(e)
+  Ok($f18) -> dec_rc $t13;
+case $f18 of
+  $Tuple2($f19, $f20) -> dec_rc $f18;
+let rest : '_ = $f20 in
+let ms : '_ = $f19 in
+let $t15 : '_ = let $t14 : '_ = let $rc_151 : '_ = string_join(ms, ",") in
+dec_rc ms;
+$rc_151 in
+let $rc_150 : '_ = ++("methods=", $t14) in
+dec_rc $t14;
+$rc_150 in
+let $t16 : ('_, '_) = ($t15, rest) in
+alloc Ok($t16)
+  _ -> dec_rc $f18;
+panic("non-exhaustive pattern match")
+  _ -> dec_rc $t13;
+panic("non-exhaustive pattern match")
+  _ -> dec_rc $t11;
+dec_rc more;
+let $t23 : '_ = string_concat3("`", name, "(...)` takes one quoted string") in
+alloc Err($t23)
+
+## drain
+fn drain(n : Int) : Int =
+  let $t1 : Layer = drain$restrict0$auth_layer() in
+let $t2 : CapAuthRef = Authority.enter_fn($t1) in
+let $t3 : Int = drain$restrict_body(n) in
+let $t4 : Unit = cap_restore($t2) in
+$t3
+
+## drain$restrict0$auth_layer
+fn drain$restrict0$auth_layer() : Layer =
+  Authority.restrict_layer(".:20", "IO.FileRead(\"/srv/\")")
+
+## drain$restrict_body
+fn drain$restrict_body(n : Int) : Int =
+  let $t5 : Bool = ==(n, 0) in
+case $t5 of
+  True() -> 0
+  _ -> let $t6 : Int = -(n, 1) in
+drain$restrict_body($t6)
+
+## main
+fn main() : () =
+  let $t1 : Result((), CapError) = probe() in
+case $t1 of
+  Ok($f5) -> dec_rc $t1;
+dec_rc $f5;
+let $t4 : Int = let $t2 : Int = ping(10) in
+let $t3 : Int = drain(10) in
++($t2, $t3) in
+println($t4)
+  Err($f6) -> dec_rc $t1;
+dec_rc $f6;
+println(0)
+  _ -> dec_rc $t1;
+panic("non-exhaustive pattern match")
+
+## ping
+fn ping(n : Int) : Int =
+  let $auth_l : Layer = ping$auth_layer() in
+let $auth_saved : CapAuthRef = Authority.enter_fn($auth_l) in
+let $auth_result : Int = ping$auth(n) in
+let $auth_unit : Unit = cap_restore($auth_saved) in
+$auth_result
+
+## ping$auth
+fn ping$auth(n : Int) : Int =
+  let $t1 : Bool = ==(n, 0) in
+case $t1 of
+  True() -> 0
+  _ -> let $t2 : Int = -(n, 1) in
+let $hop_l1 : Layer = pong$auth_layer() in
+let $hop_in1 : Bool = let $rc_1 : Bool = Authority.frame_in_force($hop_l1) in
+dec_rc $hop_l1;
+$rc_1 in
+case $hop_in1 of
+  True() -> pong$auth($t2)
+  _ -> pong($t2)
+
+## ping$auth_layer
+fn ping$auth_layer() : Layer =
+  Authority.frame_layer("ping", "IO.FileRead(\"/srv/\")")
+
+## pong
+fn pong(n : Int) : Int =
+  let $auth_l : Layer = pong$auth_layer() in
+let $auth_saved : CapAuthRef = Authority.enter_fn($auth_l) in
+let $auth_result : Int = pong$auth(n) in
+let $auth_unit : Unit = cap_restore($auth_saved) in
+$auth_result
+
+## pong$auth
+fn pong$auth(n : Int) : Int =
+  let $t1 : Bool = ==(n, 0) in
+case $t1 of
+  True() -> 1
+  _ -> let $t2 : Int = -(n, 1) in
+let $hop_l2 : Layer = ping$auth_layer() in
+let $hop_in2 : Bool = let $rc_2 : Bool = Authority.frame_in_force($hop_l2) in
+dec_rc $hop_l2;
+$rc_2 in
+case $hop_in2 of
+  True() -> ping$auth($t2)
+  _ -> ping($t2)
+
+## pong$auth_layer
+fn pong$auth_layer() : Layer =
+  Authority.frame_layer("pong", "IO.FileRead(\"/srv/x\")")
+
+## probe
+fn probe() : Result((), CapError) =
+  Authority.check("IO.FileRead", "/srv/x")
+

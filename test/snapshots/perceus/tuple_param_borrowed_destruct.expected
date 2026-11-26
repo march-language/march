@@ -87,12 +87,12 @@ case $f18 of
   $Tuple2($f19, $f20) -> dec_rc $f18;
 let rest : '_ = $f20 in
 let ms : '_ = $f19 in
-let $t15 : '_ = let $t14 : '_ = let $rc_176 : '_ = string_join(ms, ",") in
+let $t15 : '_ = let $t14 : '_ = let $rc_177 : '_ = string_join(ms, ",") in
 dec_rc ms;
-$rc_176 in
-let $rc_175 : '_ = ++("methods=", $t14) in
+$rc_177 in
+let $rc_176 : '_ = ++("methods=", $t14) in
 dec_rc $t14;
-$rc_175 in
+$rc_176 in
 let $t16 : ('_, '_) = ($t15, rest) in
 alloc Ok($t16)
   _ -> dec_rc $f18;
@@ -938,9 +938,9 @@ fn String.decode_go(b : Bytes, n : Int, i : Int, acc : List(Int)) : List(Int) =
   let $t1 : '_ = >=(i, n) in
 case $t1 of
   True() -> dec_rc $t1;
-let $rc_168 : '_ = List.reverse$List_Int(acc) in
+let $rc_169 : '_ = List.reverse$List_Int(acc) in
 dec_rc acc;
-$rc_168
+$rc_169
   _ -> dec_rc $t1;
 let byte : '_ = Bytes.get(b, i) in
 let $t2 : '_ = <(byte, 128) in
@@ -954,9 +954,9 @@ let $t5 : '_ = <(byte, 224) in
 case $t5 of
   True() -> dec_rc $t5;
 let $t7 : '_ = let $t6 : '_ = +(i, 1) in
-let $rc_169 : '_ = <($t6, n) in
+let $rc_170 : '_ = <($t6, n) in
 dec_rc $t6;
-$rc_169 in
+$rc_170 in
 case $t7 of
   True() -> dec_rc $t7;
 let b2 : '_ = let $t8 : '_ = +(i, 1) in
@@ -977,9 +977,9 @@ let $t17 : '_ = <(byte, 240) in
 case $t17 of
   True() -> dec_rc $t17;
 let $t19 : '_ = let $t18 : '_ = +(i, 2) in
-let $rc_170 : '_ = <($t18, n) in
+let $rc_171 : '_ = <($t18, n) in
 dec_rc $t18;
-$rc_170 in
+$rc_171 in
 case $t19 of
   True() -> dec_rc $t19;
 let b2 : '_ = let $t20 : '_ = +(i, 1) in
@@ -1002,9 +1002,9 @@ let $t32 : '_ = alloc Cons(byte, acc) in
 String.decode_go(b, n, $t31, $t32)
   _ -> dec_rc $t17;
 let $t34 : '_ = let $t33 : '_ = +(i, 3) in
-let $rc_171 : '_ = <($t33, n) in
+let $rc_172 : '_ = <($t33, n) in
 dec_rc $t33;
-$rc_171 in
+$rc_172 in
 case $t34 of
   True() -> dec_rc $t34;
 let b2 : '_ = let $t35 : '_ = +(i, 1) in
@@ -1196,9 +1196,9 @@ fn String.to_codepoints(s : String) : List(Int) =
   let b : '_ = Bytes.from_string(s) in
 let $t1 : '_ = Bytes.length(b) in
 let $t2 : '_ = alloc Nil() in
-let $rc_172 : '_ = String.decode_go(b, $t1, 0, $t2) in
+let $rc_173 : '_ = String.decode_go(b, $t1, 0, $t2) in
 dec_rc b;
-$rc_172
+$rc_173
 
 ## String.to_float
 fn String.to_float(s : '_) : '_ =
@@ -1268,9 +1268,9 @@ fn main(_cap_console : Cap(IO.Console)) : () =
   let pair : (String, String) = ("hello", "world") in
 let $t2 : String = let $t1 : Int = process_pairs(pair, 3, 0) in
 int_to_string($t1) in
-let $rc_174 : () = println($t2) in
+let $rc_175 : () = println($t2) in
 dec_rc $t2;
-$rc_174
+$rc_175
 
 ## process_pairs
 fn process_pairs(pair : (String, String), n : Int, acc : Int) : Int =
@@ -1292,7 +1292,7 @@ let x : String = $f1 in
 x
   _ -> dec_rc pair;
 panic("non-exhaustive pattern match") in
-let $rc_173 : Int = String.byte_size(a) in
+let $rc_174 : Int = String.byte_size(a) in
 dec_rc a;
-$rc_173
+$rc_174
 

@@ -841,10 +841,18 @@ let unlowered_marker = "$march_unlowered"
 let auth_body_suffix = "$auth"
 let auth_layer_suffix = "$auth_layer"
 let enter_fn_name = "Authority.enter_fn"
+let frame_in_force_name = "Authority.frame_in_force"
 let frame_layer_fn_name = "Authority.frame_layer"
 
 let is_auth_layer_fn (name : string) : bool =
   String.ends_with ~suffix:auth_layer_suffix name
+
+(** A fn whose whole body is a kept literal [restrict] block keeps its name
+    as the wrapper that enters the block's frame; the block's body moves to
+    [f ^ restrict_body_suffix], where [f]'s own self calls are retargeted so
+    they loop instead of re-entering a frame already in force
+    ([Auth_rt.restricts]). *)
+let restrict_body_suffix = "$restrict_body"
 
 (** Dependency grants (ocap phase 6, [Auth_rt.grants]).  A fn of a granted
     package [p] keeps its name as the wrapper that enters the grant's frame;

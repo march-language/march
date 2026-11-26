@@ -1,0 +1,12 @@
+exit: 1
+-- CAPABILITY --------------- errors/cap_restrict_5.march
+
+`Actor.debug` needs `Actor.Debug`, which the restrict at cap_restrict_5.march:11 does not allow. [cap_restrict]
+help: add `Actor.Debug` to the restrict, or move the call out of the block.
+
+13 |       let _ = Actor.debug()
+                   ^^^^^^^^^^^
+
+    run `march --explain cap_restrict`
+
+

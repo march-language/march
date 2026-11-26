@@ -31,9 +31,9 @@ fn $authlam0_main$apply$5_main($clo : Ptr(Unit), $auth_p11 : String) : () =
   let $auth_cap1 : CapAuthRef = $clo.$fv1 in
 dec_rc $clo;
 let $auth_saved12 : CapAuthRef = cap_enter($auth_cap1) in
-let $auth_result13 : () = let $rc_151 : () = say($auth_p11) in
+let $auth_result13 : () = let $rc_152 : () = say($auth_p11) in
 dec_rc $auth_p11;
-$rc_151 in
+$rc_152 in
 let $auth_unit14 : Unit = cap_restore($auth_saved12) in
 $auth_result13
 
@@ -113,12 +113,12 @@ case $f18 of
   $Tuple2($f19, $f20) -> dec_rc $f18;
 let rest : '_ = $f20 in
 let ms : '_ = $f19 in
-let $t15 : '_ = let $t14 : '_ = let $rc_148 : '_ = string_join(ms, ",") in
+let $t15 : '_ = let $t14 : '_ = let $rc_149 : '_ = string_join(ms, ",") in
 dec_rc ms;
-$rc_148 in
-let $rc_147 : '_ = ++("methods=", $t14) in
+$rc_149 in
+let $rc_148 : '_ = ++("methods=", $t14) in
 dec_rc $t14;
-$rc_147 in
+$rc_148 in
 let $t16 : ('_, '_) = ($t15, rest) in
 alloc Ok($t16)
   _ -> dec_rc $f18;
@@ -132,18 +132,18 @@ alloc Err($t23)
 
 ## $lam0__top$apply$0_main
 fn $lam0__top$apply$0_main($clo : Ptr(Unit), s : String) : () =
-  let $rc_149 : () = println(s) in
+  let $rc_150 : () = println(s) in
 dec_rc s;
-$rc_149
+$rc_150
 
 ## $lam0_main$apply$1_main
 fn $lam0_main$apply$1_main($clo : Ptr(Unit), s : String) : () =
   let $auth_cap1 : CapAuthRef = $clo.$fv1 in
 dec_rc $clo;
 let $auth_saved2 : CapAuthRef = cap_enter($auth_cap1) in
-let $auth_result3 : () = let $rc_150 : () = println(s) in
+let $auth_result3 : () = let $rc_151 : () = println(s) in
 dec_rc s;
-$rc_150 in
+$rc_151 in
 let $auth_unit4 : Unit = cap_restore($auth_saved2) in
 $auth_result3
 

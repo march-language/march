@@ -1405,6 +1405,22 @@ git log is authoritative for exact commits.
   `--debug-info` read. Each local function now reports its own declaration, and a
   top-level standard-library function such as `reverse` or `map`, which could lose its
   location to a module function of the same name, keeps it.
+- **Roles, topologies and `restrict` handle the actor kinds** (object capabilities, phase
+  7). `role R needs Actor.Introspect` (or `Actor.Debug`) is now accepted, and a role whose
+  code reaches `Actor.introspect()`, `Actor.pid_from_int` or `Actor.debug()` without that
+  grant is a compile-time `role_grant_exceeded` error instead of passing the check and being
+  refused only at run time. A topology app's generated `main` requests the actor kinds its
+  roles are granted, and a pool's written caps bound them. `restrict Actor.Introspect do ...
+  end` (and `Actor.Debug`) now works; it was rejected as an unknown constructor.
+- **An HTTP connection that reuses a closed connection's descriptor number works.** When
+  closing a connection timed out waiting for a task still using its socket, the next
+  connection given the same descriptor number had every wait on its socket fail until it
+  closed. The stale cancellation is now dropped when the number is reused.
+- **Recursion through scoped functions no longer overflows the stack.** A function whose
+  whole body is a `restrict` block, calling itself, and two functions with scoped `needs`
+  clauses that tail-call each other, used one stack frame per call in a compiled program,
+  and 100,000 calls died with SIGBUS. Both now loop like an unscoped tail call, with the
+  same authority in force.
 - **Two modules that each declare a type of the same name, with a constructor of the same
   name but different fields, now compile correctly.** Compiled code laid both out as one of
   them, so the other module's field was stored at the wrong type (`Safe(Int)` beside
