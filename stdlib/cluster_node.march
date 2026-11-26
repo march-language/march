@@ -2765,7 +2765,7 @@ mod ClusterNode do
     -- caller put in the field: it is the one power over sessions a node
     -- keeps (see `with_session` below). The closure is made here, after the
     -- check, so it carries the attaching code's authority wherever it goes.
-    Ok(cap_impl(mint_cap(root_cap), { ops with attach_session: fn sops -> Authority.must(Session.attach(sops)) }))
+    Ok(cap_impl(mint_cap(), { ops with attach_session: fn sops -> Authority.must(Session.attach(sops)) }))
   end
 
   pfn unsupported(op : String) do

@@ -99,7 +99,7 @@ mod Session do
   """
   fn attach(ops : Ops) : Result(Cap(Session.Live), CapError) do
     let? _ = Authority.check("IO.Cluster", "")
-    Ok(cap_impl(mint_cap(root_cap), ops))
+    Ok(cap_impl(mint_cap(), ops))
   end
 
   pfn no_transport() do

@@ -1047,7 +1047,7 @@ and emit_val_impl ctx expr =
          in [builtin_wrappers]); a minted capability carries no dictionary. *)
       | "cap_impl", [_; d] -> emit_atom ctx d
       | "cap_narrow", [c] -> emit_atom ctx c
-      | "mint_cap", [_] -> emit ctx "undefined"
+      | "mint_cap", ([] | [_]) -> emit ctx "undefined"
       | "cap_dict", [c] ->
         emit ctx "(("; emit_atom ctx c; emit ctx " == null) ? { $: \"None\" } : { $: \"Some\", _0: ";
         emit_atom ctx c; emit ctx " })"

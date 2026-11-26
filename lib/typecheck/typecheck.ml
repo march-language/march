@@ -3003,20 +3003,22 @@ let rec infer_expr env (e : Ast.expr) : ty =
          "I cannot find `root_cap`", and so the inferred type below stays
          [Cap(IO)] and no cascade of unification failures follows a single
          mistake) — only naming it is refused. *)
-      (* The stdlib may name [root_cap] (ocap phase 7): the checked mints of
-         the non-IO capabilities ([Actor.introspect], [Session.attach], ...)
-         mint from it after their own [Authority.check]. *)
-      if name.txt = "root_cap" && not env.root_cap_allowed
-         && not (span_is_stdlib name.span) then
+      (* The root capability value was retired in ocap phase 7b: authority
+         is requested with `needs` on `main` and checked by each operation,
+         and a proof capability is minted with [mint_cap()].  Nothing takes a
+         [Cap(IO)] any more, in user code, tests, the REPL or the stdlib. *)
+      if name.txt = "root_cap" then
         Err.error ~code:Err.Code.root_cap_reference env.errors ~span:name.span
           (render_parts [
             MPCode "root_cap";
-            MPText " cannot be referenced — the root capability is granted to ";
-            MPCode "main"; MPText ", not taken.";
+            MPText " no longer exists: there is no root capability value. ";
+            MPText "A program asks for authority with a ";
+            MPCode "needs"; MPText " clause on "; MPCode "main";
+            MPText " (e.g. "; MPCode "fn main() : () needs IO.Console do";
+            MPText "), and each operation checks it.";
             MPBreak;
-            MPText "help: declare "; MPCode "fn main(cap : Cap(IO))";
-            MPText " and pass the capability down to whatever needs it, narrowing with ";
-            MPCode "cap_narrow"; MPText " along the way." ]);
+            MPText "help: remove the reference; a function that took the root capability no longer needs it, and a proof capability is minted with ";
+            MPCode "mint_cap()"; MPText "." ]);
       (* Stdlib-only builtins (specs/progress/2026-09-22-stdlib-only-builtins.md
          and the 2026-09-24 bypass fixes): the gate sits at resolution, on the
          reference itself. A name in [stdlib_only] that still resolves to the
@@ -3781,9 +3783,25 @@ let rec infer_expr env (e : Ast.expr) : ty =
        capture the enclosing fn/module CONTEXT here (env.cur_fn_public,
        env.current_module — lambdas inherit the enclosing fn's public-ness) since
        that context is unavailable at sweep time. *)
-    | Ast.EApp (Ast.EVar { txt = "mint_cap"; _ } as fv, [arg], sp) ->
+    | Ast.EApp (Ast.EVar { txt = "mint_cap"; _ } as fv, ([] | [ _ ] as args), sp) ->
       let f_ty = infer_expr env fv in
-      let rty = infer_app env sp f_ty [arg] 0 in
+      let rty =
+        match args with
+        | [ arg ] ->
+          (* The old form, [mint_cap(root)]: the root [Cap(IO)] it took was
+             retired in ocap phase 7b.  The argument granted nothing (caps are
+             erased), so the fix only drops it. *)
+          Err.error_with_fix ~code:Err.Code.mint_cap_invalid env.errors ~span:sp
+            ~fix:(Err.FReplace { span = sp; text = "mint_cap()" })
+            (render_parts [
+              MPCode "mint_cap"; MPText " takes no argument: the root capability it took was retired. ";
+              MPText "Write "; MPCode "mint_cap()"; MPText "." ]);
+          ignore arg;
+          (match f_ty with
+           | TArrow (_, r) -> r
+           | _ -> infer_app env sp f_ty [] 0)
+        | _ -> infer_app env sp f_ty [] 0
+      in
       (* Same value restriction as cap_narrow: a mint_cap application is
          expansive and must not let-generalize, so the gate sweep sees the
          concrete pinned cap rather than an unbound quantified var. *)
@@ -9875,9 +9893,6 @@ let rec check_decl env (d : Ast.decl) : env =
   | Ast.DTest (tdef, sp) ->
     (* Typecheck the test body; it must be Unit. No enclosing function — see
        [with_no_caller]. *)
-    (* R2 exemption: a test body has no [main] to be granted the root from, so
-       [root_cap] stays nameable here (see [env.root_cap_allowed]). *)
-    let env = { env with root_cap_allowed = true } in
     with_deferred_pending env (fun () -> with_no_caller env (fun () ->
       check_expr env tdef.test_body t_unit
         ~reason:(Some (RBuiltin (Printf.sprintf "test body of \"%s\" must produce Unit" tdef.test_name)))));
@@ -9898,8 +9913,6 @@ let rec check_decl env (d : Ast.decl) : env =
 
   | Ast.DSetup (body, sp) ->
     (* No enclosing function — see [with_no_caller]. *)
-    (* R2 exemption, same rationale as [DTest]. *)
-    let env = { env with root_cap_allowed = true } in
     with_deferred_pending env (fun () -> with_no_caller env (fun () ->
       check_expr env body t_unit ~reason:(Some (RBuiltin "setup body must produce Unit"))));
     discharge_constraints env sp;  (* see [DTest] *)
@@ -9908,8 +9921,6 @@ let rec check_decl env (d : Ast.decl) : env =
 
   | Ast.DSetupAll (body, sp) ->
     (* No enclosing function — see [with_no_caller]. *)
-    (* R2 exemption, same rationale as [DTest]. *)
-    let env = { env with root_cap_allowed = true } in
     with_deferred_pending env (fun () -> with_no_caller env (fun () ->
       check_expr env body t_unit ~reason:(Some (RBuiltin "setup_all body must produce Unit"))));
     discharge_constraints env sp;  (* see [DTest] *)
@@ -10644,6 +10655,34 @@ let add_param_fix ~(params : Ast.span) ~(empty : bool) ~(name : string) ~(cap : 
     Some (Err.FReplace { span = at;
                          text = Printf.sprintf "%s%s : Cap(%s)" (if empty then "" else ", ") name cap })
 
+(* The edit adding [cap] to `main`'s request (ocap phase 7b): into `main`'s
+   own `needs` clause when it has one; else, when the request is the
+   module's `needs` line, a new line `needs cap` after the first one.  None
+   for the deprecated `Cap`-parameter form: its own warning's fix rewrites
+   `main` first. *)
+let main_request_fix (decls : Ast.decl list) ~(form : [ `Params | `Needs ]) (cap : string)
+  : Err.fix_kind option =
+  let main_needs =
+    List.find_map
+      (function
+        | Ast.DFn (def, _) when def.Ast.fn_name.txt = "main" -> Some def.Ast.fn_needs
+        | _ -> None)
+      decls
+  in
+  match form, main_needs with
+  | `Params, _ | _, None -> None
+  | `Needs, Some (Some (_, nsp)) ->
+    Some (Err.FReplace { span = { nsp with Ast.start_line = nsp.Ast.end_line; start_col = nsp.Ast.end_col };
+                         text = ", " ^ cap })
+  | `Needs, Some None ->
+    List.find_map
+      (function
+        | Ast.DNeeds (_, sp) ->
+          Some (Err.FInsert { after_line = sp.Ast.end_line;
+                              text = String.make sp.Ast.start_col ' ' ^ "needs " ^ cap })
+        | _ -> None)
+      decls
+
 (* The top-level `main`'s first clause. *)
 let main_clause_of (decls : Ast.decl list) : Ast.fn_clause option =
   List.find_map (function
@@ -10694,11 +10733,11 @@ let refine_cap_mismatches (env : env) (decls : Ast.decl list) : unit =
             | None -> false in
           let fix, help =
             if cap_subsumes have need then
-              match site.cm_arg_name with
-              | Some n ->
-                Some (Err.FReplace { span = site.cm_span; text = Printf.sprintf "cap_narrow(%s)" n }),
-                Printf.sprintf "help: pass `cap_narrow(%s)`, which narrows it to `Cap(%s)`." n need
-              | None -> None, List.nth d.Err.notes (List.length d.Err.notes - 1)
+              (* ocap phase 7b: there is no narrowing to suggest; the
+                 parameter itself is retired ([cap_param_retired]). *)
+              None,
+              "help: capability values were retired; remove the parameter and this argument \
+               (see the `cap_param_retired` error on the parameter)."
             else
               match main_clause with
               | Some c when in_main ->
@@ -10890,34 +10929,22 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
          let show_caps =
            String.concat ", " (List.map (fun c -> Printf.sprintf "`%s`" c) named)
          in
-         let suggested =
-           String.concat ", "
-             (List.map
-                (fun c ->
-                   (* `cap_` prefix, not the bare leaf: `IO.Spawn` would give
-                      `spawn`, which is a RESERVED KEYWORD and does not parse.
-                      A fixed prefix cannot collide with any keyword and needs
-                      no reserved-word table kept in sync with the lexer. *)
-                   let leaf =
-                     match String.rindex_opt c '.' with
-                     | Some i -> String.sub c (i + 1) (String.length c - i - 1)
-                     | None -> c
-                   in
-                   Printf.sprintf "_cap_%s : Cap(%s)"
-                     (String.lowercase_ascii leaf) c)
-                named)
-         in
+         let suggested = String.concat ", " named in
          (* The fix is MECHANICAL, not a suggestion: the grant a program must
             declare IS `caps(main)`, which this check already computed in
             order to report the error at all. Emitting it as a `FReplace` over
             the parameter list lets `forge fix` apply it, which under a hard
             flip is the only migration help code outside this repo gets.
 
-            The span has to be [fc_params_span] specifically — `main`'s NAME
-            span would yield `fn main(…)() : ()`, and the clause span covers
-            the body. That is why `fn_clause` grew the field. *)
+            Since ocap phase 7b the grant is a `needs` clause: the fix writes
+            one after the (empty) parameter list.  A `main` with a return type
+            already has `: T` there; the clause then goes before its `do`,
+            which this fix cannot find, so it inserts `: () needs ...` only
+            when the parameter list is followed by `do` on the same line. *)
          let grant_fix =
-           Err.FReplace { span = params_span; text = Printf.sprintf "(%s)" suggested } in
+           Err.FReplace { span = { params_span with Ast.start_line = params_span.Ast.end_line;
+                                                     start_col = params_span.Ast.end_col };
+                          text = Printf.sprintf " : () needs %s" suggested } in
          (* `main`'s own `needs` clause, when it has one: with an empty
             request that can only be `needs ()`. *)
          let main_needs_span =
@@ -10970,11 +10997,11 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
            ~fix:grant_fix
            (Printf.sprintf
               "`main` performs IO but declares no grant. The program reaches \
-               %s; a `main` with no capability parameter, no `needs` clause \
-               and no module `needs` line is granted nothing.\n\
-               help: declare the grant `main` actually needs —\n\
-              \        fn main(%s) : ()\n\
-               or grant everything with `fn main(cap : Cap(IO))`.\n\
+               %s; a `main` with no `needs` clause and no module `needs` line \
+               is granted nothing.\n\
+               help: request what `main` actually needs —\n\
+              \        fn main() : () needs %s\n\
+               or everything with `needs IO`.\n\
                `forge fix` can apply this."
               show_caps suggested))
    | _ -> ());
@@ -11014,7 +11041,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                  linked C code, whose behavior the capability lattice cannot \
                  bound. A narrow grant cannot be certified over an `extern` \
                  block.\n\
-                 help: grant `Cap(IO)`, or add a `Cap(IO.Foreign)` parameter \
+                 help: request `IO`, or add `IO.Foreign` to `main`'s request \
                  to accept that bound explicitly, or remove the extern \
                  dependency from everything `main` reaches."
                 show_grant c)
@@ -11026,14 +11053,6 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
               mirrors the no-grant path's `_cap_<leaf>` spelling (a fixed
               prefix, never a bare leaf like `spawn`, which is a reserved
               keyword and would not parse). *)
-           let leaf =
-             match String.rindex_opt c '.' with
-             | Some i -> String.sub c (i + 1) (String.length c - i - 1)
-             | None -> c
-           in
-           let param_hint =
-             Printf.sprintf "_cap_%s : Cap(%s)" (String.lowercase_ascii leaf) c
-           in
            let chain = cap_reach_chain env ~from:"main" ~cap:c in
            (* §X7: with a trace, the error points at the use and labels each
               call on the way and `main`'s grant; without one (a hop through
@@ -11055,9 +11074,9 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
            let grant_label =
              { Err.lbl_span = params_span;
                lbl_message = Printf.sprintf "`main` is granted only %s here" show_grant } in
-           (* The edit that grants it: one more `Cap(c)` parameter. *)
-           let param_fix =
-             add_param_fix ~params:params_span ~empty:false ~name:(cap_param_name c) ~cap:c in
+           (* The edit that grants it: [c] added to `main`'s request
+              (ocap phase 7b: a `needs` clause, never a `Cap` parameter). *)
+           let param_fix = main_request_fix decls ~form:!grant_form c in
            (* §X3: the same missing authority already reported — a capability
               passed for `c` whose fix threads a `Cap(c)` from `main`, or a
               use in a module missing `needs c` — takes this as a label, a
@@ -11080,8 +11099,8 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                { d with
                  Err.message =
                    Printf.sprintf "%s, and `main` is granted only %s.%s\n\
-                                   and give `main` a `Cap(%s)` parameter: `fn main(…, %s)`."
-                     head show_grant rest c param_hint;
+                                   and add `%s` to `main`'s request."
+                     head show_grant rest c;
                  labels = d.Err.labels @ hops @ [ grant_label ];
                  fix = Err.merge_fixes [ d.Err.fix; Err.fix_opt param_fix ] }
            | _ ->
@@ -11093,8 +11112,8 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                 "`main` is granted %s, but the program reaches `%s`%s. \
                  The grant is a ceiling on the WHOLE program — declaring \
                  `needs %s` does not raise it.\n\
-                 help: add a `Cap(%s)` parameter to `main` (e.g. \
-                 `fn main(…, %s)`)%s, or remove the use."
+                 help: add `%s` to `main`'s request (its `needs` clause, or the \
+                 module's `needs` line when `main` has no clause)%s, or remove the use."
                 show_grant c
                 (* Renders exactly like the sibling missing-`needs`
                    diagnostic's [Cap_infer.chain_note]
@@ -11109,10 +11128,10 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                    Printf.sprintf " (reached from `main`: %s)"
                      (render_cap_chain ("main" :: chain))
                  | _ -> "")
-                c c param_hint
+                c c
                 (* Widening to the IO root covers only a kind under IO. *)
                 (if March_caps.Cap_lattice.cap_subsumes "IO" c
-                 then ", or widen the whole grant to `Cap(IO)`" else "") })
+                 then ", or request all of `IO`" else "") })
       (List.sort_uniq String.compare closure)
 
 (* ── Per-role grants: the same walk from more roots (distributed-deploys
@@ -12037,12 +12056,10 @@ type role_root = {
 
 (* The runner front a called name is, if any: (protocol, role, callback
    positions).  A hosted front's callbacks start at [start]; a body front's
-   is the last argument ([-1]).  A CLUSTER hosted front (`offer_hosted_R`,
-   `cluster_hosted_R`) takes the role's grant as parameters after the node,
-   one per path, so its callbacks start that many places later:
-   [`Hosted_after_grant start] is the position with an empty grant. *)
+   is the last argument ([-1]).  (Before ocap phase 7b a cluster hosted
+   front took the role's grant after the node, which moved its callbacks.) *)
 let role_front_of (name : string)
-  : (string * string * [ `Body | `Hosted of int | `Hosted_after_grant of int ]) option =
+  : (string * string * [ `Body | `Hosted of int ]) option =
   match String.rindex_opt name '.' with
   | None -> None
   | Some i ->
@@ -12067,13 +12084,13 @@ let role_front_of (name : string)
       in
       (* longer prefixes first *)
       match strip "offer_hosted_" with
-      | Some r -> Some (proto, r, `Hosted_after_grant 3)
+      | Some r -> Some (proto, r, `Hosted 3)
       | None -> (
         match strip "cluster_hosted_" with
-        | Some r -> Some (proto, r, `Hosted_after_grant 3)
+        | Some r -> Some (proto, r, `Hosted 3)
         | None -> (
           match strip "host_" with
-          | Some r -> Some (proto, strip_or r, `Hosted 5)
+          | Some r -> Some (proto, strip_or r, `Hosted 4)
           | None -> (
             match List.find_map strip [ "run_"; "cluster_"; "offer_"; "initiate_" ] with
             | Some r -> Some (proto, r, `Body)
@@ -12122,11 +12139,7 @@ let find_role_roots (env : env) : role_root list =
                          match List.rev args with
                          | e :: _ -> root "body" None e
                          | [] -> ())
-                       | (`Hosted _ | `Hosted_after_grant _) as k ->
-                         let start = match k with
-                           | `Hosted start -> start
-                           | `Hosted_after_grant start -> start + List.length grant
-                         in
+                       | `Hosted start ->
                          let host = Option.bind (nth (start - 1)) host_of in
                          List.iteri
                            (fun j what -> Option.iter (root what host) (nth (start + j)))
@@ -12455,51 +12468,13 @@ let solve_role_roots (env : env)
     | _ -> solve_role_roots_full env in
   Option.map (fun s -> (s.rs_keyed, s.rs_own, s.rs_refs, s.rs_rows)) solved
 
-(* The `help:` of a [role_grant_exceeded] error.  Widening the grant is not the
-   whole edit: the body takes one `Cap` per granted path, in the grant's order,
-   between `Cap(Session.Live)` and the state (D34, [Desugar_endpoints.grants_of]),
-   so the new path is also a new parameter.  Saying only "add it to the grant"
-   left every one-turn answer rejected by the arity error that edit causes, so
-   the help spells out the grant line and the body's new parameter list.
-   A front over a cluster node ([front] is not `run_` or `host_`) takes the
-   grant as arguments too, after the node, so there the call is a third edit
-   and the help names it. *)
-let role_grant_help ~role ~proto ~(grant : string list) ~cap ~front : string =
-  let param_name path =
-    let last = match String.rindex_opt path '.' with
-      | Some i -> String.sub path (i + 1) (String.length path - i - 1)
-      | None -> path in
-    let b = Buffer.create 16 in
-    String.iteri
-      (fun i ch ->
-         if ch >= 'A' && ch <= 'Z' then begin
-           if i > 0 then Buffer.add_char b '_';
-           Buffer.add_char b (Char.lowercase_ascii ch)
-         end else Buffer.add_char b ch)
-      last;
-    (* `cap_` keeps the name off the builtins (`file_write` is one). *)
-    "cap_" ^ Buffer.contents b
-  in
-  let widened = grant @ [ cap ] in
-  let call_note =
-    let leaf = match String.rindex_opt front '.' with
-      | Some i -> String.sub front (i + 1) (String.length front - i - 1)
-      | None -> front in
-    if List.exists (fun p -> String.starts_with ~prefix:p leaf) [ "run_"; "host_" ] then ""
-    else
-      Printf.sprintf
-        " The call to `%s` takes the grant as well, one `Cap` per granted capability after \
-         the node, so it gains an argument: a `Cap(%s)`, last of them (`cap_narrow(io)` where \
-         the caller holds a wider capability `io`)."
-        front cap
-  in
+(* The `help:` of a [role_grant_exceeded] error.  Since ocap phase 7b a grant
+   adds no parameters to the body or the fronts, so widening the grant line is
+   the whole edit. *)
+let role_grant_help ~role ~proto ~(grant : string list) ~cap ~front:_ : string =
   Printf.sprintf
-    "help: add `%s` to the grant in protocol `%s`: `role %s needs %s`. The body then takes \
-     one `Cap` per granted capability, in the grant's order, between the session capability \
-     and the state, so it gains a parameter: `fn (s, %s, st) -> ...`.%s Pass `%s` on to any \
-     function the body hands its capabilities to. Or remove the use."
-    cap proto role (String.concat ", " widened)
-    (String.concat ", " (List.map param_name widened)) call_note (param_name cap)
+    "help: add `%s` to the grant in protocol `%s`: `role %s needs %s`. Or remove the use."
+    cap proto role (String.concat ", " (grant @ [ cap ]))
 
 let check_role_grants (env : env) (decls : Ast.decl list) : unit =
   if Hashtbl.length env.role_grants = 0 then ()
@@ -12520,22 +12495,16 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                  else
                    let show_main =
                      match main_grants with
-                     | [] -> "nothing (`main` has no capability parameter)"
-                     | gs -> String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) gs)
-                   in
-                   let leaf =
-                     match String.rindex_opt c '.' with
-                     | Some i -> String.sub c (i + 1) (String.length c - i - 1)
-                     | None -> c
+                     | [] -> "nothing (`main` requests no capability)"
+                     | gs -> "`needs " ^ String.concat ", " gs ^ "`"
                    in
                    Err.error ~code:Err.Code.role_grant_too_wide env.errors ~span:sp
                      (Printf.sprintf
                         "Protocol `%s`: `role %s needs %s` is wider than `main`'s grant, which is %s. \
-                         A role's grant must fit within the program's: the runner narrows the role's \
-                         capabilities from what `main` holds.\n\
-                         help: add a `Cap(%s)` parameter to `main` (e.g. `_cap_%s : Cap(%s)`), or take \
-                         `%s` out of the role's grant."
-                        proto role c show_main c (String.lowercase_ascii leaf) c c))
+                         A role's grant must fit within the program's: everything the role's code \
+                         reaches is part of the program.\n\
+                         help: add `%s` to `main`'s `needs` clause, or take `%s` out of the role's grant."
+                        proto role c show_main c c))
               caps)
          env.role_grants);
     let solved = solve_role_roots_full ~decls env in
@@ -12566,9 +12535,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
       List.iter
         (fun (k, r) ->
            let covered c = List.exists (fun g -> cap_subsumes g c) r.rr_grant in
-           let show_grant =
-             String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) r.rr_grant)
-           in
+           let show_grant = String.concat ", " (List.map (fun g -> Printf.sprintf "`%s`" g) r.rr_grant) in
            List.iter
              (fun c ->
                 if not (cap_subsumes "IO" c) || covered c || Hashtbl.mem type_mismatch k then ()
@@ -13733,6 +13700,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      shared key or print (specs/progress/2026-11-16-race-warnings.md). *)
   Typecheck_races.check_module ~iter_expr
     ~own_exprs:Typecheck_caps.module_own_exprs final_env.errors m.Ast.mod_decls;
+  (* Ocap phase 7b: `Cap(IO.X)` values, `cap_narrow` and `main`'s `Cap`
+     parameters are retired (lib/typecheck/typecheck_retire.ml). *)
+  Typecheck_retire.check_module ~iter_expr final_env.errors m.Ast.mod_decls;
   check_cap_narrow_sites final_env;
   (* Validate capability declarations for the top-level module *)
   (* The entry module's own name is NOT a prefix segment for cap-closure keys:
@@ -13874,11 +13844,6 @@ let check_module_with_refs ?errors (m : Ast.module_)
 let last_with_env_final : env ref = ref (make_env (Err.create ()) (Hashtbl.create 0))
 
 let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
-  (* R2: the REPL has no entry point to be granted the root capability from, so
-     [root_cap] stays nameable there.  This entry point is the REPL's — its
-     only caller is [lib/jit/repl_jit.ml] — which is what makes it the right
-     place to carry the exemption rather than a flag threaded from the CLI. *)
-  let env = { env with root_cap_allowed = true } in
   record_names_load env.record_names_snapshot;   (* per-check, see [record_names_dump] *)
   let errors = env.errors in
   let type_map = env.type_map in

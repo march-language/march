@@ -92,7 +92,7 @@ mod Actor do
   """
   fn debug() : Result(Cap(Actor.Debug), CapError) do
     let? _ = Authority.check("Actor.Debug", "")
-    Ok(mint_cap(root_cap))
+    Ok(mint_cap())
   end
 
   -- Why Actor.inspect_state could not answer:
@@ -143,7 +143,7 @@ mod Actor do
   """
   fn introspect() : Result(Cap(Actor.Introspect), CapError) do
     let? _ = Authority.check("Actor.Introspect", "")
-    Ok(mint_cap(root_cap))
+    Ok(mint_cap())
   end
 
   doc """

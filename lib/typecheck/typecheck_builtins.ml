@@ -1074,12 +1074,12 @@ let builtin_bindings : (string * scheme) list =
        one place below and why reject/t153-t155 are the load-bearing witnesses
        rather than decorative ones. *)
     ("cap_narrow", poly2 (fun a b -> TArrow (TCon ("Cap", [a]), TCon ("Cap", [b]))));
-    (* mint_cap: the gated proof-cap mint. Same scheme as cap_narrow
-       (Cap(IO) -> Cap(a)); the GATE (declaring-module + public fn, proof-cap
-       target only) is enforced in the EApp special-case, not the scheme.
-       Runtime-erased: aliases cap_narrow in eval/defun/llvm (caps compile to
+    (* mint_cap: the gated proof-cap mint, [mint_cap()] (ocap phase 7b: it
+       took the root [Cap(IO)] until that was retired).  The GATE
+       (declaring-module + public fn, proof-cap target only) is enforced in the
+       EApp special-case, not the scheme.  Runtime-erased (caps compile to
        null/VUnit). *)
-    ("mint_cap",   poly1 (fun a -> TArrow (TCon ("Cap", [TCon ("IO", [])]), TCon ("Cap", [a]))));
+    ("mint_cap",   poly1 (fun a -> TArrow (t_unit, TCon ("Cap", [a]))));
     (* cap_impl: attach a runtime DICTIONARY to a capability that declared one
        (`proof cap Live with Ops`).  The scheme is deliberately loose in the
        dictionary position — the dictionary's type is checked against the

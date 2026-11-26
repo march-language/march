@@ -3352,8 +3352,9 @@ let check_mint_cap_sites (env : env) : unit =
                  cap_narrow's job. *)
               Err.error ~code:Err.Code.mint_cap_invalid env.errors ~span:sp
                 (render_parts [
-                  MPText "mint_cap is only for proof capabilities; use ";
-                  MPCode "cap_narrow"; MPText " to attenuate IO capabilities." ]))
+                  MPText "mint_cap is only for proof capabilities; an IO capability is not a value: ";
+                  MPText "code uses the current authority, which "; MPCode "main"; MPText "'s ";
+                  MPCode "needs"; MPText " clause asks for." ]))
          | _ ->
            (* Result is not a concrete cap constructor — an unbound (generalized)
               cap var that never got pinned to a specific proof cap.  This

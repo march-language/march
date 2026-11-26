@@ -1178,7 +1178,7 @@ let builtins : builtin list = [
      its argument.  That agreed with the interpreter only while a Cap(IO) was
      always NULL. *)
   { march_name = "mint_cap"; c_name = Some "march_mint_cap"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
-    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mint_cap(ptr %cap)" };
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mint_cap()" };
   (* cap_impl / cap_dict — capability runtime dictionaries.  Both are
      identity-shaped at the machine level: a capability is NULL-or-dictionary,
      and Option is niche-encoded (None = 0, Some(x) = x, lib/tir/repr.ml), so

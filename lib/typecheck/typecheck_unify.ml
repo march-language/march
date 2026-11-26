@@ -83,15 +83,11 @@ let report_cap_mismatch env ~span ~reason ~(p : provided) ~have ~need =
   let arg = match p.p_name with
     | Some n -> Printf.sprintf "`%s` is" n
     | None -> "this is" in
-  let arg_text = match p.p_name with Some n -> n | None -> "the capability" in
+  (* ocap phase 7b: a `Cap(IO.X)` value only reaches here in retired code,
+     whose parameter carries its own [cap_param_retired] error. *)
   let help =
-    if cap_subsumes have need then
-      Printf.sprintf "help: pass `cap_narrow(%s)`, which narrows it to `Cap(%s)`."
-        arg_text need
-    else
-      Printf.sprintf
-        "help: thread a `Cap(%s)` down from `main` (add a parameter for it) and \
-         pass that here." need
+    "help: capability values were retired; remove the parameter and this argument \
+     (see the `cap_param_retired` error on the parameter)."
   in
   let labels =
     (match call with
