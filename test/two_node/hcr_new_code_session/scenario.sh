@@ -71,7 +71,11 @@ sleep 3
 "$deploy" deploy "$socks/b.sock" "$work/keys" "$work/patch_b/v2.so" $(old_schemas b) > "$work/deploy_b.log" 2>&1 \
   || { cat "$work/deploy_b.log" >&2; fail "the deploy to node-b failed"; }
 sleep 3
-"$deploy" deploy "$socks/a.sock" "$work/keys" "$work/patch_a/v2.so" $(old_schemas a) > "$work/deploy_a.log" 2>&1 \
+# node-a's patch prints from Host.host_tick, which version 1 never does: since
+# ocap phase 7b that is a real widening of the hot module's authority (version
+# 1 used to hold the console through a `Cap(IO)` parameter, which no longer
+# exists), so the deploy grants it, as an operator would.
+GRANT_CAPS=IO.Console "$deploy" deploy "$socks/a.sock" "$work/keys" "$work/patch_a/v2.so" $(old_schemas a) > "$work/deploy_a.log" 2>&1 \
   || { cat "$work/deploy_a.log" >&2; fail "the deploy to node-a failed"; }
 wait_line a "node-a: version 2 host sees the version-1 offer"
 wait_line b "node-b: v1 Buyer with a v2 Shop"

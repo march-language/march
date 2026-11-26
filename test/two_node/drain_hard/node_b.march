@@ -26,7 +26,7 @@ mod DrainHardB do
     Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
       if got == 0 do
         println("node-b: draining, hard deadline 300 ms")
-        SessionNode.drain_epochs(100, 300)
+        Authority.must(SessionNode.drain_epochs(100, 300))
       else () end
       sleep_ms(150)
       if got + 1 >= 20 do Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))

@@ -11764,14 +11764,14 @@ let role_manifest_src ?(serve = false) ~uses_save () =
     ()
   end
 
-  pfn cons(s : Cap(Session.Live), con : Cap(IO.Console), st : Stream_Cons.Entry) : Stream_Cons.Yield do
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.Entry) : Stream_Cons.Yield do
     Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
       %s
       Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
   end
 
 %s
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     %s
   end
 end
@@ -11794,14 +11794,14 @@ end
        \    send(t, Bump(1))\n\
        \    if List.length(Authority.must(Process.argv())) > 99 do\n\
        \      let _ = Stream_Run.run_Cons(\"cons\", \"secret\", Stream_Run.addrs_from_env(),\n\
-       \        fn (s, con, fw, st) -> cons(s, con, st))\n\
+       \        fn (s, st) -> cons(s, st))\n\
        \      ()\n\
        \    else\n\
        \      sleep_ms(60000)\n\
        \    end"
      else
        "let _ = Stream_Run.run_Cons(\"cons\", \"secret\", Stream_Run.addrs_from_env(),\n\
-       \      fn (s, con, fw, st) -> cons(s, con, st))\n\
+       \      fn (s, st) -> cons(s, st))\n\
        \    ()")
 
 (* Compile [src_text] in a fresh directory (own cwd and HOME, so no CAS hit

@@ -31,7 +31,7 @@ mod DrainRingC do
       let st3 = Ring_C.send_More_b(s, st2, true)
       if rounds + 1 == 2 do
         println("node-c: draining")
-        SessionNode.drain_epochs(600000, 0)
+        Authority.must(SessionNode.drain_epochs(600000, 0))
       else () end
       role_c(s, st3, rounds + 1))
   end

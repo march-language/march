@@ -26,7 +26,7 @@ mod DrainStreamB do
       println("Cons got " ++ int_to_string(n))
       if got + 1 == 3 do
         println("node-b: draining")
-        SessionNode.drain_epochs(600000, 0)
+        Authority.must(SessionNode.drain_epochs(600000, 0))
       else () end
       if got + 1 >= 10 do Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))
       else cons(s, Stream_Cons.choose_more(s, st1, true), got + 1) end)
