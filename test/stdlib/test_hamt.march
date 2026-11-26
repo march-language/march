@@ -414,4 +414,52 @@ describe "string keys" do
   end
 end
 
+-- Only the low 35 bits of a hash pick a path. Two keys whose hashes agree on
+-- those bits but differ above them used to share a bucket tagged with the
+-- first key's full hash: the second key could not be found or removed, and
+-- inserting it again never returned. int_hash is the identity, so 1 and
+-- 1 + 2^35 are such a pair; so are a hash and its negative-range twin.
+describe "hashes that agree on the low 35 bits" do
+  test "both keys are found" do
+    let k2 = 1 + 34359738368
+    let h = Hamt.insert(Hamt.insert(Hamt.empty(), 1, "a", int_hash, int_eq), k2, "b", int_hash, int_eq)
+    assert (Hamt.size(h) == 2)
+    assert (Hamt.get(h, 1, int_hash, int_eq) == Some("a"))
+    assert (Hamt.get(h, k2, int_hash, int_eq) == Some("b"))
+  end
+
+  test "the second key can be removed" do
+    let k2 = 1 + 34359738368
+    let h = Hamt.insert(Hamt.insert(Hamt.empty(), 1, "a", int_hash, int_eq), k2, "b", int_hash, int_eq)
+    let r = Hamt.remove(h, k2, int_hash, int_eq)
+    assert (Hamt.size(r) == 1)
+    assert (Hamt.get(r, k2, int_hash, int_eq) == None)
+    assert (Hamt.get(r, 1, int_hash, int_eq) == Some("a"))
+  end
+
+  test "inserting the second key again replaces its value" do
+    let k2 = 1 + 34359738368
+    let h = Hamt.insert(Hamt.insert(Hamt.empty(), 1, "a", int_hash, int_eq), k2, "b", int_hash, int_eq)
+    let h2 = Hamt.insert(h, k2, "c", int_hash, int_eq)
+    assert (Hamt.size(h2) == 2)
+    assert (Hamt.get(h2, k2, int_hash, int_eq) == Some("c"))
+  end
+
+  test "a third key with the same low bits joins them" do
+    let k2 = 1 + 34359738368
+    let k3 = 1 + 2 * 34359738368
+    let h = Hamt.insert(Hamt.insert(Hamt.insert(Hamt.empty(), 1, "a", int_hash, int_eq), k2, "b", int_hash, int_eq), k3, "c", int_hash, int_eq)
+    assert (Hamt.size(h) == 3)
+    assert (Hamt.get(h, k3, int_hash, int_eq) == Some("c"))
+  end
+
+  test "negative hashes work" do
+    let h = Hamt.insert(Hamt.insert(Hamt.empty(), -1, "a", int_hash, int_eq), -2, "b", int_hash, int_eq)
+    assert (Hamt.size(h) == 2)
+    assert (Hamt.get(h, -1, int_hash, int_eq) == Some("a"))
+    assert (Hamt.get(h, -2, int_hash, int_eq) == Some("b"))
+    assert (Hamt.size(Hamt.remove(h, -1, int_hash, int_eq)) == 1)
+  end
+end
+
 end -- mod TestHamt

@@ -33,3 +33,30 @@ Actual (interpreted / compiled): interpreted prints `None`, `2`, then hangs in t
 Source: `make_branch`, `hamt_get`, `hamt_insert` (the `HCollision` arm with `ch != h`) and `hamt_remove` in `stdlib/hamt.march`. One fix direction: mask the hash to 35 bits once in the public `get` / `insert` / `remove`.
 
 Found by the 2026-10-18 doc sweep; re-verified 2026-11-11 on a7110f95f.
+
+## Fixed (2026-11-25)
+
+A collision bucket is now matched by path, not by full hash: `same_path(a, b)` is true
+when two hashes agree on the low 35 bits, and `hamt_get`, `hamt_insert` and `hamt_remove`
+use it where they compared a bucket's tag with the key's hash. Two keys that agree on
+those bits are then ordinary collisions, told apart by `eq_fn`. A negative hash works too.
+The module header no longer asks callers to mask.
+
+The first version masked the hash to 35 bits in the public functions, as this file
+suggests. CI's `browser-repl` job refused it: the in-browser March has a 32-bit Int, so
+the literal 2^35 - 1 does not load and a product that makes it overflows. `same_path`
+compares 30 bits and 5 bits separately and needs neither.
+
+Tests: `test/stdlib/test_hamt.march`, group "hashes that agree on the low 35 bits" (five
+cases: both keys found, the second removed, the second re-inserted, a third key, negative
+hashes). On main the file never finished interpreted (killed after 60 s); it passes
+interpreted and compiled (`--compile --test`: 49 tests). The browser build's smoke test
+(58 cases) and doc sweep (3054 examples, no new failure) pass on a local build.
+
+Cost: not re-measured for this version. The masked version showed no difference on
+`bench/hash_map_bench.march`; this one adds work only when a lookup reaches a collision
+bucket.
+
+Not done: the plan also asks for a law in the stdlib laws pass. `Hamt` is untyped and
+takes its hash and equality as closures, which that pass (refinement contracts) cannot
+state; no law was added.

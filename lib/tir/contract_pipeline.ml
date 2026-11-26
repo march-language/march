@@ -134,7 +134,23 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
       { tir with Tir.tm_exports = exports }
     end
   in
-  let tir = Mono.monomorphize ?iface_methods tir in
+  (* Pre-mono prune: drop what the roots cannot reach before Mono, Fusion and
+     Defun run on it (they used to process the whole prepended stdlib).  Same
+     gate and roots as the early DCE below, which would drop these functions
+     anyway; [Dce_pre_mono] adds the edges Mono mints by name, and Mono raises
+     if it ever resolves a name in [pruned].
+     specs/2026-11-24-stdlib-compile-floor-design.md. *)
+  let tir, pruned =
+    if not (opt && hot_reload = None && (not is_js) && Pass_switch.on "dce-pre-mono")
+    then (tir, None)
+    else begin
+      let tir, removed =
+        Dce_pre_mono.prune ?iface_methods ~extra_roots ~fail_open:dce_fail_open tir in
+      stamp_tir "dce-pre-mono" tir;
+      (tir, Some removed)
+    end
+  in
+  let tir = Mono.monomorphize ?iface_methods ?pruned tir in
   snap "tir-mono" tir;
   stamp_tir "mono" tir;
   (* After mono, update tm_exports to use monomorphized names *)

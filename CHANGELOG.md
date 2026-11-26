@@ -36,6 +36,10 @@ git log is authoritative for exact commits.
   `needs IO` no longer covers inspecting other actors) and `IO.Cluster`; `main` requests
   them with a parameter such as `Cap(Actor.Introspect)`. Write `Authority.must(Actor.introspect())` where you wrote
   `Actor.introspect(io)`.
+- **Compiles are about another 0.27 s faster.** Functions the program cannot reach are now
+  dropped before monomorphization instead of after closure conversion, so those passes see a
+  few dozen functions on a small program instead of the whole standard library (hello world:
+  1.38 s to 1.12 s before code generation). `--disable-pass dce-pre-mono` turns it off.
 - **Compiles are about 0.3 s faster.** Lemma erasure collected the names the program
   mentions once per `@[lemma]` declaration, walking the whole program (stdlib included)
   each time; it now walks it once. What gets erased is unchanged.
@@ -1386,6 +1390,16 @@ git log is authoritative for exact commits.
   with "arity mismatch: expected 0 args, got 1". `Logger.with_span` and a direct
   `try_finally` with `fn -> ...` callbacks had the same failure. Both `fn -> ...` and
   `fn _ -> ...` now work on both.
+- **`Hamt` no longer loses a key, or hangs, when two hashes agree on their low 35 bits.**
+  With a hash function that returns more than 35 bits (the builtin `hash` returns 62),
+  the second of two such keys could not be found or removed, and inserting it again never
+  returned (a stack overflow when compiled). Such keys are now kept side by side like any
+  other hash collision. `Map` and `DataFrame` masked their hashes already and were not
+  affected.
+- **On Linux, a TLS write to a peer that has gone no longer kills the process.**
+  `Tls.write` (and a `Tls.read` or `Tls.close` that had to send) on a connection the peer
+  had reset raised SIGPIPE, and the program exited with status 141. It now returns
+  `Err(TlsError)`. macOS was not affected.
 - **`File.close` reports a write that fails when the file is flushed.** Writes through a
   `File.Handle` are buffered, so a full disk or a quota often shows up only when the
   handle is closed. `File.close` returned `Ok(())` anyway and the data was lost silently.
