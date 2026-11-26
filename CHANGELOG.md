@@ -1381,6 +1381,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Logger.with_scope(fields, fn -> ...)` runs in the interpreter.** A thunk written with
+  no parameter matched the declared type and ran compiled, but the interpreter stopped
+  with "arity mismatch: expected 0 args, got 1". `Logger.with_span` and a direct
+  `try_finally` with `fn -> ...` callbacks had the same failure. Both `fn -> ...` and
+  `fn _ -> ...` now work on both.
 - **`File.close` reports a write that fails when the file is flushed.** Writes through a
   `File.Handle` are buffered, so a full disk or a quota often shows up only when the
   handle is closed. `File.close` returned `Ok(())` anyway and the data was lost silently.

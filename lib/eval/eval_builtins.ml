@@ -2062,10 +2062,19 @@ let base_env : env =
        guarantee resource release even when a callback panics. *)
   ; ("try_finally", VBuiltin ("try_finally", function
       | [action_fn; cleanup_fn] ->
-        let run_cleanup () =
-          try ignore (!apply_hook cleanup_fn [VUnit]) with _ -> ()
+        (* A callback is called with one placeholder argument, as the
+           compiled runtime does (march_try_finally).  Function types carry
+           no arity yet, so a zero-parameter lambda (`fn -> ...`) typechecks
+           here too and compiled code runs it, ignoring the extra word; give
+           it no argument instead of stopping with an arity mismatch. *)
+        let call f = match f with
+          | VClosure (_, [], _, _, _) -> !apply_hook f []
+          | _ -> !apply_hook f [VUnit]
         in
-        (match !apply_hook action_fn [VUnit] with
+        let run_cleanup () =
+          try ignore (call cleanup_fn) with _ -> ()
+        in
+        (match call action_fn with
          | exception e -> run_cleanup (); raise e
          | result -> run_cleanup (); result)
       | _ -> eval_error "try_finally(action: (_) -> a, cleanup: (_) -> _): a"))

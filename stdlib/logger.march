@@ -394,7 +394,8 @@ mod Logger do
       Logger.with_scope([Logger.LogField("request_id", Logger.s("abc123"))],
                         fn _ -> handle_request(req))
 
-  Returns whatever `thunk` returns. Pass the thunk as `fn _ -> ...`.
+  Returns whatever `thunk` returns. The thunk may be `fn -> ...` or
+  `fn _ -> ...`.
 
   ## Examples
 
