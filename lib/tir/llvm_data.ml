@@ -121,29 +121,49 @@ let ctor_entry ctx name n_args_fallback =
   | None   ->
     (* Exact key not found: try to find a type-qualified key ending in ".<name>".
        This handles pattern matches on constructors whose scrutinee type is TVar "_"
-       (unknown at codegen time) — e.g. nested match arms where the inner value's
-       type was not propagated through the pattern-matrix compiler. *)
+       (unknown at codegen time), e.g. nested match arms where the inner value's
+       type was not propagated through the pattern-matrix compiler, and a
+       module's own type keyed bare ("HEntry.HLeaf") while [ctor_info] holds it
+       module-qualified ("HashMap.HEntry.HLeaf").
+
+       Several entries can end in ".<name>".  The candidates are SORTED by key,
+       so the pick never depends on [Hashtbl] iteration order (which moves with
+       the number of types in the module: the same source used to resolve
+       "HEntry.HLeaf" to Hamt's, HashMap's or Map's entry depending on what
+       else the program declared).  Among them the call-site arity breaks the
+       tie (Heap.HLeaf with 0 fields against HEntry.HLeaf with 3).
+
+       Same arity AND the same fields (the three HEntry declarations,
+       File.Seq/Seq.Seq): any candidate lays the cell out correctly, and one
+       key always gets one answer, so construction and matching agree.
+
+       Same arity but DIFFERENT fields cannot be resolved here: whichever is
+       picked, the other type's fields would be stored and loaded at the wrong
+       types.  Lowering keys those by declaring module
+       ([Lower_state.ctor_shape_conflict_tbl]) so they do not reach this
+       point.  What still does is a use that carries no type at all (a
+       harness lowering without a type map, a bare constructor outside every
+       declaring module); for it the sorted pick is at least the same on
+       every build. *)
     let suffix = "." ^ name in
     let suffix_len = String.length suffix in
-    (* Collect all entries ending with ".<ctor>" and pick the best match.
-       "Best" = arity matches n_args_fallback; otherwise fall back to first found.
-       This handles the case where two unrelated types share a constructor name
-       (e.g. Heap.HLeaf with 0 fields vs HEntry.HLeaf with 3 fields): the
-       call-site arity breaks the tie instead of hashtable iteration order. *)
     let candidates = Hashtbl.fold (fun k v acc ->
         let klen = String.length k in
         if klen > suffix_len &&
            String.equal (String.sub k (klen - suffix_len) suffix_len) suffix
-        then v :: acc
+        then (k, v) :: acc
         else acc
       ) ctx.Llvm_ctx.ctor_info [] in
+    let candidates = List.sort (fun (a, _) (b, _) -> String.compare a b) candidates in
     let found = match candidates with
       | [] -> None
-      | [single] -> Some single
+      | [(_, single)] -> Some single
       | many ->
-        (match List.find_opt (fun e -> List.length e.Llvm_ctx.ce_fields = n_args_fallback) many with
-         | Some exact -> Some exact
-         | None -> Some (List.hd many))
+        let same_arity = List.filter (fun (_, e) ->
+            List.length e.Llvm_ctx.ce_fields = n_args_fallback) many in
+        (match same_arity with
+         | [] -> Some (snd (List.hd many))
+         | (_, first) :: _ -> Some first)
     in
     (match found with
      | Some e -> e

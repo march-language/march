@@ -36,6 +36,11 @@ git log is authoritative for exact commits.
   `needs IO` no longer covers inspecting other actors) and `IO.Cluster`; `main` requests
   them with a parameter such as `Cap(Actor.Introspect)`. Write `Authority.must(Actor.introspect())` where you wrote
   `Actor.introspect(io)`.
+- **Compiles are about another 0.2 s faster.** Four lookups in the front end that rescanned
+  a whole list or file per item (a module's names per variable when lowering, a source file
+  per function when hashing its text, the z3 lookup per proof obligation, the call graph per
+  `@[lemma]`) now use a table built once (hello world: 1.32 s to 1.13 s before code
+  generation). Diagnostics and generated code are unchanged.
 - **Compiles are about another 0.27 s faster.** Functions the program cannot reach are now
   dropped before monomorphization instead of after closure conversion, so those passes see a
   few dozen functions on a small program instead of the whole standard library (hello world:
@@ -1389,6 +1394,17 @@ git log is authoritative for exact commits.
   closing a connection timed out waiting for a task still using its socket, the next
   connection given the same descriptor number had every wait on its socket fail until it
   closed. The stale cancellation is now dropped when the number is reused.
+- **Recursion through scoped functions no longer overflows the stack.** A function whose
+  whole body is a `restrict` block, calling itself, and two functions with scoped `needs`
+  clauses that tail-call each other, used one stack frame per call in a compiled program,
+  and 100,000 calls died with SIGBUS. Both now loop like an unscoped tail call, with the
+  same authority in force.
+- **Two modules that each declare a type of the same name, with a constructor of the same
+  name but different fields, now compile correctly.** Compiled code laid both out as one of
+  them, so the other module's field was stored at the wrong type (`Safe(Int)` beside
+  `Safe(Float)` failed in clang; `Safe(Int)` beside the standard library's `Html.Safe`
+  could pick either layout depending on program size). Each module's own code now uses its
+  own layout.
 - **`march --jit` reports an interpreter-only builtin as an error in your program.** A
   program calling one (such as `App.stop`) is refused by `--compile` with a diagnostic at
   the call; `--jit` printed "internal compiler error", a backtrace and a request to file a
