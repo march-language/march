@@ -19537,15 +19537,21 @@ end|} in
 
 (* R6 (a): a qualified builtin type is never canonicalised to a bare
    builtin of the same arity: `IO.Process` is the capability, not the
-   handle type `Process`. *)
+   handle type `Process`.  Since ocap phase 7b a `Cap(IO.Process)` is a
+   retired value, so the program is refused, but as that capability: the
+   retirement error names `Cap(IO.Process)`, and nothing reads it as the
+   handle type (no widening or handle mismatch). *)
 let test_cap_io_process_narrow () =
   let ctx = typecheck {|mod App do
   needs IO
   fn narrow(io : Cap(IO)) : Cap(IO.Process) do cap_narrow(io) end
 end|} in
-  Alcotest.(check bool) "cap_narrow to Cap(IO.Process) is accepted" false
+  Alcotest.(check bool) "read as the capability: the retirement names it" true
+    (has_error_with ctx "`Cap(IO.Process)` was retired");
+  Alcotest.(check bool) "not as the handle: no widening" false
     (has_error_with ctx "cannot be widened");
-  Alcotest.(check bool) "no error at all" false (has_errors ctx)
+  Alcotest.(check bool) "not as the handle: no Process mismatch" false
+    (has_error_with ctx "Process`, but")
 
 (* R6 (b): a user module type named Process is its own type, never the
    builtin handle type, so a value of it cannot pass as a handle. *)

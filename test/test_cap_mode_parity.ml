@@ -567,7 +567,9 @@ let not_static =
     ("cap_impl_invalid", "cap_impl declaration check inside the typechecker");
     ("cap_mismatch", "Cap(X) argument type check inside the typechecker");
     ("cap_narrow_invalid", "cap_narrow call check inside the typechecker");
+    ("cap_narrow_retired", "ocap phase 7b retirement check inside the typechecker every mode runs; test/errors/cap_param_retired_*");
     ("cap_needs", "the body-scan check inside the typechecker every mode runs; test/errors/cap_needs_*");
+    ("cap_param_retired", "ocap phase 7b retirement check inside the typechecker every mode runs; test/errors/cap_param_retired_*");
     ("cap_result_unhandled", "a type mismatch reported by the typechecker every mode runs; test/errors/cap_result_unhandled_*");
     ("cap_root_broad", "lint on a broad root capability; typechecker");
     ("cap_widen", "Cap widening check inside the typechecker");
