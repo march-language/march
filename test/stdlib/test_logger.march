@@ -3,6 +3,8 @@
 -- @capture_io
 
 mod TestLogger do
+needs IO.Clock
+needs IO.Random
 
 -- Helper: get a Level from a string, panic if unknown
 pfn get_level(s) do
@@ -153,6 +155,40 @@ describe "Logger" do
       Logger.error("test error")
       Logger.log_if(get_level("info"), get_level("debug"), "should print")
       Logger.log_if(get_level("debug"), get_level("error"), "should not print")
+    end
+
+  end
+
+  -- The thunk may be written with no parameter (`fn -> ...`, what the
+  -- declared type `() -> a` says) or with one it ignores (`fn _ -> ...`).
+  -- The interpreter used to pass the thunk one argument whatever its arity
+  -- and stopped with "arity mismatch: expected 0 args, got 1" on the first.
+  describe "with_scope and with_span thunks" do
+
+    test "with_scope takes a zero-parameter thunk" do
+      let n = Logger.with_scope([Logger.LogField("x", Logger.i(1))], fn -> Logger.field_count())
+      assert (n == 1)
+      assert (Logger.field_count() == 0)
+    end
+
+    test "with_scope takes a one-parameter thunk" do
+      let n = Logger.with_scope([Logger.LogField("x", Logger.i(1))], fn _ -> Logger.field_count())
+      assert (n == 1)
+      assert (Logger.field_count() == 0)
+    end
+
+    test "with_span takes a zero-parameter thunk" do
+      let n = Logger.with_span("work", fn -> Logger.field_count())
+      assert (n == 5)
+      assert (Logger.field_count() == 0)
+    end
+
+    test "try_finally takes zero-parameter callbacks" do
+      let before = Logger.field_count()
+      let v = try_finally(fn -> 41 + 1, fn -> Logger.with_fields([Logger.LogField("y", Logger.i(2))]))
+      assert (v == 42)
+      assert (Logger.field_count() == before + 1)
+      Logger.clear_context()
     end
 
   end
