@@ -13883,9 +13883,23 @@ let capture_escape_message (e : Capture.escape) : string * string list =
     | Capture.Registry -> Printf.sprintf "is kept by `%s`" e.Capture.e_what
     | Capture.Untracked -> "is passed to code the compiler cannot follow"
   in
+  (* An impl method is known to the pass as `Iface$Type.method`: the program
+     wrote `method`. *)
+  let written (why : string) : string =
+    String.concat "`"
+      (List.map
+         (fun part ->
+            if String.contains part '$' && not (String.contains part ' ') then
+              match String.rindex_opt part '.' with
+              | Some i -> String.sub part (i + 1) (String.length part - i - 1)
+              | None -> part
+            else part)
+         (String.split_on_char '`' why))
+  in
   let steps =
     List.filter_map
       (fun (why, (sp : Ast.span)) ->
+         let why = written why in
          if sp = Ast.dummy_span || Typecheck_builtins.span_is_stdlib sp then None
          else if String.length why > 13 && String.sub why 0 13 = "is the handle" then None
          else if sp = e.Capture.e_open_at then None
@@ -13904,6 +13918,57 @@ let capture_fault_for_test = Sys.getenv_opt "MARCH_CAPTURE_FAULT" <> None
 
 let check_capture_escapes ~(raise_on_failure : bool) (env : env) (errors : Err.ctx) (decls : Ast.decl list)
     : unit =
+  (* `scoped` in a declared type's field or constructor: the type conversion for a type
+     declaration drops the marker without a word, so it is reported here. *)
+  let rec scoped_span (t : Ast.ty) : Ast.span option =
+    let first (t : Ast.ty) =
+      let rec go (t : Ast.ty) =
+        match t with
+        | Ast.TyCon (n, _) | Ast.TyVar n -> Some n.Ast.span
+        | Ast.TyArrow (a, b) -> (match go a with Some s -> Some s | None -> go b)
+        | Ast.TyTuple ts -> List.find_map go ts
+        | Ast.TyRecord fs -> List.find_map (fun (_, t) -> go t) fs
+        | Ast.TyLinear (_, t) | Ast.TyScoped t | Ast.TyRefine (t, _, _) -> go t
+        | Ast.TyNatOp (_, a, _) -> go a
+        | Ast.TyNat _ | Ast.TyChan _ -> None
+      in
+      go t
+    in
+    match t with
+    | Ast.TyScoped t -> Some (Option.value ~default:Ast.dummy_span (first t))
+    | Ast.TyCon (_, args) -> List.find_map scoped_span args
+    | Ast.TyArrow (a, b) -> (match scoped_span a with Some s -> Some s | None -> scoped_span b)
+    | Ast.TyTuple ts -> List.find_map scoped_span ts
+    | Ast.TyRecord fs -> List.find_map (fun (_, t) -> scoped_span t) fs
+    | Ast.TyLinear (_, t) | Ast.TyRefine (t, _, _) -> scoped_span t
+    | Ast.TyVar _ | Ast.TyNat _ | Ast.TyNatOp _ | Ast.TyChan _ -> None
+  in
+  let rec scoped_fields (ds : Ast.decl list) : unit =
+    List.iter
+      (fun (d : Ast.decl) ->
+         match d with
+         | Ast.DMod (_, _, inner, _) -> scoped_fields inner
+         | Ast.DType (_, _, _, def, _) ->
+           let tys =
+             match def with
+             | Ast.TDRecord fields -> List.map (fun (f : Ast.field) -> f.Ast.fld_ty) fields
+             | Ast.TDVariant vs -> List.concat_map (fun (v : Ast.variant) -> v.Ast.var_args) vs
+             | Ast.TDAlias _ -> []
+           in
+           List.iter
+             (fun (ty : Ast.ty) ->
+                match scoped_span ty with
+                | Some span ->
+                  Err.error ~code:Err.Code.scoped_misplaced errors ~span
+                    "`scoped` marks the handle a callback receives, so it is written only before the \
+                     parameter type of a function type that is itself a function's parameter, as in \
+                     `fn with_open(path : String, body : scoped File.Handle -> r)`."
+                | None -> ())
+             tys
+         | _ -> ())
+      ds
+  in
+  scoped_fields decls;
   let rec declares_scoped (ds : Ast.decl list) : string list =
     List.concat_map
       (function

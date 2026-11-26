@@ -230,6 +230,8 @@ type st = {
           records none (the editor's: [check_module_with_env]) *)
   actors : (string, actor_info) Hashtbl.t;
   handler_keys : (string, unit) Hashtbl.t;
+  mod_uses : (string, string list) Hashtbl.t;  (** a module's `use`/`import` paths, by module prefix *)
+  mod_aliases : (string, (string * string) list) Hashtbl.t;  (** a module's aliases: short name, long path *)
   mutable sites : raw_site list;
   annot : (Ast.span, T.t) Hashtbl.t;
   binders : (Ast.span, string * string) Hashtbl.t;  (** a `let` or pattern variable: its name, its owner *)
@@ -349,6 +351,15 @@ let scan_decls (s : st) (decls : Ast.decl list) : unit =
     List.iter
       (fun (decl : Ast.decl) ->
          (match decl with
+          | Ast.DUse (ud, _) ->
+            let path = String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) ud.Ast.use_path) in
+            Hashtbl.replace s.mod_uses prefix (path :: Option.value ~default:[] (Hashtbl.find_opt s.mod_uses prefix))
+          | Ast.DAlias (ad, _) ->
+            let path = String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) ad.Ast.alias_path) in
+            Hashtbl.replace s.mod_aliases prefix
+              ((ad.Ast.alias_name.Ast.txt, path) :: Option.value ~default:[] (Hashtbl.find_opt s.mod_aliases prefix))
+          | _ -> ());
+         (match decl with
           | Ast.DFn (def, _) ->
             (match Ast.scoped_params_of_attrs def.Ast.fn_attrs with
              | [] -> ()
@@ -427,8 +438,45 @@ let scan_decls (s : st) (decls : Ast.decl list) : unit =
   go "" decls;
   Hashtbl.iter (fun k _ -> Hashtbl.replace s.known k ()) s.extra_bodies
 
+(* A name as written in [owner], to the function it names.  The module's own
+   functions first; then through an `alias` or a `use`/`import` of the
+   module or of one that encloses it.  The program has typechecked, so a
+   spelling that finds a function this way names that function. *)
 let resolve (s : st) (owner : string) (name : string) : string option =
-  March_caps.Cap_rows.resolve_ref ~scopes:s.env.fn_scopes s.known owner name
+  match March_caps.Cap_rows.resolve_ref ~scopes:s.env.fn_scopes s.known owner name with
+  | Some _ as r -> r
+  | None ->
+    let prefix =
+      let p = March_caps.Cap_rows.ref_prefix ~scopes:s.env.fn_scopes owner in
+      if p = "" then "" else String.sub p 0 (String.length p - 1)
+    in
+    let rec enclosing p =
+      p :: (match String.rindex_opt p '.' with Some i -> enclosing (String.sub p 0 i) | None -> if p = "" then [] else [ "" ])
+    in
+    let mods = enclosing prefix in
+    let known k = if Hashtbl.mem s.known k then Some k else None in
+    let first f xs = List.fold_left (fun acc x -> match acc with Some _ -> acc | None -> f x) None xs in
+    let via_alias =
+      match String.index_opt name '.' with
+      | None -> None
+      | Some i ->
+        let head = String.sub name 0 i and rest = String.sub name i (String.length name - i) in
+        first
+          (fun m ->
+             match List.assoc_opt head (Option.value ~default:[] (Hashtbl.find_opt s.mod_aliases m)) with
+             | Some long -> first known [ long ^ rest; qual m long ^ rest ]
+             | None -> None)
+          mods
+    in
+    (match via_alias with
+     | Some _ as r -> r
+     | None ->
+       first
+         (fun m ->
+            first
+              (fun path -> first known [ path ^ "." ^ name; qual m path ^ "." ^ name ])
+              (Option.value ~default:[] (Hashtbl.find_opt s.mod_uses m)))
+         mods)
 
 let bodies_of (s : st) (key : string) : (string list * Ast.expr) list =
   match Hashtbl.find_opt s.env.fn_row_bodies key with
@@ -769,14 +817,28 @@ let mark_scoped (s : st) ~(key : string) ~(written : string) ~(sp : Ast.span) ~(
 (* Builtins that keep an argument after they return (design §7.1). *)
 let retaining_builtin (name : string) : (route * bool) option =
   (* the route, and whether the message names the builtin *)
-  if List.mem name [ "send"; "actor_send_after"; "actor_cast"; "actor_call" ] then Some (Message, false)
+  if List.mem name [ "send"; "send_checked"; "actor_send_after"; "actor_cast"; "actor_call" ] then Some (Message, false)
   else if String.length name > 6 && String.sub name 0 6 = "vault_" then Some (Table, false)
   else if
     List.mem name
       [ "signal_watch"; "diag_observe"; "delivery_failed_watch"; "logger_add_field"; "logger_add_context";
-        "mock_register" ]
+        "mock_register"; "own"; "register_resource" ]
   then Some (Registry, true)
   else None
+
+(* Builtins that call a function they are handed before they return and do
+   not keep it.  Any other builtin handed a function value keeps it (a
+   registration, a server's handler): the safe reading of a builtin nobody
+   has listed. *)
+let runs_now_builtin (name : string) : bool =
+  let has_prefix p = String.length name >= String.length p && String.sub name 0 (String.length p) = p in
+  List.mem name [ "try_finally"; "__try_call"; "__try_call_val"; "list_stable_sort_by"; "list_sort_by_int_key" ]
+  || has_prefix "typed_array_" || has_prefix "native_"
+
+(* A task holds the function it runs, and the task is the builtin's result:
+   the name travels with the task value. *)
+let task_builtin (name : string) : bool =
+  String.length name >= 10 && String.sub name 0 10 = "task_spawn"
 
 (* ── the walk ───────────────────────────────────────────────────────────── *)
 
@@ -887,7 +949,15 @@ let rec bind_pat (s : st) (c : ctx) (p : Ast.pattern) (t : T.t) : ctx =
 let rec walk (s : st) (c : ctx) (e : Ast.expr) : T.t =
   let sp = span_of_expr e in
   let t = walk_inner s c e in
-  let t = if t <> T.Plain && plain_at s sp then T.Plain else t in
+  (* A tuple is what its parts are.  The tuple a function of several clauses
+     is rewritten to match on carries the function's own span, where the
+     recorded type is the match's result: reading it there made a tuple
+     holding a handle plain whenever the function returned plain data. *)
+  let t =
+    match e with
+    | Ast.ETuple _ -> t
+    | _ -> if t <> T.Plain && plain_at s sp then T.Plain else t
+  in
   record_annot s sp t;
   t
 
@@ -1546,7 +1616,10 @@ and call_builtin (s : st) (c : ctx) (n : Ast.name) (args : Ast.expr list) (ats :
      (* The table (or the pid) is where the value goes, not what is kept. *)
      let kept = match route, ats with (Table | Message), _ :: rest -> rest | _ -> ats in
      add_sink s route sp ~what:(if named then n.Ast.txt else "") kept
-   | None -> ());
+   | None ->
+     if not (runs_now_builtin n.Ast.txt || task_builtin n.Ast.txt) then
+       add_sink s Registry sp ~what:n.Ast.txt
+         (List.filter (fun a -> match resolve_holes a with T.Arrow _ -> true | _ -> false) ats));
   if join <> T.Plain || List.exists (fun a -> a <> T.Plain) ats then builtin_flows ~name:n.Ast.txt s c ats sp join;
   join
 
@@ -1814,7 +1887,7 @@ let analyse ?unsound ?(all = false) (env : env) (decls : Ast.decl list) : result
   let s =
     { env; d = T.decls_of env; store = new_store (); states = Hashtbl.create 256; frames = []; top;
       hv = Hashtbl.create 64; known = Hashtbl.create 1024; let_keys = Hashtbl.create 64; clauses = Hashtbl.create 16; extra_bodies = Hashtbl.create 16; actors = Hashtbl.create 16;
-      handler_keys = Hashtbl.create 32; sites = []; annot = Hashtbl.create 256; binders = Hashtbl.create 256; fn_iface = Hashtbl.create 256;
+      handler_keys = Hashtbl.create 32; mod_uses = Hashtbl.create 16; mod_aliases = Hashtbl.create 16; sites = []; annot = Hashtbl.create 256; binders = Hashtbl.create 256; fn_iface = Hashtbl.create 256;
       scoped = Hashtbl.copy env.scoped_params;
       none_recorded =
         not (Hashtbl.fold (fun k _ acc -> acc || not (Hashtbl.mem env.stdlib_fns k)) env.fn_row_bodies false);

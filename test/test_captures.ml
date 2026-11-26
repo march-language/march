@@ -490,7 +490,7 @@ let escape_cases =
            \      Signal.watch(Signal.Term, fn () ->\n\
            \        let _ = File.read_line(h)\n\
            \        ()))")
-        [ "this function captures it and is kept by `signal_watch`" ] );
+        [ "it is kept by `signal_watch`"; "calls `Signal.watch`" ] );
     ( "a helper two calls away stores it",
       escapes
         ("  type Wrapped = Wrapped(File.Handle)\n\
@@ -619,6 +619,82 @@ let test_escape_in_impl_method () =
   Alcotest.(check int) ("rejected:\n" ^ out) 1 rc;
   Alcotest.(check bool) ("with capture_escape:\n" ^ out) true (contains out "[capture_escape]")
 
+(* Whole-branch review findings: each of these was accepted. *)
+let rejects (body : string) (has : string list) () =
+  let rc, out = march body in
+  Alcotest.(check int) ("rejected:\n" ^ out) 1 rc;
+  List.iter
+    (fun frag -> Alcotest.(check bool) (Printf.sprintf "the message has %S:\n%s" frag out) true (contains out frag))
+    has
+
+let stash =
+  "    let t : Vault(File.Handle) = Authority.must(Vault.new(\"hs\"))\n\
+  \    let _ = Vault.put(t, \"k\", h)\n\
+  \    2\n"
+
+let review_cases =
+  [ ( "the opening function named through an alias",
+      rejects
+        ("  alias File as F\n" ^ main_of "    let _ = F.with_open(\"x\", fn h -> h)")
+        [ "[capture_escape]"; "`h` cannot leave the `F.with_open` callback" ] );
+    ( "the opening function imported",
+      rejects
+        ("  import File\n" ^ main_of "    let _ = with_open(\"x\", fn h -> h)")
+        [ "[capture_escape]"; "`h` cannot leave the `with_open` callback" ] );
+    ( "the opening function brought in by `use`",
+      rejects
+        ("  use File.*\n" ^ main_of "    let _ = with_open(\"x\", fn h -> h)")
+        [ "[capture_escape]" ] );
+    ( "a table named through an alias",
+      rejects
+        ("  alias Vault as V\n"
+         ^ main_of
+             "    let t : Vault(File.Handle) = Authority.must(V.new(\"hs\"))\n\
+             \    let _ = File.with_open(\"x\", fn h -> V.put(t, \"k\", h))")
+        [ "[capture_escape]"; "is stored in a table" ] );
+    ( "a function of several clauses stores it",
+      rejects
+        ("  fn keep(0, h) do 1 end\n  fn keep(n, h) do\n" ^ stash ^ "  end\n"
+         ^ main_of "    let _ = File.with_open(\"x\", fn h -> keep(1, h))")
+        [ "[capture_escape]"; "is stored in a table" ] );
+    ( "an interface method stores it",
+      rejects
+        ("  type B = B(Int)\n\
+         \  interface Peek(a) do\n\
+         \    fn peek : a -> File.Handle -> Int\n\
+         \  end\n\
+         \  impl Peek(B) do\n\
+         \    fn peek(_, h) do\n" ^ stash ^ "    end\n  end\n"
+         ^ main_of "    let _ = File.with_open(\"x\", fn h -> peek(B(1), h))")
+        [ "[capture_escape]"; "is stored in a table"; "calls `peek`" ] );
+    ( "a builtin nobody listed is handed a function that captures it",
+      rejects
+        (main_of
+           "    let _ = File.with_open_write(\"x\", File.Append, fn h ->\n\
+           \      Logger.add_appender(Logger.appender_callback(\"file\", fn e ->\n\
+           \        let _ = File.write_to(h, \"line\")\n\
+           \        ())))")
+        [ "[capture_escape]"; "is kept by `logger_register_appender`" ] );
+    ( "`scoped` on an impl method's parameter is an error",
+      rejects
+        "  type D = D(Int)\n\
+        \  interface Opens(a) do\n\
+        \    fn using : a -> (File.Handle -> Int) -> Int\n\
+        \  end\n\
+        \  impl Opens(D) do\n\
+        \    fn using(d, f : scoped File.Handle -> Int) do 1 end\n\
+        \  end\n\
+        \  fn main() do () end"
+        [ "[scoped_misplaced]" ] );
+    ( "`scoped` in a record field is an error",
+      rejects "  type R = { cb : scoped File.Handle -> Int }\n  fn main() do () end" [ "[scoped_misplaced]" ] );
+    ( "`scoped` in a constructor argument is an error",
+      rejects "  type V = V(scoped File.Handle -> Int)\n  fn main() do () end" [ "[scoped_misplaced]" ] );
+    ( "reading through an alias is allowed",
+      fun () ->
+        let rc, out = march ("  alias File as F\n" ^ main_of "    let _ = F.with_open(\"x\", fn h -> File.read_line(h))") in
+        Alcotest.(check int) ("accepted:\n" ^ out) 0 rc ) ]
+
 let tests =
   [ ( "captures",
       [ Alcotest.test_case "a pure lambda" `Quick test_lam_pure;
@@ -665,4 +741,5 @@ let tests =
     ( "the escape check",
       [ Alcotest.test_case "does not run when no scoped function is named" `Quick test_pass_skipped;
         Alcotest.test_case "a crash in the pass is an internal compiler error" `Quick test_pass_crash_is_an_ice;
-        Alcotest.test_case "an impl method is checked" `Quick test_escape_in_impl_method ] ) ]
+        Alcotest.test_case "an impl method is checked" `Quick test_escape_in_impl_method ] );
+    ("review", List.map (fun (n, f) -> Alcotest.test_case n `Quick f) review_cases) ]

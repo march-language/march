@@ -1788,12 +1788,15 @@ that would keep it. It leaves the callback, and is rejected, when the callback:
 
 - returns it, or returns a function, record, tuple, list or task that holds it;
 - stores it in a `Vault` table, sends it to an actor, or gives it to a spawned actor;
-- hands a function that captured it to something that runs it later (a signal watcher);
+- hands a function that captured it to something that runs it later (a signal watcher, a
+  logger appender);
 - passes it to code the compiler does not follow (a function value that is `not tracked`).
 
 Everything else is allowed inside the callback: reading and writing, passing the handle to
 other functions, building local values around it, and starting a task that uses it as long as
-the task is awaited before the callback returns. The check follows the handle into the
+the task is awaited before the callback returns. The compiler does not check the awaiting: a
+task that holds the handle is rejected when it is returned or stored, and a task that is
+started and dropped is not caught. The check follows the handle into the
 functions it is passed to, so a helper two calls away that stores it is found too.
 
 A handle opened with `File.open` or `Socket.connect` is an ordinary handle. It is not tracked

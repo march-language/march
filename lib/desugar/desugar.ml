@@ -1386,7 +1386,7 @@ let rec desugar_expr (e : expr) : expr =
     without touching bodies/guards/params otherwise — a pure pre-pass so the
     branches below (which only ever rewrite bodies/guards) don't need their
     own copy of this. *)
-let desugar_fn_def_tys (def : fn_def) : fn_def =
+let desugar_fn_def_tys ?(scoped_ok = true) (def : fn_def) : fn_def =
   (* `f : scoped H -> r` (ocap phase 8b): the marker leaves the type here and
      becomes the attribute "scoped_param:<index>" ([Ast.scoped_params_of_attrs]),
      so no later pass sees [TyScoped] in a well-formed program.  One written
@@ -1394,7 +1394,7 @@ let desugar_fn_def_tys (def : fn_def) : fn_def =
   let scoped = ref [] in
   let param_ty i (t : ty option) : ty option =
     let t = match t with
-      | Some (TyArrow (TyScoped d, r)) ->
+      | Some (TyArrow (TyScoped d, r)) when scoped_ok ->
         if not (List.mem i !scoped) then scoped := i :: !scoped;
         Some (TyArrow (d, r))
       | t -> t
@@ -1414,8 +1414,8 @@ let desugar_fn_def_tys (def : fn_def) : fn_def =
                  @ List.map (fun i -> Printf.sprintf "scoped_param:%d" i) (List.sort compare !scoped);
     fn_clauses = clauses }
 
-let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
-  let def = desugar_fn_def_tys def in
+let desugar_fn_def ?scoped_ok (def : fn_def) (fn_span : span) : fn_def =
+  let def = desugar_fn_def_tys ?scoped_ok def in
   let clauses = def.fn_clauses in
   match clauses with
   | [] -> def   (* degenerate — validation pass will catch this *)
@@ -1616,7 +1616,10 @@ let rec desugar_decl (d : decl) : decl =
   | DImpl (idef, sp) ->
     (* Desugar each provided method's fn_def *)
     let methods' = List.map (fun (name, def) ->
-        (name, desugar_fn_def def sp)
+        (* `scoped` on an impl method's parameter is not checked (a call
+           reaches the method through the interface, whose signature cannot
+           carry it), so it stays in the type and the typechecker reports it. *)
+        (name, desugar_fn_def ~scoped_ok:false def sp)
       ) idef.impl_methods in
     DImpl ({ idef with impl_methods = methods' }, sp)
 

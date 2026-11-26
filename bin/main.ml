@@ -3822,6 +3822,11 @@ let source_cache_bypass () : string option =
     "MARCH_DEBUG_PERCEUS"; "MARCH_DEBUG_BORROW"; "MARCH_DEBUG_HANDLER_OWNER";
     "MARCH_DEBUG_TC"; "MARCH_DEBUG_ORDER";
     "MARCH_REFINE_Z3_LOG"; "MARCH_REFINE_Z3_ERRORS";
+    (* Test-only (lib/typecheck/typecheck.ml): with it "off" a program the
+       scoped-handle check rejects goes through.  A result stored from such
+       a run would answer the next normal check of the same source with
+       "clean", so the run neither reads nor writes the source-level cache. *)
+    "MARCH_CAPTURE_ESCAPE";
   ] in
   match List.find_opt snd flags with
   | Some (name, _) -> Some name

@@ -303,7 +303,11 @@ let test_escape_pair (name : string) () =
   Alcotest.(check bool) ("with capture_escape:\n" ^ text) true (Test_captures.contains text "[capture_escape]");
   let rc, text = run_in dir ~env:"MARCH_CAPTURE_ESCAPE=off" "" name in
   Alcotest.(check int) ("with the check off it runs:\n" ^ text) 0 rc;
-  Alcotest.(check string) "and finds the handle closed" "used after close: Err(Closed)\n" text
+  Alcotest.(check string) "and finds the handle closed" "used after close: Err(Closed)\n" text;
+  (* The run with the check off left nothing behind that answers for a
+     normal check (it once stored a "clean" result for the source). *)
+  let rc, text = run_in dir "--check" name in
+  Alcotest.(check int) ("still rejected after the run with the check off:\n" ^ text) 1 rc
 
 let tests =
   let fixtures = march_files (find_dir "captures/oracle") in

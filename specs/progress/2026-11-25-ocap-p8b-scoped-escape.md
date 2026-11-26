@@ -70,12 +70,43 @@ rejected.
 - The escape tests assert on the rendered diagnostic, not on an internal list: it is the same
   information and needs no test-only API.
 - A detached-task route does not exist: the task API returns a `Task` that holds the function,
-  so a task that outlives the callback is caught as a returned value. The plan's `Detached`
+  so a task that is returned or stored is caught as a value. One that is dropped without being
+  awaited is not caught (see the review section below). The plan's `Detached`
   route became nothing; `Registry` covers the builtins that keep a function to run later.
 - A handle that reaches the result through a function used as a value (`let w =
   File.with_open`) has no source name at that point; the message says "The handle".
 - Tasks 1 and 2 were implemented before their tests were run red; both were then shown red by
   switching the rule off (name covering ignored: 2 of 5 name tests fail).
+
+## What the whole-branch review found, and what was done
+
+A fresh reviewer wrote about 150 probe programs against the finished branch. Fixed, each with a
+test in `test/test_captures.ml` (group `review`) that was red on the reviewed build:
+
+- **`alias`, `use` and `import` hid the opening function** (`alias File as F` then
+  `F.with_open(...)` was accepted, and `alias Vault as V` hid a table store). The pass resolved
+  a name only by its spelling in its own module. It now resolves through the module's aliases
+  and imports and those of the modules around it.
+- **A store inside a function of several clauses, or one with a pattern parameter, was
+  missed**, which is every interface method written `fn m(_, h)`. Desugar rewrites such a
+  function to match on a tuple of its parameters, the tuple carries the function's span, and
+  the type recorded there is the match's result: a function returning plain data made the
+  tuple, and the handle in it, plain. A tuple is now what its parts are. The same bug made
+  8a's capture sets too small through such a function.
+- **A builtin handed a function kept it unseen** unless it was on a hand list
+  (`logger_register_appender`, `register_resource`). The rule is now the other way round: a
+  builtin handed a function keeps it unless it is listed as running it before returning. `own`
+  and `register_resource` are listed for a bare handle.
+- **`scoped` on an impl method's parameter was dropped without a word, and so was `scoped` in
+  a record field or a constructor argument.** All three are `scoped_misplaced` now.
+- **A run with the test-only `MARCH_CAPTURE_ESCAPE=off` stored a "clean" check result** that
+  answered the next normal check of the same source. Such a run now skips the source-level
+  cache (`source_cache_bypass`, `bin/main.ml`); the escape-pair test checks it.
+- An impl method showed as `Iface$Type.method` in "How it gets there"; it shows as written.
+
+Not fixed, recorded in `specs/todos/2026-11-24-ocap-capture-inference-precision-gaps.md`: a
+task that is never awaited, a connection built from a socket's descriptor, `Seq` on the handle
+rejected, and three message and syntax-error roughnesses.
 
 ## What is not covered
 
