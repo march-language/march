@@ -824,6 +824,13 @@ let setup_all_fn_name = "__march_setup_all__"
     front of [main] (or of a test binary's setup_all block). *)
 let launch_init_fn = "Authority.launch_init"
 
+(** The callee of the body of a stdlib fn that lazy lowering
+    ([Lower.lower_module ~lazy_bodies]) never lowered because nothing the
+    program reaches names it.  No builtin or function has this name, so a
+    stub that survived to Mono or the emitter could not compile silently;
+    [Dce_pre_mono.prune] refuses to reach one before that. *)
+let unlowered_marker = "$march_unlowered"
+
 (** Run-time frames for function `needs` clauses (ocap phase 4,
     [Auth_rt]).  A framed fn [f] keeps its name as the wrapper that enters
     the frame; its body moves to [f ^ auth_body_suffix], and the frame's

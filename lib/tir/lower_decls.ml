@@ -397,13 +397,37 @@ let call_fn_typed_module_lets (lets : (string, Tir.ty) Hashtbl.t)
 
 (* ── Declaration lowering ───────────────────────────────────────── *)
 
+let the_clause (def : Ast.fn_def) : Ast.fn_clause =
+  match def.fn_clauses with
+  | [c] -> c
+  | _ -> failwith (Printf.sprintf "TIR lower: fn %s has %d clauses (expected 1 after desugaring)"
+                     def.fn_name.txt (List.length def.fn_clauses))
+
+(* For polymorphic fn_defs, prefer the typechecker's inferred type over the
+   surface annotation (see [lower_fn_def]). *)
+let ty_from_tc_or_ann (tc_ty : Tir.ty) (ann : Ast.ty option) : Tir.ty =
+  match tc_ty, ann with
+  | Tir.TVar "_", Some t -> Lower_types.lower_ty t
+  | Tir.TVar "_", None -> tc_ty
+  | _ -> tc_ty
+
+(** A fn's TIR parameters, as [lower_fn_def] gives them, without its body. *)
+let fn_params (env : Lower_state.env) (def : Ast.fn_def) : Tir.var list =
+  List.map (fun fp ->
+      match fp with
+      | Ast.FPNamed p ->
+        let ty = ty_from_tc_or_ann (Lower_state.ty_of_span env p.Ast.param_name.span) p.param_ty in
+        { Tir.v_name = p.param_name.txt;
+          v_ty = ty;
+          v_lin = Lower_types.lower_linearity p.param_lin }
+      | Ast.FPPat (Ast.PatVar n) ->
+        { Tir.v_name = n.txt; v_ty = Lower_state.ty_of_span env n.span; v_lin = Tir.Unr }
+      | _ -> failwith "TIR lower: unexpected pattern param after desugaring"
+    ) (the_clause def).fc_params
+
 (** Lower a single function definition (post-desugaring: exactly 1 clause). *)
 let lower_fn_def (env : Lower_state.env) (def : Ast.fn_def) : Tir.fn_def =
-  let clause = match def.fn_clauses with
-    | [c] -> c
-    | _ -> failwith (Printf.sprintf "TIR lower: fn %s has %d clauses (expected 1 after desugaring)"
-                       def.fn_name.txt (List.length def.fn_clauses))
-  in
+  let clause = the_clause def in
   (* For polymorphic fn_defs, prefer the typechecker's inferred type over the
      surface annotation.  The typechecker has already unified the source-level
      named type variable (e.g. `a` in `fn nth(xs: List(a), n: Int) : a`) with
@@ -415,23 +439,7 @@ let lower_fn_def (env : Lower_state.env) (def : Ast.fn_def) : Tir.fn_def =
      named e.g. `List.nth$List_V__1771$Int`, causing runtime infinite recursion.
      Only when the typechecker has no record for this span (placeholder
      [TVar "_"]) do we fall back to the source annotation. *)
-  let ty_from_tc_or_ann (tc_ty : Tir.ty) (ann : Ast.ty option) : Tir.ty =
-    match tc_ty, ann with
-    | Tir.TVar "_", Some t -> Lower_types.lower_ty t
-    | Tir.TVar "_", None -> tc_ty
-    | _ -> tc_ty
-  in
-  let params = List.map (fun fp ->
-      match fp with
-      | Ast.FPNamed p ->
-        let ty = ty_from_tc_or_ann (Lower_state.ty_of_span env p.param_name.span) p.param_ty in
-        { Tir.v_name = p.param_name.txt;
-          v_ty = ty;
-          v_lin = Lower_types.lower_linearity p.param_lin }
-      | Ast.FPPat (Ast.PatVar n) ->
-        { Tir.v_name = n.txt; v_ty = Lower_state.ty_of_span env n.span; v_lin = Tir.Unr }
-      | _ -> failwith "TIR lower: unexpected pattern param after desugaring"
-    ) clause.fc_params in
+  let params = fn_params env def in
   let ret_ty =
     (* Same rationale as params: prefer the typechecker's inferred return type,
        falling back to the source annotation only when the typechecker has no
@@ -583,6 +591,7 @@ let () = Lower_state._ensure_module_lowered := (fun env mod_name ->
     match March_modules.Module_registry.find_stdlib_file mod_name with
     | None -> ()
     | Some path ->
+      !Lower_state.lazy_module_load_hook mod_name;
       (try
          let ic = open_in_bin path in
          let n = in_channel_length ic in

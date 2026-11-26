@@ -206,10 +206,125 @@ let note_migrate_msg ~prefix (def : Ast.fn_def) (fn : Tir.fn_def) =
     they had been declared at the end of that module.  See [lower_more]. *)
 let _resume : (Ast.decl list -> Tir.fn_def list * Tir.type_def list) option ref = ref None
 
+(* ── Lazy lowering of stdlib fn bodies ──────────────────────────────────
+   A program reaches a few dozen of the ~4,000 stdlib module functions, and
+   [Dce_pre_mono.prune] dropped the rest right after lowering them.  With
+   [~lazy_bodies], [lower_module] puts a stub in [!fns] for such a fn at the
+   position its lowered body would take (the import/alias handlers scan
+   [!fns] by name, so the name must be there) and, after Pass 2, lowers only
+   the bodies [Dce_pre_mono.walk] can reach from the prune's roots, with the
+   prune's own edge rule.  A body lowered late is lowered as of its
+   declaration: the alias tables answer as they stood then
+   ([Lower_state.alias_view]) and the dynamic scopes it was declared in are
+   reinstated.  Unreached stubs are left in [tm_fns]; the prune removes them,
+   and refuses to reach one.  The emitted program is the same as with eager
+   lowering: scripts/lazy-lower-gate.sh compares the two over the IR corpus.
+   specs/progress/2026-11-26-lazy-stdlib-lowering.md *)
+
+type lazy_bodies = {
+  lz_extra_roots : unit -> string list;
+}
+
+type pending = {
+  p_stub : Tir.fn_def;
+  p_def : Ast.fn_def;
+  p_force : unit -> Tir.fn_def;
+  mutable p_done : Tir.fn_def option;
+}
+
+let unlowered_body : Tir.expr =
+  Tir.EApp ({ Tir.v_name = Tir_names.unlowered_marker;
+              v_ty = Tir.TFn ([], Tir.TUnit); v_lin = Tir.Unr }, [])
+
+let is_stub (fd : Tir.fn_def) = fd.Tir.fn_body == unlowered_body
+
 (** Lower a module. *)
-let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) ?(shadow_builtins=true) ?(resumable=false) ?(launch=false) (m : Ast.module_) : Tir.tir_module =
+let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) ?(shadow_builtins=true) ?(resumable=false) ?(launch=false) ?lazy_bodies (m : Ast.module_) : Tir.tir_module =
   _resume := None;
   reset_counter ();
+  (* Lazy lowering only for a whole program lowered in one go: never for a
+     test build, hot reload, a resumable module or a REPL fragment. *)
+  let lazy_cfg = match lazy_bodies with
+    | Some c when not test_mode && not hot_reload && not resumable
+                  && stdlib_context = [] -> Some c
+    | _ -> None in
+  let lazy_on = lazy_cfg <> None in
+  Lower_state.reset_alias_history ~on:lazy_on;
+  Lower_state.lazy_forcing := None;
+  Lower_state.lazy_module_load_hook := (fun _ -> ());
+  (* Every fn lowered eagerly that is live whatever calls it: user code
+     (anything not written in the stdlib) and stdlib fns that are prune
+     roots.  The demand loop starts from these. *)
+  let lazy_seeds : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  let seed_if b (n : string) = if lazy_on && b then Hashtbl.replace lazy_seeds n () in
+  let lazy_pending : (string, pending list ref) Hashtbl.t = Hashtbl.create 4096 in
+  (* Alloc-contract fns are prune roots (Contract_pipeline's [extra_roots]). *)
+  let lazy_contract_roots : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  (* Qualified names declared more than once (a fn and its duplicate share a
+     provenance key, so the last-lowered must be the last-declared): such a
+     stdlib fn is lowered eagerly. *)
+  let lazy_name_counts : (string, int) Hashtbl.t = Hashtbl.create 8192 in
+  if lazy_on then begin
+    List.iter (fun (d : Alloc_contract.decl_info) ->
+        if d.Alloc_contract.d_form <> None then begin
+          Hashtbl.replace lazy_contract_roots d.Alloc_contract.d_name ();
+          Option.iter (fun n -> Hashtbl.replace lazy_contract_roots n ())
+            d.Alloc_contract.d_alt_name
+        end)
+      (Alloc_contract.collect m);
+    let bump n =
+      Hashtbl.replace lazy_name_counts n
+        (1 + Option.value ~default:0 (Hashtbl.find_opt lazy_name_counts n)) in
+    let rec count prefix decls =
+      List.iter (function
+          | Ast.DFn (def, _) -> bump (prefix ^ def.Ast.fn_name.txt)
+          | Ast.DLet (_, { Ast.bind_pat = Ast.PatVar n; _ }, _) -> bump (prefix ^ n.txt)
+          | Ast.DMod (n, _, inner, _) -> count (prefix ^ n.txt ^ ".") inner
+          | _ -> ()) decls in
+    count "" m.mod_decls;
+    (* A stdlib module missing from the program is loaded from disk by the
+       first body that names it ([_ensure_module_lowered]), its fns appended
+       there.  Lazy lowering must not move that point: a load from a deferred
+       body is refused, and so is a load from an eagerly lowered body when a
+       body deferred before it names the module (eager lowering would have
+       loaded it there). *)
+    let names_module mod_name (def : Ast.fn_def) =
+      let pre = mod_name ^ "." and mid = "." ^ mod_name ^ "." in
+      let alias_of head =
+        match Hashtbl.find_opt !_module_aliases head with
+        | Some path -> path = mod_name || String.ends_with ~suffix:("." ^ mod_name) path
+        | None -> false in
+      let mentions (s : string) =
+        s = mod_name || String.starts_with ~prefix:pre s
+        || String.ends_with ~suffix:("." ^ mod_name) s
+        || (let n = String.length s and k = String.length mid in
+            let rec go i = i + k <= n && (String.sub s i k = mid || go (i + 1)) in go 0)
+        || (match String.index_opt s '.' with
+            | Some i -> alias_of (String.sub s 0 i)
+            | None -> false) in
+      List.exists (fun (c : Ast.fn_clause) ->
+          List.exists (March_ast.Calls.exists_subexpr (function
+              | Ast.EVar n | Ast.ECon (n, _, _) -> mentions n.Ast.txt
+              | _ -> false))
+            (c.Ast.fc_body :: Option.to_list c.Ast.fc_guard))
+        def.fn_clauses
+    in
+    Lower_state.lazy_module_load_hook := (fun mod_name ->
+        let refuse why =
+          failwith (Printf.sprintf
+            "lazy lowering: %s loads the standard-library module %s from disk, \
+             which eager lowering would do elsewhere; rerun with --disable-pass \
+             lazy-lower and report it" why mod_name) in
+        match !Lower_state.lazy_forcing with
+        | Some n -> refuse ("the body of " ^ n)
+        | None ->
+          Hashtbl.iter (fun _ ps ->
+              List.iter (fun p ->
+                  if p.p_done = None && names_module mod_name p.p_def then
+                    refuse ("a body lowered after the deferred " ^ p.p_stub.Tir.fn_name))
+                !ps)
+            lazy_pending)
+  end;
   Lower_state.reset_hosts ();
   Provenance.reset ();
   (* Collision-conditional qualification (Task 3 of specs/plans/2026-07-20-
@@ -797,6 +912,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                                   type_name mname.txt))
                     ~file:(March_caps.Dep_grants.impl_method_file
                              ~impl_file:impl_sp.Ast.file mname.Ast.span);
+                  seed_if (not (in_stdlib
+                                || March_typecheck.Typecheck_builtins.span_is_stdlib impl_sp))
+                    mangled;
                   fns := { fn with fn_name = mangled } :: !fns
                 end;
                 (* Provenance for mono's return-position fallback
@@ -948,6 +1066,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
              && not (String.length def.fn_name.txt >= 2
                      && String.sub def.fn_name.txt 0 2 = "__")
           then Hot_reload.note_entry_file_fn fn.fn_name;
+          seed_if (not (March_typecheck.Typecheck_builtins.span_is_stdlib sp)) fn.fn_name;
           fns := fn :: !fns
         end
       | Ast.DType (_, name, params, td, _)
@@ -973,6 +1092,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       | Ast.DActor (_, name, actor_def, span) ->
         let (new_types, new_fns) = Lower_actor.lower_actor env ~hot_reload name.txt actor_def in
         note_actor_provenance span new_fns;
+        List.iter (fun (fd : Tir.fn_def) ->
+            seed_if (not (March_typecheck.Typecheck_builtins.span_is_stdlib span)) fd.Tir.fn_name)
+          new_fns;
         types := List.rev_append new_types !types;
         fns   := List.rev_append new_fns   !fns
       | Ast.DMod (mod_name, _, inner_decls, _) ->
@@ -985,6 +1107,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
            iface dispatch (e.g. hash → march_hash_string/int/…), leaving a bare
            @hash extern that the linker cannot resolve. *)
         Hashtbl.replace !_lowered_modules mod_name.txt ();
+        let mod_is_stdlib =
+          March_typecheck.Typecheck_builtins.span_is_stdlib mod_name.span in
         let rec lower_mod_decls ?(enclosing = []) (env : env) prefix decls =
           let direct_fn_names = List.filter_map (function
               | Ast.DFn (def, _) -> Some def.fn_name.txt
@@ -1025,25 +1149,106 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           List.iter (fun d ->
               match d with
               | Ast.DFn (def, _) ->
-                let fn = Lower_decls.lower_fn_def mod_env def in
-                let fn = Lower_decls.rename_scoped_vars scopes fn in
                 (* An entry-module fn whose qualified name a stdlib / interface
                    name also has is defined under its own name (see
                    [Lower_state._entry_builtin_shadows]). *)
-                let qname =
-                  let q = prefix ^ fn.fn_name in
+                let qname_of n =
+                  let q = prefix ^ n in
                   match Hashtbl.find_opt !Lower_state._builtin_shadows q with
                   | Some renamed -> renamed
                   | None -> q
                 in
-                Provenance.rename ~old:fn.fn_name ~new_:qname;
-                let fn = { fn with fn_name = qname } in
+                let lower_named () =
+                  let fn = Lower_decls.lower_fn_def mod_env def in
+                  let fn = Lower_decls.rename_scoped_vars scopes fn in
+                  let qname = qname_of fn.fn_name in
+                  Provenance.rename ~old:fn.fn_name ~new_:qname;
+                  { fn with fn_name = qname }
+                in
+                let fn =
+                  if not (lazy_on && mod_is_stdlib
+                          && March_typecheck.Typecheck_builtins.span_is_stdlib
+                               def.fn_name.span)
+                  then lower_named ()
+                  else begin
+                    let bare = def.fn_name.txt in
+                    let qname = qname_of bare in
+                    let ends_with sfx = String.ends_with ~suffix:sfx bare in
+                    (* Live whatever calls it (a prune root, or read by a pass
+                       between lowering and the prune), or it shares its name. *)
+                    let root_now =
+                      bare = "main"
+                      || Tir_names.is_migrate_fn_name qname
+                      || ends_with Tir_names.migrate_msg_suffix
+                      || Dce_pre_mono.is_rpc_stub qname
+                      || def.fn_needs <> None
+                      || Hashtbl.mem lazy_contract_roots qname
+                      || Hashtbl.mem lazy_contract_roots (prefix ^ bare)
+                      || Option.value ~default:0 (Hashtbl.find_opt lazy_name_counts qname) > 1
+                      (* Whole-program facts read off every body, reached or
+                         not: a [restrict] or [mock] (frames for every
+                         closure), a [remote_ref_hashes] target (pinned). *)
+                      || List.exists (fun (c : Ast.fn_clause) ->
+                          List.exists
+                            (March_ast.Calls.exists_subexpr (function
+                                 | Ast.ERestrict _ | Ast.EMock _ -> true
+                                 | Ast.EVar n -> n.Ast.txt = "remote_ref_hashes"
+                                 | _ -> false))
+                            (c.Ast.fc_body :: Option.to_list c.Ast.fc_guard))
+                        def.fn_clauses
+                    in
+                    if root_now then begin
+                      Hashtbl.replace lazy_seeds qname ();
+                      lower_named ()
+                    end else begin
+                      let stub : Tir.fn_def =
+                        { fn_name = qname; fn_params = Lower_decls.fn_params mod_env def;
+                          fn_ret_ty = Tir.TUnit; fn_body = unlowered_body;
+                          fn_kind = Tir.FnNormal } in
+                      (* A policy-tagged fn is a prune root (nothing calls it). *)
+                      if Policy_dce.policies_of_fn stub <> [] then begin
+                        Hashtbl.replace lazy_seeds qname ();
+                        lower_named ()
+                      end else begin
+                        let c_cur = !_current_module_fns
+                        and c_enc = !Lower_state._enclosing_module_fns
+                        and c_sh = !Lower_state._builtin_shadows
+                        and c_clock = !Lower_state.alias_clock in
+                        let force () =
+                          let s_cur = !_current_module_fns
+                          and s_enc = !Lower_state._enclosing_module_fns
+                          and s_sh = !Lower_state._builtin_shadows
+                          and s_view = !Lower_state.alias_view
+                          and s_forcing = !Lower_state.lazy_forcing in
+                          _current_module_fns := c_cur;
+                          Lower_state._enclosing_module_fns := c_enc;
+                          Lower_state._builtin_shadows := c_sh;
+                          Lower_state.alias_view := c_clock;
+                          Lower_state.lazy_forcing := Some qname;
+                          Fun.protect lower_named ~finally:(fun () ->
+                              _current_module_fns := s_cur;
+                              Lower_state._enclosing_module_fns := s_enc;
+                              Lower_state._builtin_shadows := s_sh;
+                              Lower_state.alias_view := s_view;
+                              Lower_state.lazy_forcing := s_forcing)
+                        in
+                        let p = { p_stub = stub; p_def = def; p_force = force; p_done = None } in
+                        (match Hashtbl.find_opt lazy_pending qname with
+                         | Some l -> l := !l @ [ p ]
+                         | None -> Hashtbl.replace lazy_pending qname (ref [ p ]));
+                        stub
+                      end
+                    end
+                  end
+                in
+                let qname = fn.fn_name in
                 note_migrate_msg ~prefix def fn;
                 Lower_state.note_fn_needs ~final:qname ~display:(prefix ^ def.fn_name.txt) def;
                 Lower_state.note_fn_grant ~final:qname ~key:(Some (prefix ^ def.fn_name.txt))
                   ~file:def.fn_name.span.file;
                 if Hot_reload.work_entry_source def.fn_name.txt def.fn_name.span.file then
                   Hot_reload.note_work_entry fn.fn_name;
+                seed_if (not mod_is_stdlib) fn.fn_name;
                 fns := fn :: !fns
               | Ast.DType (_, tname, params, td, _)
               | Ast.DAlwaysLinearType (_, tname, params, td, _) ->
@@ -1077,6 +1282,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    Lower_state.note_module_let fn;
                    Lower_state.note_fn_grant ~final:fn.fn_name ~key:(Some fn.fn_name)
                      ~file:let_sp.Ast.file;
+                   seed_if (not mod_is_stdlib) fn.fn_name;
                    fns := fn :: !fns
                  | _ -> ())
               | Ast.DUse (ud, _) ->
@@ -1114,13 +1320,13 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                       if not (List.mem short direct_fn_names) then begin
                         note_alias_candidate short fn_name;
                         if not (Hashtbl.mem !_use_aliases short) then
-                          Hashtbl.replace !_use_aliases short fn_name;
+                          Lower_state.set_use_alias short fn_name;
                         (* Also record in the CURRENT module's own alias table so
                            this import wins over a global alias another module
                            registered for the same short name.  First local
                            registration wins (mirrors the global first-wins). *)
                         if not (Hashtbl.mem mod_env.current_module_aliases short) then
-                          Hashtbl.replace mod_env.current_module_aliases short fn_name
+                          Lower_state.set_module_import mod_env.current_module_aliases short fn_name
                       end
                     end
                   ) all_fn_names
@@ -1146,7 +1352,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                   String.concat "." (List.map (fun n -> n.Ast.txt) ad.alias_path) in
                 let short = ad.alias_name.Ast.txt in
                 if not (Hashtbl.mem !_module_aliases short) then
-                  Hashtbl.replace !_module_aliases short full_path
+                  Lower_state.set_module_alias short full_path
               | Ast.DActor (_, name, actor_def, span) ->
                 (* Actors defined inside a module block need the same spawn/handler
                    glue as top-level actors.  The spawn symbol uses the actor's
@@ -1168,7 +1374,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 let owner = String.sub prefix 0 (max 0 (String.length prefix - 1)) in
                 List.iter
                   (fun (fd : Tir.fn_def) ->
-                     Handler_owner.register ~fn_name:fd.Tir.fn_name ~owner)
+                     Handler_owner.register ~fn_name:fd.Tir.fn_name ~owner;
+                     seed_if (not mod_is_stdlib) fd.Tir.fn_name)
                   renamed_fns;
                 (* A granted package's actor runs its handlers, on_stop and
                    init under the grant (ocap phase 6): they are the
@@ -1226,9 +1433,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         let all_fn_names = List.map (fun (fn : Tir.fn_def) -> fn.fn_name) !fns in
         let register short fn_name =
           note_alias_candidate short fn_name;
-          Hashtbl.replace !_use_aliases short fn_name;
+          Lower_state.set_use_alias short fn_name;
           if not (Hashtbl.mem env.current_module_aliases short) then
-            Hashtbl.replace env.current_module_aliases short fn_name
+            Lower_state.set_module_import env.current_module_aliases short fn_name
         in
         (match ud.use_sel with
          | Ast.UseSingle -> ()
@@ -1273,7 +1480,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                && String.sub fn_name 0 plen = orig_prefix
             then begin
               let rest = String.sub fn_name plen (String.length fn_name - plen) in
-              Hashtbl.replace !_use_aliases (short_prefix ^ rest) fn_name
+              Lower_state.set_use_alias (short_prefix ^ rest) fn_name
             end
           ) all_fn_names;
         (* Also register the order-independent prefix mapping so a reference
@@ -1283,7 +1490,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         (let full_path =
            String.concat "." (List.map (fun n -> n.Ast.txt) ad.alias_path) in
          if not (Hashtbl.mem !_module_aliases short_name) then
-           Hashtbl.replace !_module_aliases short_name full_path)
+           Lower_state.set_module_alias short_name full_path)
       | Ast.DDescribe _ | Ast.DOpts _ -> ())
     ) m.mod_decls;
   (* --- Test mode: collect DTest/DSetup/DSetupAll/DDescribe blocks and lower
@@ -1297,6 +1504,70 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
        builtin-shadow scope per module it descends into. *)
     Lower_state.with_builtin_shadows !Lower_state._entry_builtin_shadows (fun () ->
         Lower_tests.run env fns test_pairs m.mod_decls);
+  (* Lazy lowering's demand loop: lower the deferred bodies the prune's walk
+     reaches from its roots.  Nothing above this point lowers another body. *)
+  Option.iter (fun (cfg : lazy_bodies) ->
+      let n_fns = List.length !fns and n_types = List.length !types
+      and n_layers = List.length !Lower_state.restrict_layer_fns in
+      (* Every body lowered so far, the restrict layer fns, and the module's
+         top-level let initialisers (folded into the fns that use them below,
+         so their names are edges of those fns; rooted as a pseudo-fn). *)
+      let eager : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 1024 in
+      List.iter (fun (fd : Tir.fn_def) ->
+          if not (is_stub fd) then Hashtbl.add eager fd.Tir.fn_name fd)
+        (!fns @ !Lower_state.restrict_layer_fns);
+      let top_lets_root = "$lazy_lower_top_lets" in
+      List.iter (fun ((v : Tir.var), rhs) ->
+          Hashtbl.add eager top_lets_root
+            { Tir.fn_name = top_lets_root; fn_params = []; fn_ret_ty = v.Tir.v_ty;
+              fn_body = rhs; fn_kind = Tir.FnNormal })
+        !top_lets;
+      let force (p : pending) : Tir.fn_def =
+        match p.p_done with
+        | Some fd -> fd
+        | None -> let fd = p.p_force () in p.p_done <- Some fd; fd in
+      let pending_of n =
+        match Hashtbl.find_opt lazy_pending n with Some l -> !l | None -> [] in
+      let defs n = Hashtbl.find_all eager n @ List.map force (pending_of n) in
+      let known n = Hashtbl.mem eager n || Hashtbl.mem lazy_pending n in
+      let module_of fns =
+        { Tir.tm_name = m.mod_name.txt; tm_fns = fns; tm_types = []; tm_externs = [];
+          tm_exports = []; tm_tests = List.rev !test_pairs; tm_io_fns = [] } in
+      if Dce.root_names ~fail_open:false (module_of !fns) = [] then
+        (* No entry point: the prune fails open and keeps every function, so
+           every body is needed.  In declaration order. *)
+        List.iter (fun (fd : Tir.fn_def) ->
+            if is_stub fd then
+              List.iter (fun p -> if p.p_stub == fd then ignore (force p))
+                (pending_of fd.Tir.fn_name))
+          (List.rev !fns)
+      else begin
+        let roots =
+          Dce.root_names ~fail_open:false (module_of !fns)
+          @ Hashtbl.fold (fun n () acc -> n :: acc) lazy_seeds []
+          @ (top_lets_root :: Tir_names.launch_init_fn :: cfg.lz_extra_roots ())
+          (* The prune pins the remote-ref targets of every body it is given,
+             reached or not. *)
+          @ Dce.remote_ref_targets_of_fns (Hashtbl.fold (fun _ fd acc -> fd :: acc) eager [])
+        in
+        ignore (Dce_pre_mono.walk ~iface_methods:!_iface_methods ~known ~defs
+                  ~extra:(fun fd -> Dce.remote_ref_targets_of_fns [ fd ]) roots)
+      end;
+      if List.length !fns <> n_fns || List.length !types <> n_types
+         || List.length !Lower_state.restrict_layer_fns <> n_layers then
+        failwith "lazy lowering: a deferred body added top-level functions or \
+                  types, which eager lowering would have placed elsewhere; rerun \
+                  with --disable-pass lazy-lower and report it";
+      fns := List.map (fun (fd : Tir.fn_def) ->
+          if not (is_stub fd) then fd
+          else
+            match List.find_opt (fun p -> p.p_stub == fd) (pending_of fd.Tir.fn_name) with
+            | Some { p_done = Some lowered; _ } -> lowered
+            | _ -> fd)
+          !fns)
+    lazy_cfg;
+  Lower_state.lazy_module_load_hook := (fun _ -> ());
+  Lower_state.alias_history := false;
   (* Inject top-level let bindings into function bodies that reference them.
      We scan each fn_body for direct variable references to decide which
      top_lets to inject.  This avoids duplicate alloca names in mutco

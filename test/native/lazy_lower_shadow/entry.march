@@ -1,0 +1,28 @@
+-- Lazy lowering (lib/tir/lower.ml, `~lazy_bodies`) lowers a stdlib fn's body
+-- after every declaration, the entry file's imports included, but must resolve
+-- its names as they stood at its declaration. `Result.collect` calls the
+-- prelude's `reverse` by its bare name; this program imports a library module
+-- (lib/shadow_lib.march, on MARCH_LIB_PATH) whose `reverse` does not reverse.
+-- Lowered late against the live alias table, the stdlib body would call
+-- `ShadowLib.reverse` and collect the list backwards.
+mod LazyLowerShadow do
+  needs IO.Console
+
+  import ShadowLib
+
+  fn show_list(xs : List(Int)) : String do
+    match xs do
+      Nil -> ""
+      Cons(x, Nil) -> int_to_string(x)
+      Cons(x, rest) -> int_to_string(x) ++ ", " ++ show_list(rest)
+    end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    match Result.collect([Ok(1), Ok(2), Ok(3)]) do
+      Ok(xs) -> println("collected: " ++ show_list(xs))
+      Err(e) -> println("error: " ++ e)
+    end
+    println("library: " ++ show_list(ShadowLib.reverse([1, 2, 3])))
+  end
+end

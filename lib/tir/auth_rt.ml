@@ -1287,3 +1287,22 @@ let captures (m : Tir.tir_module) ~(has_frames : bool) ~(repl : bool) : Tir.tir_
     in
     { m with Tir.tm_fns = fns }
   end
+
+(** The functions [restricts], [frames], [grants] and [captures] can add a
+    call of that the lowered TIR does not already call, given the tables they
+    run on ([fn_needs_tbl], [restrict_sites], [fn_grant_tbl]).  Lazy lowering
+    ([Lower.lower_module ~lazy_bodies]) lowers their bodies whatever the
+    program calls, because these passes run between lowering and the pre-mono
+    prune.  Builtins ([cap_save], [cap_enter], [cap_restore]) are not
+    functions and are not listed.  Keep in step with the passes above: a name
+    missing here is caught by [Dce_pre_mono.prune]'s tripwire. *)
+let minted_callees ~(needs : (string, Lower_state.fn_needs) Hashtbl.t)
+    ~(sites : (string, Lower_state.restrict_site) Hashtbl.t)
+    ~(grants : (string, Lower_state.fn_grant) Hashtbl.t) : string list =
+  (if Hashtbl.length needs > 0
+   then [ Tir_names.enter_fn_name; Tir_names.frame_layer_fn_name ] else [])
+  @ (if Hashtbl.length sites > 0
+     then [ Tir_names.enter_fn_name; restrict_layer_fn_name ] else [])
+  @ (if Hashtbl.length grants > 0
+     then [ Tir_names.enter_grant_name; Tir_names.grant_layer_builtin_name;
+            Tir_names.foreign_guard_name ] else [])

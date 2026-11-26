@@ -98,7 +98,7 @@ let rec called_fns : Tir.expr -> StringSet.t = function
     [Mod.fn] and [fn] (the emitter's two lookups).  Nothing calls them, but the
     driver hashes every pre-opt function for that constant fold, so a prune
     BEFORE that point must keep them (see [Contract_pipeline]'s early DCE). *)
-let remote_ref_targets (m : Tir.tir_module) : string list =
+let remote_ref_targets_of_fns (fns : Tir.fn_def list) : string list =
   let acc = ref [] in
   let rec go = function
     | Tir.EApp ({ Tir.v_name = "remote_ref_hashes"; _ },
@@ -113,8 +113,11 @@ let remote_ref_targets (m : Tir.tir_module) : string list =
     | Tir.ESeq (e1, e2) -> go e1; go e2
     | _ -> ()
   in
-  List.iter (fun fd -> go fd.Tir.fn_body) m.Tir.tm_fns;
+  List.iter (fun fd -> go fd.Tir.fn_body) fns;
   !acc
+
+let remote_ref_targets (m : Tir.tir_module) : string list =
+  remote_ref_targets_of_fns m.Tir.tm_fns
 
 (** Operational entry/root names preserved by top-level DCE.  [roots], when
     given, replaces them (with [tm_exports] still added): a REPL or shell

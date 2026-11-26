@@ -22799,6 +22799,7 @@ let codegen_suites =
   @ Test_ctor_tags.suites (* Task 1: globally-unique ctor tags for colliding types *)
   @ Test_trmc.suites (* TRMC Phase 1: tail-recursion-modulo-cons eligibility *)
   @ Test_dce_pre_mono.suites (* the pre-mono prune and Mono's pruned-name tripwire *)
+  @ Test_lazy_lower.suites (* lazy lowering of stdlib bodies: stubs, walk, tripwire *)
   @ prune_roots_tests
   @ Test_provenance.suites (* A2: provenance side table + --debug-info *)
   @ Test_fresh_names.suites (* function-local fresh-name counters *)

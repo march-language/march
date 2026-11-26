@@ -385,3 +385,38 @@ let free_app_sites ?(bound = []) (e : Ast.expr) : app_site list =
     | Ast.ELit _ | Ast.EVar _ -> acc
   in
   go (SSet.of_list bound) [] e
+
+(** [exists_subexpr p e]: [p] holds of [e] or of an expression anywhere
+    inside it (lambda and local-fn bodies, guards, proof terms included).
+    Exhaustive over [Ast.expr], so a new form is a compile error here rather
+    than a silently skipped subtree. *)
+let rec exists_subexpr (p : Ast.expr -> bool) (e : Ast.expr) : bool =
+  p e
+  ||
+  let any = List.exists (exists_subexpr p) in
+  let go = exists_subexpr p in
+  match e with
+  | Ast.EApp (f, args, _) -> go f || any args
+  | Ast.ECon (_, args, _) | Ast.EAtom (_, args, _) -> any args
+  | Ast.ELam (_, body, _) | Ast.ELetFn (_, _, _, body, _) -> go body
+  | Ast.EBlock (es, _) | Ast.ETuple (es, _) -> any es
+  | Ast.ELet (b, _) -> go b.Ast.bind_expr
+  | Ast.EMatch (scrut, arms, _) ->
+    go scrut
+    || List.exists (fun (arm : Ast.branch) ->
+        Option.fold ~none:false ~some:go arm.Ast.branch_guard || go arm.Ast.branch_body)
+      arms
+  | Ast.ERecord (fields, _) -> List.exists (fun (_, ex) -> go ex) fields
+  | Ast.ERecordUpdate (base, fields, _) ->
+    go base || List.exists (fun (_, ex) -> go ex) fields
+  | Ast.EField (inner, _, _) | Ast.EAnnot (inner, _, _) | Ast.ESpawn (inner, _)
+  | Ast.EAssert (inner, _) | Ast.ESigil (_, inner, _) | Ast.ERefineMsg (inner, _, _)
+  | Ast.EDbg (Some inner, _) -> go inner
+  | Ast.EIf (c, t, f, _) -> go c || go t || go f
+  | Ast.ERestrict (es, body, _) -> any es || go body
+  | Ast.EMock (es, h, body, _) -> any es || go h || go body
+  | Ast.ECond (arms, _) -> List.exists (fun (c, b) -> go c || go b) arms
+  | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _)
+  | Ast.ELetQ (_, a, b, _) | Ast.ELetStar (_, a, b, _) -> go a || go b
+  | Ast.EProof (pr, _) -> any (Ast.proof_children pr)
+  | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) | Ast.ELit _ | Ast.EVar _ -> false

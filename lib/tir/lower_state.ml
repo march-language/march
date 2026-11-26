@@ -937,6 +937,80 @@ let _module_alias_snapshots : (string, (string, string) Hashtbl.t) Hashtbl.t ref
    NOT converted to env fields: pure diagnostic accumulators (never
    consulted for a lowering DECISION, only for an optional stderr report),
    reset via [Hashtbl.reset] at [lower_module] entry. *)
+(* ── Alias tables as of a point in Pass 2 (lazy lowering) ────────────────
+   [Lower.lower_module ~lazy_bodies] lowers most stdlib fn bodies after Pass 2,
+   but each must resolve names exactly as it would have at its declaration.
+   Three tables grow during Pass 2: the program-global [_use_aliases] and
+   [_module_aliases], and each module's [current_module_aliases]; the entry
+   file's imports, processed after every stdlib module, would otherwise be
+   visible to a stdlib body lowered late (a user `import U` defining
+   [unwrap_or] changed the code of a stdlib fn that calls the prelude's).
+
+   So while [alias_history] is on, every write is logged with a clock value
+   ([alias_clock]), and a lookup made while [alias_view] is set answers as
+   the table stood at that clock value.  With the history off (every caller
+   but the main compile) a write is a plain [Hashtbl.replace] and a lookup a
+   plain [Hashtbl.find_opt]. *)
+let alias_history = ref false
+let alias_clock = ref 0
+let alias_view = ref max_int   (* [max_int]: the live tables *)
+
+(* Program-global tables: key -> (clock, value before the write), newest
+   first ([Hashtbl.add]). *)
+let use_alias_log : (string, int * string option) Hashtbl.t = Hashtbl.create 0
+let module_alias_log : (string, int * string option) Hashtbl.t = Hashtbl.create 0
+(* Per-module tables are first-wins (a key is written once per table, so an
+   entry written after the view was absent at the view): key -> (the table,
+   clock). *)
+let module_import_log : (string, (string, string) Hashtbl.t * int) Hashtbl.t =
+  Hashtbl.create 0
+
+let reset_alias_history ~(on : bool) =
+  alias_history := on;
+  alias_clock := 0;
+  alias_view := max_int;
+  Hashtbl.reset use_alias_log;
+  Hashtbl.reset module_alias_log;
+  Hashtbl.reset module_import_log
+
+let log_global_write log (tbl : (string, string) Hashtbl.t) (k : string) (v : string) =
+  if !alias_history then begin
+    incr alias_clock;
+    Hashtbl.add log k (!alias_clock, Hashtbl.find_opt tbl k)
+  end;
+  Hashtbl.replace tbl k v
+
+let find_global_as_of log (tbl : (string, string) Hashtbl.t) (k : string) : string option =
+  let cur = Hashtbl.find_opt tbl k in
+  if !alias_view = max_int then cur
+  else
+    (* Newest first: the last write after the view to fold in is the oldest
+       such, and the value it replaced is the table's value at the view. *)
+    List.fold_left (fun acc (t, prev) -> if t > !alias_view then prev else acc)
+      cur (Hashtbl.find_all log k)
+
+(** Write [k -> v] into [_use_aliases]. *)
+let set_use_alias (k : string) (v : string) = log_global_write use_alias_log !_use_aliases k v
+
+(** Write [k -> v] into [_module_aliases]. *)
+let set_module_alias (k : string) (v : string) =
+  log_global_write module_alias_log !_module_aliases k v
+
+(** Write [k -> v] into a module's own import table ([current_module_aliases]). *)
+let set_module_import (tbl : (string, string) Hashtbl.t) (k : string) (v : string) =
+  if !alias_history then begin
+    incr alias_clock;
+    Hashtbl.add module_import_log k (tbl, !alias_clock)
+  end;
+  Hashtbl.replace tbl k v
+
+let find_module_import (tbl : (string, string) Hashtbl.t) (k : string) : string option =
+  if !alias_view <> max_int
+     && List.exists (fun (tb, t) -> tb == tbl && t > !alias_view)
+          (Hashtbl.find_all module_import_log k)
+  then None
+  else Hashtbl.find_opt tbl k
+
 let _alias_candidates : (string, string list) Hashtbl.t = Hashtbl.create 64
 let _alias_reported   : (string, unit) Hashtbl.t = Hashtbl.create 16
 let alias_audit_on = lazy (Sys.getenv_opt "MARCH_ALIAS_AUDIT" <> None)
@@ -1136,7 +1210,7 @@ let resolve_use_alias (env : env) (name : string) : string =
   (* The current module's OWN imports take precedence over the program-global
      table, so [import Connection] in this module resolves [close] to
      Connection.close even if another module globally registered Db.close. *)
-  else match Hashtbl.find_opt env.current_module_aliases name with
+  else match find_module_import env.current_module_aliases name with
   | Some qualified -> qualified
   | None ->
   (* A bare call to a fn of a lexically enclosing module: keep it bare here;
@@ -1157,7 +1231,7 @@ let resolve_use_alias (env : env) (name : string) : string =
      per-module import scoping.  Dotted names fall through to the explicit
      module-alias prefix rewrite below. *)
   match (if String.contains name '.' then None
-         else Hashtbl.find_opt !_use_aliases name) with
+         else find_global_as_of use_alias_log !_use_aliases name) with
   | Some qualified ->
     (* GLOBAL-fallback resolution: the current module did not import this name
        itself.  If several distinct qualified candidates exist program-wide,
@@ -1184,7 +1258,7 @@ let resolve_use_alias (env : env) (name : string) : string =
      | None -> name
      | Some i ->
        let head = String.sub name 0 i in
-       match Hashtbl.find_opt !_module_aliases head with
+       match find_global_as_of module_alias_log !_module_aliases head with
        | Some real_path ->
          real_path ^ String.sub name i (String.length name - i)
        | None -> name)
@@ -1229,6 +1303,18 @@ let _lowered_modules : (string, unit) Hashtbl.t ref = ref (Hashtbl.create 8)
     [lower_fn_def] for the lazily-loaded module's own body) as its first
     argument. *)
 let _ensure_module_lowered : (env -> string -> unit) ref = ref (fun _ _ -> ())
+
+(** The fn whose deferred body lazy lowering ([Lower.lower_module
+    ~lazy_bodies]) is lowering, if any. *)
+let lazy_forcing : string option ref = ref None
+
+(** Called by [_ensure_module_lowered] with a module's name just before it
+    loads that module from disk and appends its fns.  A load happens where
+    the body that names the module is lowered, so lazy lowering, which
+    lowers some bodies late, installs a check here that refuses a load that
+    could land elsewhere than eager lowering puts it (see
+    [Lower.lower_module]).  A no-op otherwise. *)
+let lazy_module_load_hook : (string -> unit) ref = ref (fun _ -> ())
 
 (* ── Interface method resolution ────────────────────────────────── *)
 

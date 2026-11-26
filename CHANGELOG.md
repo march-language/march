@@ -21,6 +21,13 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Compiles lower only the standard-library functions the program can reach.** The
+  native compile used to lower all ~4,200 stdlib module functions to the compiler's IR and
+  then drop the ~4,100 the program never calls; it now lowers a function's body only when
+  something reached names it (hello world: lowering takes about half as long). The
+  generated program is byte-for-byte the same (CI compares the two over the whole IR
+  corpus). `--disable-pass lazy-lower` turns it off.
+
 - **`with_cap` is gone; tests mock with `mock` blocks** (object capabilities, phase 7).
   `with_cap`, and `cap_impl` / `cap_ops_empty` on an IO capability, are removed: write
   `mock IO.Console with { print_line: Some(f) } do ... end` instead (see Added).

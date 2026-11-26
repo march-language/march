@@ -23,7 +23,7 @@
 (library
  (name march_test_codegen)
  (wrapped false)
- (modules test_codegen test_ir_verify test_collision_set test_ctor_tags test_trmc test_kind test_provenance test_rc_trace test_dce_pre_mono test_fresh_names)
+ (modules test_codegen test_ir_verify test_collision_set test_ctor_tags test_trmc test_kind test_provenance test_rc_trace test_dce_pre_mono test_fresh_names test_lazy_lower)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint march_driver alcotest str unix threads.posix))
 
 (library
@@ -2178,6 +2178,61 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/pre_mono_prune_ord_show.expected native_pre_mono_prune_ord_show.out)))
+;
+; Lazy lowering of stdlib bodies (lib/tir/lower.ml, `~lazy_bodies`;
+; specs/progress/2026-11-26-lazy-stdlib-lowering.md).  A scoped fn-level
+; `needs` makes Auth_rt.frames call Authority.enter_fn/frame_layer, which no
+; body the program wrote calls: lazy lowering must lower them anyway.
+(rule
+ (targets native_lazy_lower_fn_needs native_lazy_lower_fn_needs.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/lazy_lower_fn_needs.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_lazy_lower_fn_needs native/lazy_lower_fn_needs.march)
+   (with-stdout-to native_lazy_lower_fn_needs.out (system "./native_lazy_lower_fn_needs")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/lazy_lower_fn_needs.expected native_lazy_lower_fn_needs.out)))
+
+; A stdlib body lowered late still resolves names as of its declaration: the
+; entry's `import ShadowLib` (whose `reverse` does not reverse) must not
+; reach `Result.collect`'s bare `reverse`.
+(rule
+ (targets native_lazy_lower_shadow native_lazy_lower_shadow.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (glob_files_rec native/lazy_lower_shadow/*.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_LIB_PATH native/lazy_lower_shadow/lib
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_lazy_lower_shadow
+         native/lazy_lower_shadow/entry.march)
+    (with-stdout-to native_lazy_lower_shadow.out
+         (system "./native_lazy_lower_shadow"))))))
+
+(rule
+ (alias runtest)
+ (action (diff native/lazy_lower_shadow.expected native_lazy_lower_shadow.out)))
+
+; A program with no root: the prune fails open, so every deferred body must
+; be lowered.  The IR is compared with eager lowering's (same file name, two
+; directories: the .ll embeds the source path).
+(rule
+ (targets lazy_lower_rootless.lazy.ll lazy_lower_rootless.eager.ll)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/lazy_lower_rootless/entry.march))
+ (action
+  (system "rm -rf lazy_lower_rootless.d && mkdir -p lazy_lower_rootless.d/lazy lazy_lower_rootless.d/eager && M=\"$PWD/%{exe:../bin/main.exe}\" && cp native/lazy_lower_rootless/entry.march lazy_lower_rootless.d/lazy/ && cp native/lazy_lower_rootless/entry.march lazy_lower_rootless.d/eager/ && (cd lazy_lower_rootless.d/lazy && \"$M\" --emit-llvm entry.march > /dev/null) && (cd lazy_lower_rootless.d/eager && \"$M\" --emit-llvm --disable-pass lazy-lower entry.march > /dev/null) && cp lazy_lower_rootless.d/lazy/entry.ll lazy_lower_rootless.lazy.ll && cp lazy_lower_rootless.d/eager/entry.ll lazy_lower_rootless.eager.ll")))
+
+(rule
+ (alias runtest)
+ (action (diff lazy_lower_rootless.eager.ll lazy_lower_rootless.lazy.ll)))
 
 ; Two nested modules declare `Safe` with the same constructor name and
 ; different field types; each module's own code builds and matches its own.

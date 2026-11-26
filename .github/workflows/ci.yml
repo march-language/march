@@ -1191,6 +1191,55 @@ jobs:
             scripts/determinism-oracle.sh --corpus small
           fi
 
+  # Lazy lowering of stdlib bodies (specs/progress/2026-11-26-lazy-stdlib-
+  # lowering.md) must not change the emitted program: every IR-oracle corpus
+  # program is compiled with --emit-llvm with and without `--disable-pass
+  # lazy-lower` and the two .ll files must be byte-identical. --self-test
+  # first, so a gate that cannot see a difference fails. Linux-only and no
+  # OCaml toolchain, like determinism: it runs the ocaml-build exe.
+  # Measured locally (2026-11-26): ~565 programs, two compiles each, about
+  # 45 CPU-minutes; ~12 min on a 4-vCPU runner.
+  lazy-lower-gate:
+    runs-on: ubuntu-24.04
+    needs: [ocaml-build]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the apt mirror
+        uses: ./.github/actions/apt-mirror-fallback
+
+      - name: Install system dependencies (blake3, the compiler's only runtime .so)
+        run: |
+          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
+          git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+          cd /tmp/blake3/c
+          gcc -O2 -shared -fPIC -o libblake3.so \
+            blake3.c blake3_dispatch.c blake3_portable.c \
+            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
+            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+          sudo cp libblake3.so /usr/local/lib/libblake3.so
+          sudo ldconfig
+
+      - name: Download prebuilt exes
+        uses: actions/download-artifact@v8
+        with:
+          name: ocaml-build-exes-ubuntu-24.04-${{ github.run_id }}
+          path: _build/default
+      - name: Restore exec bits (the artifact zip does not preserve them)
+        run: |
+          f=_build/default/bin/main.exe
+          [ -f "$f" ] || { echo "::error::$f missing from the ocaml-build artifact"; exit 1; }
+          chmod +x "$f"
+
+      - name: Self-test (the gate must go RED on a real difference)
+        timeout-minutes: 5
+        run: scripts/lazy-lower-gate.sh --self-test
+
+      - name: Lazy-lowering identity gate (whole IR corpus)
+        timeout-minutes: 40
+        run: scripts/lazy-lower-gate.sh -w "$RUNNER_TEMP/lazy-lower-gate"
+
   # Differential-oracle CI (test/test_properties.ml's "oracle: interp = compiled"
   # group, ~1090 QCheck-generated compile-vs-interpret comparisons). This is NOT
   # wired into `dune runtest`'s Test step above: MARCH_BIN isn't set there, so
