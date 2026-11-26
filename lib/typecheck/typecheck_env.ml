@@ -842,9 +842,7 @@ type env = {
       once the line has passed its own checks (a real role, a known
       capability, before any message step); read by [check_role_grants],
       which bounds each role's bodies by it the way [check_main_grant] bounds
-      the program by `main`'s parameters, and by the generator's caller
-      through [Desugar_endpoints.grants_of] (the generator runs before the
-      typechecker, so it reads the raw steps itself).  Shared (mutated in
+      the program by `main`'s request.  Shared (mutated in
       place) across every env copy, like the closure tables above. *)
   fn_grant_points : (string, string list * Ast.span) Hashtbl.t;
   (** Functions whose signature carries a concrete [Cap(P)] parameter —

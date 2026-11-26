@@ -135,7 +135,7 @@ let rec proto_roles_of acc (steps : protocol_step list) =
       | ProtoMayCrash _ | ProtoStop _ | ProtoRoleNeeds _ -> acc)
     acc steps
 
-(* IO paths only, as [Desugar_endpoints.grants_of]: a non-IO path is refused
+(* IO paths only: a non-IO path is refused
    by the typechecker at the grant line, and dropping it here keeps that the
    only diagnostic in a topology app too. *)
 let grants_of (steps : protocol_step list) =

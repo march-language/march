@@ -214,8 +214,8 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
            the roles it names reach [project] through [crashers_of]. *)
         | ProtoMayCrash _ -> []
         (* `role R needs ...` is a claim about the role's code, not about the
-           wire: it is read by [grants_of] (for the body type, D34) and by the
-           typechecker, and never reaches the annotated steps, so
+           wire: only the typechecker reads it (it adds nothing to the
+           generated code since ocap phase 7b), and it never reaches the annotated steps, so
            [fingerprint_of] cannot see it.  Two nodes built with different
            grants must still talk (plan II.2). *)
         | ProtoRoleNeeds _ -> []
@@ -304,27 +304,6 @@ let crash_ctors_of (steps : astep list) (role : string) : string list =
   in
   go steps;
   List.rev !acc
-
-(** Each role's declared grant (`role R needs ...`), as dot-joined capability
-    paths in declaration order; a role with no line is absent.  Read from the
-    raw steps, not the annotated ones, which drop the line. *)
-let grants_of (steps : protocol_step list) : (string * string list) list =
-  (* Only paths under `IO` become parameters: the fronts narrow each one from
-     `io` with `cap_narrow`, which cannot produce a proof or foreign
-     capability.  A non-IO path is refused by the typechecker at the grant
-     line ([Typecheck.check_role_needs]); leaving it out here is what keeps
-     that the ONLY diagnostic, instead of one per generated narrowing site
-     with no excerpt to show (review finding
-     2026-09-24-dd-review-non-io-role-grant-diagnostics). *)
-  List.concat_map
-    (function
-      | ProtoRoleNeeds (r, caps, _) ->
-        [ (r.txt,
-           List.filter_map
-             (fun (c : name) -> if March_caps.Cap_lattice.cap_subsumes "IO" c.txt then Some c.txt else None)
-             caps) ]
-      | _ -> [])
-    steps
 
 (** All roles, in order of FIRST APPEARANCE.  The typechecker sorts them, but
     the order here is user-visible -- it is the role index a transport is
@@ -962,7 +941,7 @@ let record_states ~proto ~role ~mname ~(pos_of : lty -> int list option) (names 
     role's ENTRY state (what `register` yields), which `<P>_Run` types the
     role's body by. *)
 let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors : int)
-    ~(grants : string list) ~(crash_points : string list) ?(held_labels : string list = [])
+    ~(crash_points : string list) ?(held_labels : string list = [])
     (role : string) ((root : lty), (tags : tags))
     : decl * string =
   let mname = proto ^ "_" ^ role in
@@ -1550,7 +1529,6 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
 
      Both are ordinary bodies of the role's type, so they run over any
      transport unchanged. *)
-  let cap_params = List.mapi (fun i p -> (Printf.sprintf "_cap%d" (i + 1), tycon "Cap" [ tycon p [] ])) grants in
   let t_step = tycon "Step" [] in
   let t_steps = tycon "List" [ t_step ] in
   let t_unit = TyTuple [] in
@@ -1705,7 +1683,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
   in
   let entry_nm = state_of root in
   let script =
-    fn "script" ([ ("s", t_cap_session) ] @ cap_params @ [ ("st", sty entry_nm); ("steps", t_steps) ]) t_yield
+    fn "script" [ ("s", t_cap_session); ("st", sty entry_nm); ("steps", t_steps) ] t_yield
       (app (script_fn entry_nm) [ var "s"; var "st"; var "steps" ])
   in
   (* ── chaos ── *)
@@ -1895,7 +1873,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
   in
   let chaos =
     fn "chaos"
-      ([ ("s", t_cap_session) ] @ cap_params @ [ ("st", sty entry_nm); ("seed", t_int) ]
+      ([ ("s", t_cap_session); ("st", sty entry_nm); ("seed", t_int) ]
        @ List.map (fun (p, t) -> (p, tycon "Gen.Generator" [ t ])) gen_params)
       t_yield
       (app (chaos_fn entry_nm) ([ var "s"; var "st"; app "Random.seed" [ var "seed" ] ] @ List.map var gen_names))
@@ -1922,14 +1900,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
   (* Every transition takes `Cap(Session.Live)`, so the module acknowledges
      the dependency itself rather than leaning on the enclosing module's
      manifest -- the capability checker asks each module for its own. *)
-  (* The scripted and chaos peers take the role's grant as `Cap(P)`
-     parameters (D34), and a module that names `Cap(P)` must declare `P`. *)
-  let needs =
-    DNeeds
-      ( ([ n "Session"; n "Live" ], None)
-        :: List.map (fun p -> (List.map n (String.split_on_char '.' p), None)) grants,
-        sp )
-  in
+  let needs = DNeeds ([ ([ n "Session"; n "Live" ], None) ], sp) in
   (DMod (n mname, Public,
          (needs :: secret :: yield_ty :: cancelled_ty :: crashed_ty :: drained_ty :: state_types) @ [ entry_alias ]
          @ (register :: cancelled_fn :: drained_fn :: transitions) @ event_api @ peers, sp),
@@ -1958,10 +1929,8 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
     and no front takes a `Cap(IO)` or the grant.  The grant is a compile-time
     limit: [Typecheck.check_role_grants] bounds everything the body reaches
     by it; at run time the body runs under the authority it was made under,
-    as every function value does.  [grants] is still the protocol's
-    `role ... needs` lines ([grants_of]); the generated code does not read
-    it. *)
-let run_module ~proto ~(roles : (string * string) list) ~grants:(_ : (string * string list) list) : decl =
+    as every function value does. *)
+let run_module ~proto ~(roles : (string * string) list) : decl =
   let mname = proto ^ "_Run" in
   let msg = proto ^ "_Msg" in
   let t_unit = TyTuple [] in
@@ -2726,12 +2695,10 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
                 msg_module errors ~proto ~span ~fingerprint ~compat
                   ?held:(Option.map (fun (c, _, f) -> (c, f)) held) ctors roles peers
               in
-              let grants = grants_of pdef.proto_steps in
               let role_mods =
                 List.map
                   (fun role ->
                      role_module errors ~proto ~span ~roles ~nctors:(List.length ctors)
-                       ~grants:(Option.value ~default:[] (List.assoc_opt role grants))
                        ~crash_points:(crash_ctors_of steps role)
                        ~held_labels:(match held with Some (c, l, _) when c = role -> [ l ] | _ -> [])
                        role
@@ -2741,8 +2708,7 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
               in
               let run =
                 if !emit_runner then
-                  [ run_module ~proto ~roles:(List.map2 (fun r (_, e) -> (r, e)) roles role_mods)
-                      ~grants:(grants_of pdef.proto_steps) ]
+                  [ run_module ~proto ~roles:(List.map2 (fun r (_, e) -> (r, e)) roles role_mods) ]
                 else []
               in
               List.map respan_mod ((msg :: List.map fst role_mods) @ run)))

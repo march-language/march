@@ -3387,10 +3387,10 @@ mod ClusterNode do
   `Cap(Session.Live)` that `Session.attach(sops)` would give, without the
   capability kind `IO.Cluster`.
 
-  A node was started (or attached) by a holder of `Cap(IO)`, and it keeps that
-  one power: to say a session's transport is attached. The session runners use
-  it (`SessionNode.run_cluster`, `offer_role`, `initiate`), so a program that
-  holds a running node can play a role without holding the root capability.
+  A node was started (or attached) under `IO.Cluster`, and it keeps that one
+  power: to say a session's transport is attached. The session runners use it
+  (`SessionNode.run_cluster`, `offer_role`, `initiate`), so a program that
+  holds a running node can play a role without the kind itself.
   It grants nothing more: every operation on the session goes through [sops],
   which the caller built. The capability is handed to [body] and not returned:
   only `Session` may return one.

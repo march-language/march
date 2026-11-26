@@ -2288,7 +2288,20 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                    List.exists (fun req_cap -> cap_subsumes need req_cap) req_caps
                  ) env.module_caps
               || List.exists (fun cap_path -> cap_subsumes need cap_path)
-                   (Lazy.force own_transitive_caps) in
+                   (Lazy.force own_transitive_caps)
+              (* A function's own `needs` clause must lie within the module's
+                 (`cap_bound_needs`), so a module line that a clause names is
+                 required by it, not unused.  Since ocap phase 7b this is how
+                 `main` asks for a kind the program reaches only through
+                 other modules (`IO.Foreign` behind `Js.Dom`, say), which a
+                 `Cap(IO.X)` parameter on `main` used to count for. *)
+              || List.exists (function
+                   | Ast.DFn (fd, _) ->
+                     (match fd.Ast.fn_needs with
+                      | Some (caps, _) ->
+                        List.exists (fun (names, _) -> cap_subsumes need (cap_path_of_names names)) caps
+                      | None -> false)
+                   | _ -> false) decls in
     if not used then
       (* A deferred Check-4 import (an importee not analysed yet) will require
          the importee's whole declared set (fail-closed, see
