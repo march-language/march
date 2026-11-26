@@ -1374,6 +1374,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Two modules that each declare a type of the same name, with a constructor of the same
+  name but different fields, now compile correctly.** Compiled code laid both out as one of
+  them, so the other module's field was stored at the wrong type (`Safe(Int)` beside
+  `Safe(Float)` failed in clang; `Safe(Int)` beside the standard library's `Html.Safe`
+  could pick either layout depending on program size). Each module's own code now uses its
+  own layout.
 - **`Udp.recv` and `Udp.recv_batch` no longer drop a datagram when the socket is closed
   right after it arrives.** A receive that was waiting when another task closed the socket
   answered `Err(Closed)` even if a datagram had already reached the socket, and the
