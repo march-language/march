@@ -4,7 +4,7 @@ mod Main do
   -- a hand-written hint.
   needs IO.Console
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let ready = 3 > 2
     let label : String = ready
     println(label)

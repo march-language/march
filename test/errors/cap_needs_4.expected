@@ -16,5 +16,17 @@ help: add `needs IO.FileWrite` to the module body.
     run `march --explain cap_needs`
 
 
+-- CAPABILITY ------------------ errors/cap_needs_4.march
 
-after fix: exit 0
+`Cap(IO.FileWrite)` was retired: capability values grant nothing since the current authority replaced them. [cap_param_retired]
+help: remove it; code uses the current authority, which `main`'s `needs` clause asks for and each operation checks.
+
+23 |     fn grant : a -> Cap(IO.FileWrite)
+                         ^^^^^^^^^^^^^^^^^
+
+    run `march --explain cap_param_retired`
+
+
+
+after fix: exit 1
+`Cap(IO.FileWrite)` was retired: capability values grant nothing since the current authority replaced them. [cap_param_retired]

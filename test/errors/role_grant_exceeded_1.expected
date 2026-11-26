@@ -1,8 +1,8 @@
 exit: 1
 -- CAPABILITY -------- errors/role_grant_exceeded_1.march
 
-The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)` (`role Cons needs IO.Console`). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]
-help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.Console, IO.FileWrite`. The body then takes one `Cap` per granted capability, in the grant's order, between the session capability and the state, so it gains a parameter: `fn (s, cap_console, cap_file_write, st) -> ...`. Pass `cap_file_write` on to any function the body hands its capabilities to. Or remove the use.
+The body of role `Cons` writes a file, but the role is granted only `IO.Console` (`role Cons needs IO.Console`). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]
+help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.Console, IO.FileWrite`. Or remove the use.
 
 30 |     let _ = file_write("/tmp/n", int_to_string(n))
                  ^^^^^^^^^^
@@ -10,8 +10,8 @@ help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.
 
     the body calls `cons` here:
 
-42 |       fn (s, con, st) -> cons(s, con, st))
-                              ^^^^
+42 |       fn (s, st) -> cons(s, st))
+                         ^^^^
 
     `cons` calls `save` here:
 
@@ -20,10 +20,10 @@ help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.
 
     the body of role `Cons`, passed to `Stream_Run.run_Cons`:
 
-42 |       fn (s, con, st) -> cons(s, con, st))
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+42 |       fn (s, st) -> cons(s, st))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-    role `Cons` is granted only `Cap(IO.Console)` here:
+    role `Cons` is granted only `IO.Console` here:
 
 18 |     role Cons needs IO.Console
          ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -46,4 +46,4 @@ help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.
 
 
 after fix: exit 1
-Role `Stream.Cons` is granted `Cap(IO.Console)` (`role Cons needs IO.Console`), but the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body: body → cons → save). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]
+Role `Stream.Cons` is granted `IO.Console` (`role Cons needs IO.Console`), but the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body: body → cons → save). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]

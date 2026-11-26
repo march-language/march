@@ -1,6 +1,17 @@
 exit: 1
 -- CAPABILITY ----------------- errors/cap_grant_13.march
 
+`Cap(IO.FileWrite)` was retired: capability values grant nothing since the current authority replaced them. [cap_param_retired]
+help: remove it; code uses the current authority, which `main`'s `needs` clause asks for and each operation checks.
+
+15 |   type Handle = { id : Int, tok : Cap(IO.FileWrite) }
+                                       ^^^^^^^^^^^^^^^^^
+
+    run `march --explain cap_param_retired`
+
+
+-- CAPABILITY ----------------- errors/cap_grant_13.march
+
 `Cap(IO.FileWrite)` cannot be deserialized — a capability may only be received, never constructed, so `Handle` cannot derive Json. [cap_deserialize]
 hint: hold the capability in a separate value and pass it as a parameter, keeping `Handle` free of capability fields.
 

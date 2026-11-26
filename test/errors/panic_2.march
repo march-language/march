@@ -16,7 +16,7 @@ mod Main do
     List.fold_left(codes, 0, fn (acc, c) -> acc + price(c))
   end
 
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(total(["a", "zz"])))
   end
 end

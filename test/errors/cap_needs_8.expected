@@ -16,5 +16,23 @@ help: add `needs IO.FileWrite` to the module body.
     run `march --explain cap_needs`
 
 
+-- CAPABILITY ------------------ errors/cap_needs_8.march
 
-after fix: exit 0
+`save` takes a `Cap(IO.FileWrite)` parameter, but capability values were retired: a function no longer receives its authority, it uses the current authority, which `main`'s `needs` clause asks for and each operation checks. [cap_param_retired]
+help: remove the parameter and the argument at each call; to state what `save` may use, give it a `needs` clause.
+
+13 |   fn save(cap : Cap(IO.FileWrite), path : String, data : String) : String do
+                     ^^^^^^^^^^^^^^^^^
+
+
+    possible fix (a guess: check it before applying it):
+
+13 -   fn save(cap : Cap(IO.FileWrite), path : String, data : String) : String do
+13 +   fn save(path : String, data : String) : String do
+
+    run `march --explain cap_param_retired`
+
+
+
+after fix: exit 1
+`save` takes a `Cap(IO.FileWrite)` parameter, but capability values were retired: a function no longer receives its authority, it uses the current authority, which `main`'s `needs` clause asks for and each operation checks. [cap_param_retired]

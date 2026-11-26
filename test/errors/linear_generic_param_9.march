@@ -8,7 +8,7 @@
 -- does not need to be inside it). Type-checked before C2 (Phase 0).
 mod Main do
   needs IO.Spawn
-  fn main(_s : Cap(IO.Spawn)) : Int do
+  fn main() : Int needs IO.Spawn do
     let t = Authority.must(Task.async(fn () -> RingBuf.make(4)))
     let a = match Task.await(t) do
       Ok(rb) -> rb

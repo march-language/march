@@ -1,6 +1,17 @@
 exit: 1
 -- CAPABILITY ----------------- errors/cap_grant_14.march
 
+`Cap(IO)` was retired: capability values grant nothing since the current authority replaced them. [cap_param_retired]
+help: remove it; code uses the current authority, which `main`'s `needs` clause asks for and each operation checks.
+
+17 |     let forged : Cap(IO) = from_json_events("[]")
+                      ^^^^^^^
+
+    run `march --explain cap_param_retired`
+
+
+-- CAPABILITY ----------------- errors/cap_grant_14.march
+
 `Cap(IO)` cannot be deserialized — a capability may only be received, never constructed. [cap_deserialize]
 hint: `from_json_events` places no constraint on the type it produces, so it would fabricate authority from data. Receive the capability as a parameter and pass it through instead.
 

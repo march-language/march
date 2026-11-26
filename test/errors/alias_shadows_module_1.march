@@ -8,7 +8,7 @@ mod Main do
   mod B do
     fn length(_xs : List(Int)) : Int do 50 end
   end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     IO.puts(int_to_string(B.length([1])))
   end
 end

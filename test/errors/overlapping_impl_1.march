@@ -21,7 +21,7 @@ mod Main do
   type Stream_Message = SM(Int)
   derive Json for Stream_Message
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(Json.to_string(to_json(SM(1))))
   end
 end

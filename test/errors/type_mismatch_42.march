@@ -14,5 +14,5 @@ mod Main do
     let st1 = Fan_A.send_Number(s, st, "seven")
     Fan_A.recv_Verdict(s, st1, fn (_ok, st2) -> Fan_A.close(s, st2))
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

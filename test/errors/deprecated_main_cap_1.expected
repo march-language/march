@@ -1,0 +1,22 @@
+exit: 0
+-- WARNING: CAPABILITY -- errors/deprecated_main_cap_1.march
+
+`main` asks for its authority with `Cap` parameters, which are deprecated and will be removed in the next release: a capability value grants nothing since the current authority replaced it. [deprecated_main_cap]
+help: request it with a `needs` clause: `fn main() needs IO.Console do`.
+
+4 |   fn main(c : Cap(IO.Console)) do
+                  ^^^^^^^^^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+4 -   fn main(c : Cap(IO.Console)) do
+4 +   fn main() do
+4 -   fn main(c : Cap(IO.Console)) do
+4 +   fn main(c : Cap(IO.Console)) needs IO.Console do
+
+    run `march --explain deprecated_main_cap`
+
+
+
+after fix: exit 0

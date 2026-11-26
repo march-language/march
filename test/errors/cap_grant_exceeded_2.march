@@ -30,7 +30,7 @@ mod Witness do
     end
   end
 
-  fn main(cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println(slurp("/etc/passwd"))
     ()
   end

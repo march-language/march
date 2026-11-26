@@ -25,7 +25,7 @@ mod Main do
       { budget: 2, parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
     end
   end
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let _ = spawn(ConsActor)
     ()
   end

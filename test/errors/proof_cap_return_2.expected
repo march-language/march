@@ -5,8 +5,8 @@ The function `pretend` returns `Cap(Db.Ready)` but `Cap(Db.Ready)` is a proof ca
 Only public functions of `Db` can construct `Cap(Db.Ready)`.
 hint: accept `Cap(Db.Ready)` as a parameter and pass it through, or call a factory in `Db`.
 
-11 |     fn pretend(c : Cap(IO)) : Cap(Db.Ready) do mint_cap(c) end
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+11 |     fn pretend() : Cap(Db.Ready) do mint_cap() end
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     run `march --explain proof_cap_return`
 

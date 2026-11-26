@@ -17,7 +17,7 @@ mod M do
   needs IO.Console
   fn take_n(n : {Int | _ >= 0}) : Int do n end
   fn apply(f : Int -> Int, x : Int) : Int do f(x) end
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(apply(take_n, -3)))
   end
 end

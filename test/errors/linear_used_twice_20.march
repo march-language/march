@@ -5,7 +5,7 @@ mod Main do
   -- map version whose values now live in m1.
   always_linear type S1 = S1(Int)
   fn sink(s : S1) : Int do match s do S1(e) -> e end end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let m0 = LinearMap.empty_int()
     let (d, m1) = LinearMap.put(m0, 1, S1(1))
     let (got, m2) = LinearMap.take(m0, 1)

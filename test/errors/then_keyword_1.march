@@ -4,7 +4,7 @@ mod Main do
     if n > 0 then 1 else 0 end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(sign(3)))
   end
 end

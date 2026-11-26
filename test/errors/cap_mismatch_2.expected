@@ -1,13 +1,51 @@
 exit: 1
 -- CAPABILITY --------------- errors/cap_mismatch_2.march
 
+`greet` takes a `Cap(IO.Console)` parameter, but capability values were retired: a function no longer receives its authority, it uses the current authority, which `main`'s `needs` clause asks for and each operation checks. [cap_param_retired]
+help: remove the parameter and the argument at each call; to state what `greet` may use, give it a `needs` clause.
+
+7 |   fn greet(con : Cap(IO.Console), name : String) : () do
+                     ^^^^^^^^^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+ 7 -   fn greet(con : Cap(IO.Console), name : String) : () do
+ 7 +   fn greet(name : String) : () do
+13 -     greet(cap, "march")
+13 +     greet("march")
+
+    run `march --explain cap_param_retired`
+
+
+-- WARNING: CAPABILITY ------ errors/cap_mismatch_2.march
+
+`main` asks for its authority with `Cap` parameters, which are deprecated and will be removed in the next release: a capability value grants nothing since the current authority replaced it. [deprecated_main_cap]
+help: request it with a `needs` clause: `fn main() needs IO do`.
+
+12 |   fn main(cap : Cap(IO)) do
+                     ^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+12 -   fn main(cap : Cap(IO)) do
+12 +   fn main() do
+12 -   fn main(cap : Cap(IO)) do
+12 +   fn main(cap : Cap(IO)) needs IO do
+
+    run `march --explain deprecated_main_cap`
+
+
+-- CAPABILITY --------------- errors/cap_mismatch_2.march
+
 `greet` needs console access, but `cap` is the full IO capability. [cap_mismatch]
 
 13 |     greet(cap, "march")
                ^^^
 
     `IO` contains `IO.Console`, but a capability is never narrowed implicitly.
-    help: pass `cap_narrow(cap)`, which narrows it to `Cap(IO.Console)`.
+    help: capability values were retired; remove the parameter and this argument (see the `cap_param_retired` error on the parameter).
 
     `greet` needs `Cap(IO.Console)`:
 
@@ -18,11 +56,6 @@ exit: 1
 
 12 |   fn main(cap : Cap(IO)) do
                ^^^
-
-    fix (`forge fix` applies it):
-
-13 -     greet(cap, "march")
-13 +     greet(cap_narrow(cap), "march")
 
 
 

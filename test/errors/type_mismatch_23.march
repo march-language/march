@@ -4,7 +4,7 @@ mod Main do
     List.length(xs)
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let names = ["a", "b"]
     println(int_to_string(count(names)))
   end

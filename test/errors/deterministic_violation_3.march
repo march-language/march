@@ -15,7 +15,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO)) : () do
+  fn main() : () needs IO do
     println(int_to_string(Sim.now()))
     ()
   end

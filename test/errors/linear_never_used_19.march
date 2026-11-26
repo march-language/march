@@ -26,5 +26,5 @@ mod Main do
       fn (_b, st2) -> prod(s, st2, next + 1),
       fn (_b, st2) -> Stream_Prod.close(s, st2))
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

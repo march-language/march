@@ -8,10 +8,10 @@ mod Main do
     needs IO
     needs Db.Ready
 
-    fn pretend(c : Cap(IO)) : Cap(Db.Ready) do mint_cap(c) end
+    fn pretend() : Cap(Db.Ready) do mint_cap() end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     ()
   end
 end

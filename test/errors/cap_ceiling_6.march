@@ -12,7 +12,7 @@ mod Main do
       end
     end
   end
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     Inner.go()
   end
 end

@@ -3,7 +3,7 @@ mod Main do
   needs IO.Console
   -- The must-use half of t191: declaration order also decided whether
   -- abandoning a linear value was caught.
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let a = S(1)
     IO.puts("abandoned")
   end

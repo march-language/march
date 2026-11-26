@@ -5,8 +5,8 @@ The private function `migrate` in `Db` cannot mint `Cap(Db.Migrated)`. [proof_ca
 Only public functions of `Db` can construct `Cap(Db.Migrated)`.
 hint: make this function public, or accept `Cap(Db.Migrated)` as a parameter and pass it through.
 
-7 |     pfn migrate(c : Cap(IO)) : Cap(Db.Migrated) do
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+7 |     pfn migrate() : Cap(Db.Migrated) do
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     run `march --explain proof_cap_mint_private`
 

@@ -12,7 +12,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+  fn main() needs IO.Console, IO.Process do
     println(home())
   end
 end

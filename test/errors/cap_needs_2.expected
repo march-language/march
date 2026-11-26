@@ -16,5 +16,17 @@ help: add `needs IO.NetConnect` to the module body.
     run `march --explain cap_needs`
 
 
+-- CAPABILITY ------------------ errors/cap_needs_2.march
 
-after fix: exit 0
+`Cap(IO.NetConnect)` was retired: capability values grant nothing since the current authority replaced them. [cap_param_retired]
+help: remove it; code uses the current authority, which `main`'s `needs` clause asks for and each operation checks.
+
+10 |   type Conn = Idle | Live(Cap(IO.NetConnect))
+                               ^^^^^^^^^^^^^^^^^^
+
+    run `march --explain cap_param_retired`
+
+
+
+after fix: exit 1
+`Cap(IO.NetConnect)` was retired: capability values grant nothing since the current authority replaced them. [cap_param_retired]

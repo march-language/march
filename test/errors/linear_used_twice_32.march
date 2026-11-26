@@ -20,5 +20,5 @@ mod Main do
         let _done = Relay_A.close(s, st4)
         Relay_A.recv_Fourth(s, st4, fn (_again, st5) -> Relay_A.close(s, st5))))
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

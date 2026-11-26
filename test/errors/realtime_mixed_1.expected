@@ -10,3 +10,22 @@ hint: remove `Cap(IO)`
 
 
 
+-- CAPABILITY ------------- errors/realtime_mixed_1.march
+
+`step` takes a `Cap(IO)` parameter, but capability values were retired: a function no longer receives its authority, it uses the current authority, which `main`'s `needs` clause asks for and each operation checks. [cap_param_retired]
+help: remove the parameter and the argument at each call; to state what `step` may use, give it a `needs` clause.
+
+20 |   fn step(_deadline : Tagged(Int, Realtime), _cap : Cap(IO)) : Int do
+                                                         ^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+20 -   fn step(_deadline : Tagged(Int, Realtime), _cap : Cap(IO)) : Int do
+20 +   fn step(_deadline : Tagged(Int, Realtime)) : Int do
+
+    run `march --explain cap_param_retired`
+
+
+
+after fix: exit 0

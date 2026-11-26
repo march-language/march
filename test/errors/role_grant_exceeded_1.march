@@ -1,4 +1,4 @@
--- EXPECT-ERROR: The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)`
+-- EXPECT-ERROR: The body of role `Cons` writes a file, but the role is granted only `IO.Console`
 -- (Since ocap phase 4 the raw builtin is stdlib-only, so this program also
 -- draws `stdlib_internal`; it pins the call-level rule, which stdlib-spanned
 -- code still reaches. A user program reaches the operation through its
@@ -31,15 +31,15 @@ mod Main do
     ()
   end
 
-  pfn cons(s : Cap(Session.Live), con : Cap(IO.Console), st : Stream_Cons.Entry) : Stream_Cons.Yield do
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.Entry) : Stream_Cons.Yield do
     Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
       save(n)
       Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
   end
 
-  fn main(c : Cap(IO)) do
-    let _ = Stream_Run.run_Cons(c, "cons", "secret", Stream_Run.addrs_from_env(),
-      fn (s, con, st) -> cons(s, con, st))
+  fn main() needs IO do
+    let _ = Stream_Run.run_Cons("cons", "secret", Stream_Run.addrs_from_env(),
+      fn (s, st) -> cons(s, st))
     ()
   end
 end

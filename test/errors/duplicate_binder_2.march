@@ -2,7 +2,7 @@
 mod Main do
   needs IO.Console
   fn two(a : Int, a : Int) : Int do a end
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(two(1, 2)))
   end
 end

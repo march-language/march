@@ -11,7 +11,7 @@ mod CeilApp do
     Ok(s) -> s
     Err(_) -> ""
   end
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println("hi")
     ()
   end

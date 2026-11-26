@@ -15,10 +15,10 @@ exit: 1
 
 -- CAPABILITY ----------------- errors/cap_needs_10.march
 
-`save` writes a file, but module `Main` declares no `needs IO.FileWrite`, and `main` is granted only `Cap(IO.Console)`. [cap_needs]
+`save` writes a file, but module `Main` declares no `needs IO.FileWrite`, and `main` is granted only `needs IO.Console`. [cap_needs]
 hint: add this to the module body —
         needs IO.FileWrite
-and give `main` a `Cap(IO.FileWrite)` parameter: `fn main(…, _cap_filewrite : Cap(IO.FileWrite))`.
+and add `IO.FileWrite` to `main`'s request.
 
 14 |     let _ = file_write("/tmp/n", int_to_string(n))
                  ^^^^^^^^^^
@@ -29,19 +29,29 @@ and give `main` a `Cap(IO.FileWrite)` parameter: `fn main(…, _cap_filewrite : 
 19 |     save(1)
          ^^^^
 
-    `main` is granted only `Cap(IO.Console)` here:
+    `main` is granted only `needs IO.Console` here:
 
-18 |   fn main(c : Cap(IO.Console)) do
-              ^^^^^^^^^^^^^^^^^^^^^
+18 |   fn main() needs IO.Console do
+              ^^
 
     fix (`forge fix` applies it):
 
 10 | mod Main do
 11 +   needs IO.FileWrite
-18 -   fn main(c : Cap(IO.Console)) do
-18 +   fn main(c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
+18 -   fn main() needs IO.Console do
+18 +   fn main() needs IO.Console, IO.FileWrite do
 
     run `march --explain cap_needs`
+
+
+-- CAPABILITY ----------------- errors/cap_needs_10.march
+
+`main` is bounded by `needs IO.Console`, but reaches `IO.FileWrite` (via save). [cap_bound]
+help: add `IO.FileWrite` to the bound, or remove the use.
+
+18 |   fn main() needs IO.Console do
+                 ^^^^^^^^^^^^^^^^
+
 
 
 

@@ -9,7 +9,7 @@ mod Main do
     List.fold_left(xs, 0.0, fn (acc, x) -> acc +. x) /. int_to_float(List.length(xs))
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let m : Float = arith_mean([1.0, 2.0, 4.5])
     println(float_to_string(m))
   end

@@ -7,7 +7,7 @@
 mod ForgesAUdpSocket do
   needs IO.NetConnect
 
-  fn main(_c : Cap(IO.NetConnect)) do
+  fn main() needs IO.NetConnect do
     let s = Udp.UdpSocket(5)
     Udp.close(s)
   end

@@ -23,5 +23,5 @@ mod Main do
         let st5 = Chain_C.send_S8(s, st4, true)
         Chain_B.close(s, st5)))
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

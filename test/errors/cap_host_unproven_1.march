@@ -9,7 +9,7 @@ mod Main do
       end
     end
   end
-  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Console do
     println(A.go("http://example.com/"))
   end
 end

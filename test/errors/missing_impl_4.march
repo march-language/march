@@ -7,7 +7,7 @@ mod Main do
     if a < b do b else a end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let p = max_of(Low, High)
     if p == High do println("high") else println("not high") end
   end

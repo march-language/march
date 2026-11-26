@@ -19,7 +19,7 @@ mod CeilApp do
       end
     end
   end
-  fn main(cap_console : Cap(IO.Console), cap_fileread : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     println(Dep.slurp("/etc/passwd"))
     ()
   end

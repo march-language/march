@@ -1,12 +1,12 @@
 exit: 1
 -- TYPE MISMATCH ---------- errors/main_signature_1.march
 
-`main` must take zero arguments, or only arguments of type `Cap(IO)` (or narrower points of the IO lattice, e.g. `Cap(IO.Console)`, or `Cap(Actor.Introspect)` / `Cap(Actor.Debug)`) — the capabilities the runtime GRANTS the program at startup; the whole program is then held to their union. [main_signature]
-Found 2 parameters, 1 of which is not a capability.
-help: use `fn main() : () do ... end`, `fn main(cap : Cap(IO)) : () do ... end` for full IO, or e.g. `fn main(console : Cap(IO.Console), spawn : Cap(IO.Spawn)) : () do ... end` to grant exactly what the program needs.
+`main` must take no arguments: it asks for the program's authority with a `needs` clause, and the runtime passes it nothing; the deprecated form, where every argument is a `Cap(IO)` or a narrower kind such as `Cap(IO.Console)`, is still accepted for one release. [main_signature]
+Found 1 parameter, 1 of which is not a capability.
+help: use `fn main() : () needs IO.Console, IO.Spawn do ... end` to request exactly what the program needs (`Cap` parameters on `main` are deprecated since ocap phase 7b).
 
-13 |   fn main(cap : Cap(IO), n : Int) : () do
-       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+13 |   fn main(n : Int) : () needs IO do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 
 

@@ -4,12 +4,12 @@ mod Main do
     proof cap Migrated
     needs IO
 
-    pfn migrate(c : Cap(IO)) : Cap(Db.Migrated) do
-      mint_cap(c)
+    pfn migrate() : Cap(Db.Migrated) do
+      mint_cap()
     end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     ()
   end
 end

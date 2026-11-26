@@ -17,7 +17,7 @@ mod Main do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let st = Stream_Prod.S_ned
     ()
   end
