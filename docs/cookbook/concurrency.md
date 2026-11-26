@@ -135,7 +135,7 @@ mod Parallel do
     List.fold_left(List.range(1, n + 1), 0, fn (acc, x) -> acc + x)
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let inputs = [10, 20, 30, 40, 50]
     let tasks = List.map(inputs, fn n ->
       Authority.must(Task.async(fn () -> sum_to(n)))

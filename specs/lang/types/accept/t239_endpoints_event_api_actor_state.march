@@ -39,7 +39,7 @@ mod Main do
       end
     end
   end
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let _ = spawn(ConsActor)
     ()
   end

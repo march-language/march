@@ -15,7 +15,7 @@ mod Main do
   -- actually brings a stdlib module's public names into unqualified scope.
   use List.*
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(length(append([1, 2], [3]))))
   end
 end

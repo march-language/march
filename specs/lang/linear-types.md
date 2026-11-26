@@ -402,39 +402,23 @@ the protocol.
 
 ## Capabilities as Linear Types
 
-*A `Cap(X)` value is proof that code may perform the effect `X`, such as
-`Cap(IO.Network)` for opening sockets; see [Capabilities](capabilities.md).*
+*A `Cap(X)` value is a proof capability: proof of a fact about the system, such as
+`Cap(Db.Migrated)` or `Cap(Session.Live)`; see [Capabilities](capabilities.md). IO
+authority is not a value (the `Cap(IO.X)` values of earlier releases were retired in
+object-capability phase 7b).*
 
-`Cap(X)` is, by default, an **ordinary unrestricted type**: `cap_narrow` is
-free and side-effect-free, and a plain `Cap(X)` value can be passed to as
-many callees as you like (see `core-march-types.md` §2.8, and
-[Capabilities]({{ site.baseurl }}/docs/capabilities/)). Preventing a
-capability from being *forged* is a separate mechanism: proof capabilities
-are created only through the gated `mint_cap` primitive, not through
-linearity (see `core-march-types.md` §2.8.13). What you *can* do is apply the
-ordinary `linear` qualifier to a capability parameter, exactly as to any
-other value, when a function should force its caller to give up the
+`Cap(X)` is, by default, an **ordinary unrestricted type**: a plain `Cap(X)` value can be
+passed to as many callees as you like (see `core-march-types.md` §2.8, and
+[Capabilities]({{ site.baseurl }}/docs/capabilities/)). Preventing a capability from
+being *forged* is a separate mechanism: proof capabilities are created only through the
+gated `mint_cap()` primitive, not through linearity (see `core-march-types.md` §2.8.13).
+What you *can* do is apply the ordinary `linear` qualifier to a capability parameter,
+exactly as to any other value, when a function should force its caller to give up the
 capability for good:
 
 ```march
-fn narrow_once(linear cap : Cap(IO)) : Cap(IO.FileRead) do
-  cap_narrow(cap)   -- consumes cap; the caller cannot reuse it afterward
-end
-```
-
-(Verified live, 2026-07-22. An earlier version of this section used a
-`Cap(Vault)`/`Vault.read` example and claimed linearity is what stops
-capability forging; neither held up: `Vault` is a stdlib module, not a
-capability namespace, `Vault`'s real API is `Vault.get`/`Vault.set`, not
-`read`, and `Cap(Vault)` is rejected with `` `Cap(Vault)` used in module
-`Main` but `Vault` is not declared in `needs` ``.)
-
-Capability narrowing attenuates a capability to a sub-capability:
-
-```march
-fn restricted_op(cap : Cap(IO)) : () do
-  let console_cap = cap_narrow(cap)   -- Cap(IO) -> Cap(IO.Console)
-  greet(console_cap, "Alice")
+fn finish(linear m : Cap(Db.Migrated)) : () do
+  close_all(m)   -- consumes m; the caller cannot reuse it afterward
 end
 ```
 

@@ -27,7 +27,7 @@ mod Shadow do
 
   fn need(_xs : {List(Int) | len(_) == 1}) : Int do 0 end
 
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(len(Cons(1, Nil))))
     let _ = need(Cons(1, Nil))
     ()

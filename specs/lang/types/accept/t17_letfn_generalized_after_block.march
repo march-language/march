@@ -9,7 +9,7 @@ mod M do
     (a, b)
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let (a, b) = use_twice()
     println(int_to_string(a))
     println(b)

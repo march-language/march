@@ -24,7 +24,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     save(1)
     println("saved")
   end
@@ -46,7 +46,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console), _fw : Cap(IO.FileWrite)) do
+  fn main() needs IO.Console, IO.FileWrite do
     save(1)
     println("saved")
   end

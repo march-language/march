@@ -24,7 +24,7 @@ mod Main do
     end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     Report.show(42)
   end
 end
@@ -45,7 +45,7 @@ mod Main do
     end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     Report.show(42)
   end
 end

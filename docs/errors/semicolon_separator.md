@@ -23,7 +23,7 @@ mod Main do
     x + y
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(total()))
   end
 end
@@ -42,7 +42,7 @@ mod Main do
     x + y
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(total()))
   end
 end

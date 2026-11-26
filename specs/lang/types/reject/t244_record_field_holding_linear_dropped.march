@@ -16,7 +16,7 @@ mod Main do
       { n: state.n + 1, slot: None }
     end
   end
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let _ = spawn(Holder)
     ()
   end

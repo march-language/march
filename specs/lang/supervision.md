@@ -219,7 +219,7 @@ mod BasicSupervision do
     end
   end
 
-  fn main(io : Cap(IO)) do
+  fn main() needs IO do
     let c = Authority.must(Actor.introspect())
     -- Spawn supervisor: it auto-starts Counter and Logger
     let sup = spawn(AppSupervisor)
@@ -640,7 +640,7 @@ mod JobProcessorV1 do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let w = spawn(Worker)
     send(w, Process(1))
     send(w, Process(2))
@@ -682,7 +682,7 @@ mod JobProcessorV2 do
     end
   end
 
-  fn main(io : Cap(IO)) do
+  fn main() needs IO do
     let c = Authority.must(Actor.introspect())
     let sup = spawn(JobSupervisor)
     let w_int = match get_actor_field(sup, "worker") do

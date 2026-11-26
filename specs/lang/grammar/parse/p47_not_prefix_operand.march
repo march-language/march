@@ -29,7 +29,7 @@ mod P47NotPrefixOperand do
 
   fn called(x : Bool) : Bool do not(x) end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     IO.puts(bool_to_string(negated(9)))
     IO.puts(bool_to_string(branch(-1)))
     IO.puts(bool_to_string(arms(0)) ++ " " ++ bool_to_string(arms(9)))

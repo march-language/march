@@ -606,7 +606,7 @@ mod ActorDemo do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let counter = spawn(Counter)
     let logger  = spawn(Logger)
 
@@ -823,7 +823,7 @@ mod Main do
     on Bump() do { n: state.n + 1 } end
   end
 
-  fn main(io : Cap(IO)) do
+  fn main() needs IO do
     let c = Authority.must(Actor.introspect())
     let pid = spawn(Counter)
     println("registered: " ++ bool_to_string(Actor.register(pid, "counter")))
@@ -896,7 +896,7 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
+  fn main() needs IO do
     let c = Authority.must(Actor.introspect())
     let sup = spawn(Sup)
     send(child_of(c, sup, "worker"), Work())
@@ -917,9 +917,10 @@ library; a program that calls one is rejected at typecheck time with the wrapper
 `pid_of_int` is internal to the standard library; use `Authority.must(Actor.pid_from_int(n))` (see `Actor.introspect`)
 ```
 
-Because `Actor.introspect` takes `Cap(IO)`, a role body or hook under a narrower grant
-(say `Cap(IO.NetConnect)`) cannot mint the cap itself; the composition root does, and
-hands it down. Cross-node references (`GlobalPid.make`, `GlobalRegistry.lookup`) are not
+Because `Actor.introspect()` is a checked operation under the kind `Actor.Introspect`,
+code running under an authority without it (a role granted only `IO.NetConnect`, or a
+`restrict` block that leaves it out) cannot mint the cap itself; `main` does, and hands it
+down. Cross-node references (`GlobalPid.make`, `GlobalRegistry.lookup`) are not
 covered: unforgeability is a process property first.
 
 ---
@@ -1058,7 +1059,7 @@ questions and more.
 {: #reading-an-actors-state-actorinspect_state}
 
 `Actor.inspect_state(d, pid, timeout_ms)` asks a running actor for its state, like
-Erlang's `sys:get_state`. `d` is a `Cap(Actor.Debug)`, minted from `Cap(IO)` by
+Erlang's `sys:get_state`. `d` is a `Cap(Actor.Debug)`, minted by the checked operation
 `Authority.must(Actor.debug())`; it is a separate cap from `Actor.Introspect` because it reads the
 actor's data, not just its counters.
 

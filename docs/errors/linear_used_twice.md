@@ -31,7 +31,7 @@ mod Main do
     match t do Token(n) -> n end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let t = Token(1)
     println(int_to_string(consume(t) + consume(t)))
   end
@@ -53,7 +53,7 @@ mod Main do
     match t do Token(n) -> n end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let t = Token(1)
     let n = consume(t)
     println(int_to_string(n + n))

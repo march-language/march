@@ -60,3 +60,7 @@ A scope computed at run time (`IO.FileRead(dir)`) is checked when the block
 is entered, not here.
 
 See also: [the language reference](../capabilities.md).
+
+## See it in the error tour
+
+- [Using a capability a `restrict` block leaves out]({{ site.baseurl }}/docs/error-messages/#wrong-capability)

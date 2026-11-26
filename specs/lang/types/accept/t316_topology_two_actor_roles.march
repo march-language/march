@@ -22,7 +22,7 @@ mod M do
      Topology.offer_actor_role("b", Topology.everywhere(), 1, fn () -> spawn(B), fn (_, _) -> Err(SessionNode.HostGone(0)))]
   end
 
-  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) do
+  fn main() needs IO.Console, IO.Mut do
     println(int_to_string(List.length(roles())))
   end
 end

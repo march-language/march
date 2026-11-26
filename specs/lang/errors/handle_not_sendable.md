@@ -35,7 +35,7 @@ mod HandleSend do
     Node.send(peer, GlobalPid.make("b", 1, 1), r)
   end
 
-  fn main(_n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
+  fn main() needs IO.NetConnect, IO.Mut do
     ()
   end
 end
@@ -60,7 +60,7 @@ mod HandleSend do
     Node.send(peer, GlobalPid.make("b", 1, 1), r)
   end
 
-  fn main(_n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
+  fn main() needs IO.NetConnect, IO.Mut do
     ()
   end
 end

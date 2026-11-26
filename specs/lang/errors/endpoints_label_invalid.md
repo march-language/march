@@ -30,7 +30,7 @@ mod Main do
     end
   end
 
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end
 ```
 
@@ -54,7 +54,7 @@ mod Main do
     end
   end
 
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end
 ```
 

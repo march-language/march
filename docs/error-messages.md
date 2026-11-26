@@ -90,7 +90,7 @@ mod Main do
     if n > 0 then 1 else 0 end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(sign(3)))
   end
 end
@@ -218,7 +218,7 @@ mod Main do
     x + y
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(total()))
   end
 end
@@ -301,7 +301,7 @@ mod Main do
     Lsit.length([1, 2])
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(count()))
   end
 end
@@ -424,7 +424,7 @@ mod Main do
     "item " ++ n
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(label(3))
   end
 end
@@ -471,7 +471,7 @@ mod Main do
     List.length(xs)
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let names = ["a", "b"]
     println(int_to_string(count(names)))
   end
@@ -518,7 +518,7 @@ full.
 mod Main do
   needs IO.Console
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let add = fn (a, b) -> a + b
     println(int_to_string(add(1)))
   end
@@ -600,7 +600,7 @@ mod Main do
 
   type Hue = Red | Blue
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let a = Red
     let b = Blue
     println(if a < b do "less" else "not less" end)
@@ -695,7 +695,7 @@ mod Main do
     ()
   end
 
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     save(1)
     println("saved")
   end
@@ -722,19 +722,28 @@ help: add `needs IO.FileWrite` to the module body.
 
 -- CAPABILITY ----------------------- missing-needs.march
 
-`main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite` (reached from `main`: main → save). The grant is a ceiling on the WHOLE program — declaring `needs IO.FileWrite` does not raise it. [cap_grant_exceeded]
-help: add a `Cap(IO.FileWrite)` parameter to `main` (e.g. `fn main(…, _cap_filewrite : Cap(IO.FileWrite))`), or widen the whole grant to `Cap(IO)`, or remove the use.
+`main` is granted `needs IO.Console`, but the program reaches `IO.FileWrite` (reached from `main`: main → save). The grant is a ceiling on the WHOLE program — declaring `needs IO.FileWrite` does not raise it. [cap_grant_exceeded]
+help: add `IO.FileWrite` to `main`'s request (its `needs` clause, or the module's `needs` line when `main` has no clause), or request all of `IO`, or remove the use.
 
- 9 |   fn main(c : Cap(IO.Console)) do
-       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 9 |   fn main() needs IO.Console do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 
     fix (`forge fix` applies it):
 
-9 -   fn main(c : Cap(IO.Console)) do
-9 +   fn main(c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
+9 -   fn main() needs IO.Console do
+9 +   fn main() needs IO.Console, IO.FileWrite do
 
     run `march --explain cap_grant_exceeded`
+
+
+-- CAPABILITY ----------------------- missing-needs.march
+
+`main` is bounded by `needs IO.Console`, but reaches `IO.FileWrite` (via save). [cap_bound]
+help: add `IO.FileWrite` to the bound, or remove the use.
+
+9 |   fn main() needs IO.Console do
+                ^^^^^^^^^^^^^^^^
 ```
 <!-- /error-tour -->
 
@@ -744,65 +753,41 @@ Each is reported with its own fix, and the second traces the call chain from `ma
 
 <a id="wrong-capability"></a>
 
-### Passing the wrong capability
+### Using a capability a `restrict` block leaves out
 
 <!-- error-tour: 16-wrong-capability -->
 ```march
 mod Main do
   needs IO.Console
+  needs IO.FileRead
 
-  fn read(c : Cap(IO.FileRead)) : String do "x" end
+  fn show_config() do
+    restrict IO.Console do
+      println(Authority.must(File.read("/etc/app.conf")))
+    end
+  end
 
-  fn main(c : Cap(IO.Console)) do println(read(c)) end
+  fn main() needs IO.Console, IO.FileRead do show_config() end
 end
 ```
 
 ```text
 -- CAPABILITY -------------------- wrong-capability.march
 
-`read` needs file-read access, but `c` is the console capability. [cap_mismatch]
+`File.read` needs `IO.FileRead`, which the restrict at wrong-capability.march:6 does not allow. [cap_restrict]
+help: add `IO.FileRead` to the restrict, or move the call out of the block.
 
-6 |   fn main(c : Cap(IO.Console)) do println(read(c)) end
-                                                   ^
+7 |       println(Authority.must(File.read("/etc/app.conf")))
+                                 ^^^^^^^^^
 
-    `IO.Console` and `IO.FileRead` are both parts of `IO`; neither contains the other.
-    help: give `main` a `Cap(IO.FileRead)` parameter and pass it to `read`.
-    and add `needs IO.FileRead` to the module.
-
-    `read` needs `Cap(IO.FileRead)`:
-
-6 |   fn main(c : Cap(IO.Console)) do println(read(c)) end
-                                              ^^^^^^^
-
-    `c` was bound here as `Cap(IO.Console)`:
-
-6 |   fn main(c : Cap(IO.Console)) do println(read(c)) end
-              ^
-
-    `Cap(IO.FileRead)` is named here, and the module declares no `needs IO.FileRead`:
-
-4 |   fn read(c : Cap(IO.FileRead)) : String do "x" end
-      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-    `main` is granted only `Cap(IO.Console)` here:
-
-6 |   fn main(c : Cap(IO.Console)) do println(read(c)) end
-             ^^^^^^^^^^^^^^^^^^^^^
-
-    fix (`forge fix` applies it):
-
-1 | mod Main do
-2 +   needs IO.FileRead
-6 -   fn main(c : Cap(IO.Console)) do println(read(c)) end
-6 +   fn main(c : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) do println(read(c)) end
-6 -   fn main(c : Cap(IO.Console)) do println(read(c)) end
-6 +   fn main(c : Cap(IO.Console)) do println(read(_cap_fileread)) end
+    run `march --explain cap_restrict`
 ```
 <!-- /error-tour -->
 
-Underneath this is a type mismatch, but the message says what it means: `read` needs
-file-read access, and `c` is the console. It explains why neither capability covers the
-other, then shows every place the fix touches.
+The block runs under the console alone, so the file read inside it is refused at
+compile time, and the message names the restrict's line and the capability to add. (Before
+object-capability phase 7b this example passed the console *value* where a file-read
+value was expected; IO capabilities are no longer values.)
 <button class="ep-try" data-error-example="16-wrong-capability">Try it</button>
 
 ---
@@ -828,7 +813,7 @@ mod Main do
     match t do Token(n) -> n end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let t = Token(1)
     println(int_to_string(consume(t) + consume(t)))
   end
@@ -872,7 +857,7 @@ mod Main do
     match t do Token(n) -> n end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let t = Token(1)
     let n = match 2 do
       1 -> consume(t)
@@ -927,7 +912,7 @@ mod Main do
 
   fn twice(k : () -> Int) : Int do k() + k() end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let t = Token(1)
     println(int_to_string(twice(fn () -> consume(t))))
   end
@@ -972,7 +957,7 @@ mod Main do
     on Bump(k : Int) do { state with n: state.n + k } end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let p = spawn(Countr)
     send(p, Bump(1))
   end
@@ -1015,7 +1000,7 @@ mod Main do
     on Bump(k : Int) do { state with n: state.n + k } end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let c = spawn(Counter)
     send(c, Bump("one"))
   end
@@ -1059,7 +1044,7 @@ mod Main do
     on Bump(k : Int) do state.n + k end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let c = spawn(Counter)
     send(c, Bump(1))
   end
@@ -1111,7 +1096,7 @@ mod Main do
     on Note(t : String) do { state with last: t } end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let log = spawn(Log)
     send(log, Bump(1))
   end
@@ -1449,7 +1434,7 @@ mod Main do
     I -> L : String
   end
 
-  fn main(_c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end
 ```
 
@@ -1505,7 +1490,7 @@ mod Main do
     Stream_Cons.close(s, Stream_Cons.choose_done(s, st, true))
   end
 
-  fn main(_c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end
 ```
 
@@ -1581,7 +1566,7 @@ mod Main do
         Pump_A.close(s, Pump_A.choose_quit(s, st4, true))))
   end
 
-  fn main(_c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end
 ```
 
@@ -1654,15 +1639,15 @@ mod Main do
     ()
   end
 
-  pfn cons(s : Cap(Session.Live), con : Cap(IO.Console), st : Stream_Cons.Entry) : Stream_Cons.Yield do
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.Entry) : Stream_Cons.Yield do
     Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
       save(n)
       Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
   end
 
-  fn main(c : Cap(IO)) do
-    let _ = Stream_Run.run_Cons(c, "cons", "secret", Stream_Run.addrs_from_env(),
-      fn (s, con, st) -> cons(s, con, st))
+  fn main() needs IO do
+    let _ = Stream_Run.run_Cons("cons", "secret", Stream_Run.addrs_from_env(),
+      fn (s, st) -> cons(s, st))
     ()
   end
 end
@@ -1671,11 +1656,11 @@ end
 ```text
 -- CAPABILITY -------------------------- role-grant.march
 
-Role `Stream.Cons` is granted `Cap(IO.Console)` (`role Cons needs IO.Console`), but the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body: body → cons → save). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]
-help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.Console, IO.FileWrite`. The body then takes one `Cap` per granted capability, in the grant's order, between the session capability and the state, so it gains a parameter: `fn (s, cap_console, cap_file_write, st) -> ...`. Pass `cap_file_write` on to any function the body hands its capabilities to. Or remove the use.
+Role `Stream.Cons` is granted `IO.Console` (`role Cons needs IO.Console`), but the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body: body → cons → save). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]
+help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.Console, IO.FileWrite`. Or remove the use.
 
-33 |       fn (s, con, st) -> cons(s, con, st))
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+33 |       fn (s, st) -> cons(s, st))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
 
     run `march --explain role_grant_exceeded`
 ```
@@ -1823,7 +1808,7 @@ mod Main do
     if n < 0 do n else 0 end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(magnitude(-3)))
   end
 end
@@ -1899,7 +1884,7 @@ mod Main do
     10 / d
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(scale(2)))
   end
 end
@@ -1941,7 +1926,7 @@ mod Main do
     end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(average(Stats(10, 2))))
   end
 end
@@ -1990,7 +1975,7 @@ mod Main do
     List.append(ys, [n])
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(List.length(inc_all([1, 2, 3]))))
   end
 end
@@ -2058,7 +2043,7 @@ mod Main do
     List.fold_left(codes, 0, fn (acc, c) -> acc + price(c))
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(total(["a", "zz"])))
   end
 end
@@ -2118,7 +2103,7 @@ mod Main do
     end
   end
 
-  fn main(_console : Cap(IO.Console), _spawn : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let pid = spawn(Counter)
     send(pid, Bump(1))
     send(pid, Bump(-5))

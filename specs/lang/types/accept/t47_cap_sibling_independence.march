@@ -8,17 +8,18 @@
 -- lines; declaring only one would leave the other's `Cap` uncovered (see
 -- reject/t38 for that failure mode with a narrower single-sibling example).
 -- See core-march-types.md §2.8.
+-- Ocap phase 7b retired `Cap(IO.X)` values: the same coverage is now shown with a
+-- function `needs` clause, which must lie within the module's `needs`
+-- (`cap_bound_needs`); the comment above describes the original form.
 mod Store do
   needs IO.FileRead
   needs IO.FileWrite
 
-  fn load(cap : Cap(IO.FileRead), path : String) : String do
-    let _ = cap
+  fn load(path : String) : String needs IO.FileRead do
     path
   end
 
-  fn save(cap : Cap(IO.FileWrite), path : String, data : String) : String do
-    let _ = cap
+  fn save(path : String, data : String) : String needs IO.FileWrite do
     let _ = data
     path
   end

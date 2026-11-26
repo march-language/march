@@ -12,7 +12,7 @@
 mod App do
   needs IO
 
-  fn use_net(_cap : Cap(IO.Network)) : Int do 1 end
+  fn use_net() : Int do 1 end
 
-  fn boot(cap : Cap(IO)) : Int do use_net(cap_narrow(cap)) end
+  fn boot() : Int do use_net() end
 end

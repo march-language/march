@@ -53,7 +53,7 @@ mod Main do
     end
   end
 
-  fn main(_cap : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let c = spawn(Counter)
     send(c, Inc(3))
     send(c, Zlog("stray"))   -- Zlog is a Logger message, not Counter's — dropped

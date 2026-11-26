@@ -19,7 +19,7 @@ mod Main do
 
   pfn lt(a : Int) do fn b -> a < b end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(ap2(fn a -> fn b -> a + b, 1, 2)))
     println(int_to_string(ap2(add_c, 1, 2)))
     println(int_to_string(both(add, 3, 4)))

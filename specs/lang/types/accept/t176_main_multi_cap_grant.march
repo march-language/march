@@ -14,7 +14,7 @@ mod Main do
   needs IO.Console
   needs IO.FileWrite
 
-  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+  fn main() : () needs IO.Console, IO.FileWrite do
     match Authority.must(File.write("/tmp/t176_out", "d")) do
       Ok(_)  -> Authority.ignore(println("ok"))
       Err(_) -> Authority.ignore(println("e"))

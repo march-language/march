@@ -23,7 +23,7 @@ mod Own do
     if depth == 0 do Leaf(seed) else Node(build(depth - 1, seed * 2), build(depth - 1, seed * 2 + 1)) end
   end
 
-  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Mut do
     let t = build(4, 1)
     let kept = Authority.must(Vault.new("trees"))
     Vault.set(kept, "before", t)

@@ -13,7 +13,7 @@ mod Main do
     end
   end
   fn f(linear x : a, ys : List(b)) : List(a) do Cons(x, ys) end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(sink_all(f(S1(1), Nil))))
   end
 end

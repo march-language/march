@@ -4,11 +4,13 @@
 -- holds trivially (a cap covers itself, `cap_lattice.ml:50`) and Check 1
 -- passes with no narrowing HINT (that only fires for the `Cap(IO)` root,
 -- Check 3, `typecheck.ml:5652`). See core-march-types.md §2.8.
+-- Ocap phase 7b retired `Cap(IO.X)` values: the same coverage is now shown with a
+-- function `needs` clause, which must lie within the module's `needs`
+-- (`cap_bound_needs`); the comment above describes the original form.
 mod Logger do
   needs IO.Console
 
-  fn log(cap : Cap(IO.Console), msg : String) : String do
-    let _ = cap
+  fn log(msg : String) : String needs IO.Console do
     msg
   end
 end

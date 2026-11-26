@@ -19,5 +19,5 @@ mod Main do
   pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1) : Stream_Prod.Yield do
     Stream_Prod.close(s, st)
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

@@ -38,7 +38,7 @@ mod M do
     Vault.size(t)
   end
 
-  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) do
+  fn main() needs IO.Console, IO.Mut do
     println(int_to_string(keep(fn () -> spawn(A), fn _ -> 1)))
     println(int_to_string(keep(fn () -> spawn(B), fn _ -> 2)))
     println(int_to_string(keep_value(1) + keep_value("s")))

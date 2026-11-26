@@ -65,23 +65,29 @@ runs). `march --compile` runs the full check; `march --check` runs a subset of i
 doesn't over-report.
 
 **`main`'s grant bounds the whole program.** `main`'s request is the program's grant:
-its `needs` clause together with any `Cap` parameters, or, with neither, the module's
-`needs` line. A program that reaches anything outside the grant fails to build
+its `needs` clause (or, in the form deprecated since ocap phase 7b, its `Cap`
+parameters), or, with neither, the module's `needs` line. A program that reaches anything outside the grant fails to build
 (`[cap_grant_exceeded]`), no matter
-what any module declares. A `main` whose request is empty (`needs ()`, or no clause, no
-`Cap` parameter and no module `needs` line) is granted nothing, so a program that performs
-IO without stating its grant does not compile
-([`cap_grant`]({{ site.baseurl }}/docs/errors/cap_grant/)). `Cap(IO)` grants everything.
+what any module declares. A `main` whose request is empty (`needs ()`, or no clause and no
+module `needs` line) is granted nothing, so a program that performs IO without stating its
+grant does not compile ([`cap_grant`]({{ site.baseurl }}/docs/errors/cap_grant/)).
+`needs IO` grants everything.
 Code that is never reached from `main` costs nothing against the grant.
 
-**Capabilities can't be forged or widened.** A `Cap(X)` value can only be received (from
-`main`, or from a function that was given it) and narrowed to something smaller
-(`cap_narrow`). It can't be built from JSON, a literal or any other data, and it can't be
-widened. Proof capabilities (`Session.Live`, your own `proof cap`) can only be created by
-the module that declares them.
+**Authority is not a value, and capabilities can't be forged.** IO authority is the
+current authority, not something code holds: a function uses whatever its caller runs
+under, narrowed by `restrict`, a dependency grant or a scoped `needs` clause, and nothing
+can widen it. The `Cap(IO.X)` values of earlier releases, which were erased at run time and
+granted nothing, were retired in ocap phase 7b, along with `cap_narrow` and `root_cap`. The
+capability values that remain are proof capabilities (`Session.Live`, `Actor.Introspect`,
+your own `proof cap`): they can't be built from JSON, a literal or any other data, and only
+the module that declares one can create it (`mint_cap()`, or a checked operation such as
+`Actor.introspect()`).
 
 **Per-role grants.** A protocol role declared `role Ledger needs IO.FileWrite` gets its
-grant checked the same way `main`'s is: its code may reach only what the role names.
+grant checked the same way `main`'s is: its code may reach only what the role names. The
+check is compile-time only: at run time a role's body runs under the authority it was made
+under, as every function value does.
 
 **Host and method scopes.** A module that declares `needs IO.NetConnect("host")`, with
 optional `methods(...)` and `no_redirects`, may reach only those hosts with those
@@ -183,7 +189,7 @@ An `extern` block calls C, and the compiler's knowledge stops there. The rules:
   build fails (`[extern_needs_foreign]`). It was only a warning before 2026-11-06, which
   let a dependency reach C without showing up in `forge audit` or `forge.caps.lock`.
 - A program that reaches an `extern` block can't be built under any grant narrower than
-  `Cap(IO)`: a narrow grant over C code would be a lie, so the compiler refuses it.
+  `IO`: a narrow grant over C code would be a lie, so the compiler refuses it.
 - `forge audit` and `forge cap inspect` report `IO.Foreign`; read it as "the rest of this
   list is no longer complete".
 

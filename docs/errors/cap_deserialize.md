@@ -17,9 +17,14 @@ authority out of bytes; encoding one would hand it to whoever reads them.
 ```march
 mod Main do
   needs IO.Console
+  mod Db do
+    proof cap Ready
+    fn open() : Cap(Db.Ready) do mint_cap() end
+  end
+  needs Db.Ready
 
-  fn main(c : Cap(IO.Console)) do
-    println(to_json(c))
+  fn main() needs IO.Console do
+    println(to_json(Db.open()))
   end
 end
 ```
@@ -27,13 +32,13 @@ end
 ## The fix
 
 Keep the capability out of the data. Serialize the values you need, and pass
-the capability itself as a parameter:
+the capability itself as a parameter where it is needed:
 
 ```march
 mod Main do
   needs IO.Console
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(to_json(42))
   end
 end

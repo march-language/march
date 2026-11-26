@@ -18,7 +18,7 @@ mod Main do
   needs IO.Console
   always_linear type Token = Token(Int)
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let _ = Token(1)
     println("dropped")
   end
@@ -38,7 +38,7 @@ mod Main do
     match t do Token(n) -> n end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let t = Token(1)
     println(int_to_string(consume(t)))
   end

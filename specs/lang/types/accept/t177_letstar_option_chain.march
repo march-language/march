@@ -11,7 +11,7 @@ mod Main do
     let* y = safe_div(x, c)
     Some(y + 1)
   end
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     match chain(100, 5, 2) do
       Some(v) -> println(int_to_string(v))
       None    -> println("none")

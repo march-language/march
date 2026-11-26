@@ -12,5 +12,5 @@ mod Main do
     B -> A : Bool
   end
 
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

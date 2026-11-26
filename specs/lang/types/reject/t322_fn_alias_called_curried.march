@@ -9,7 +9,7 @@ mod Main do
 
   pfn add(a : Int, b : Int) : Int do a + b end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let h = add
     let g = h(1)
     println(int_to_string(g(2)))

@@ -9,6 +9,18 @@ fires a `repository_dispatch` at march-lean; confirm that run is green, or file
 a ledgered skip there for the fixture it cannot yet decide. A march change that
 is never mirrored leaves the oracle silently disagreeing with the corpus.
 
+**Object-capability phase 7b (2026-11).** `Cap(IO.X)` values, `cap_narrow` and `root_cap`
+were retired. The `accept/` witnesses that typed or narrowed such a value now show the same
+rule in the current form, each saying so in its header: `t45`–`t48`, `t57` (coverage and
+subsumption, as a function `needs` clause under the module's `needs`), `t51`, `t52`,
+`t148` (narrowing, as `restrict`), `t144`, `t145`, `t149` (a capability in a type, an
+annotation or an interface, as a proof capability), `t146` (a test body runs under its
+module's `needs`; `root_cap` is refused there too), `t147` (`main` asks with `needs`),
+`t142`, `t143` (incidental narrowing removed). The `reject/` witnesses for the retired
+forms stay as written and are now also rejected by the retirement diagnostics
+(`cap_param_retired`, `cap_narrow_retired`, `root_cap_reference`). The rows below keep the
+original descriptions.
+
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
 `specs/lang/types/reject/*.march`) to the typing rule(s) it anchors in

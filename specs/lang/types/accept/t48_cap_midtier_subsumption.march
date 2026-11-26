@@ -11,11 +11,13 @@
 -- of the 18 hierarchy entries are registered in `builtin_types`
 -- (`typecheck.ml:1858-1861`); see core-march-types.md §2.8.3 for the finding.)
 -- See core-march-types.md §2.8.
+-- Ocap phase 7b retired `Cap(IO.X)` values: the same coverage is now shown with a
+-- function `needs` clause, which must lie within the module's `needs`
+-- (`cap_bound_needs`); the comment above describes the original form.
 mod Client do
   needs IO.Network
 
-  fn connect(cap : Cap(IO.NetConnect), host : String) : String do
-    let _ = cap
+  fn connect(host : String) : String needs IO.NetConnect do
     host
   end
 end

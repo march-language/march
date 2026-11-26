@@ -21,7 +21,7 @@ mod Main do
     "item " ++ n
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(label(3))
   end
 end
@@ -40,7 +40,7 @@ mod Main do
     "item " ++ int_to_string(n)
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(label(3))
   end
 end

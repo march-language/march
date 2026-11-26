@@ -37,7 +37,7 @@ mod P46ParenStmtAfterBraceEndInterp do
     (40 + 2)
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let total = after_record() + after_record_update() + after_interp(1) + after_do_block()
     if total == 52 do println("ok") else println("glommed: " ++ int_to_string(total)) end
   end

@@ -6,11 +6,13 @@
 -- (`cap_ancestors`, `cap_lattice.ml:39-46`; hierarchy entry `("IO.Network",
 -- Some "IO")`, `:21`). So a broad `needs IO` covers every descendant without
 -- repeating each one. See core-march-types.md §2.8.
+-- Ocap phase 7b retired `Cap(IO.X)` values: the same coverage is now shown with a
+-- function `needs` clause, which must lie within the module's `needs`
+-- (`cap_bound_needs`); the comment above describes the original form.
 mod Server do
   needs IO
 
-  fn listen(cap : Cap(IO.Network), port : Int) : Int do
-    let _ = cap
+  fn listen(port : Int) : Int needs IO.Network do
     port
   end
 end

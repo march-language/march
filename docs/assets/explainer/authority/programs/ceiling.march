@@ -18,7 +18,7 @@ mod App do
     end
   end
 
-  fn main(_files : Cap(IO.FileWrite), _clock : Cap(IO.Clock)) : () do
+  fn main() : () needs IO.FileWrite, IO.Clock do
     Probe.report("/tmp")
   end
 end

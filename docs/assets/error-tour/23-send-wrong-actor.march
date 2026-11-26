@@ -13,7 +13,7 @@ mod Main do
     on Note(t : String) do { state with last: t } end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let log = spawn(Log)
     send(log, Bump(1))
   end

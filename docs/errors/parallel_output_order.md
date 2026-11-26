@@ -28,7 +28,7 @@ mod Main do
   needs IO.Console
   needs IO.Spawn
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let _ = List.pmap([1, 2, 3], fn x -> println("item " ++ int_to_string(x)))
     ()
   end
@@ -45,7 +45,7 @@ mod Main do
   needs IO.Console
   needs IO.Spawn
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let lines = List.pmap([1, 2, 3], fn x -> "item " ++ int_to_string(x))
     List.each(lines, fn l -> println(l))
   end

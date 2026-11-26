@@ -14,7 +14,7 @@ export `name`. When a close match exists the message suggests it.
 ```march
 mod Main do
   needs IO.Console
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(List.size([1, 2, 3])))
   end
 end
@@ -28,7 +28,7 @@ module's stdlib page list what is there.
 ```march
 mod Main do
   needs IO.Console
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(List.length([1, 2, 3])))
   end
 end

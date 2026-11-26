@@ -13,13 +13,17 @@
 -- checker simply failing to look. If it were the latter, this file would pass
 -- for the wrong reason and reject/t152 would be the only thing standing
 -- between the language and its old behaviour.
+-- Ocap phase 7b: the exemption above is gone. `root_cap` is refused
+-- everywhere, test bodies included (reject/t152), because a test no longer
+-- needs a capability value: a `test` body runs under its module's `needs`
+-- (design §21, "launches without a main"), and each operation checks it. This
+-- file now pins that half: capability behaviour is testable from a test body
+-- with no value at all.
 mod TestBodyCaps do
-  needs IO
-
+  needs IO.Console
   describe "capabilities are reachable from a test body" do
-    test "narrowing the root inside a test" do
-      let console : Cap(IO.Console) = cap_narrow(root_cap)
-      assert(true)
+    test "the module's authority covers the test" do
+      assert(Authority.check("IO.Console", "") == Ok(()))
     end
   end
 end

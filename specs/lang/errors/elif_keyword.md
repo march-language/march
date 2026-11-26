@@ -26,7 +26,7 @@ mod Main do
     end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(sign(-3)))
   end
 end
@@ -50,7 +50,7 @@ mod Main do
     end end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(sign(-3)))
   end
 end

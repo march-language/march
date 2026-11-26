@@ -1,7 +1,12 @@
 mod Main do
   needs IO.Console
+  needs IO.FileRead
 
-  fn read(c : Cap(IO.FileRead)) : String do "x" end
+  fn show_config() do
+    restrict IO.Console do
+      println(Authority.must(File.read("/etc/app.conf")))
+    end
+  end
 
-  fn main(c : Cap(IO.Console)) do println(read(c)) end
+  fn main() needs IO.Console, IO.FileRead do show_config() end
 end

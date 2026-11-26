@@ -33,7 +33,7 @@ mod Main do
   needs IO.Mut
   needs IO.Spawn
 
-  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Mut, IO.Spawn do
     let best = Authority.must(Vault.new("best"))
     let _ = List.pmap([3, 9, 4], fn x -> Vault.set(best, "max", x * x))
     println(int_to_string(Vault.get_or(best, "max", 0)))
@@ -54,7 +54,7 @@ mod Main do
   needs IO.Console
   needs IO.Spawn
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let squares = List.pmap([3, 9, 4], fn x -> x * x)
     println(int_to_string(List.fold_left(squares, 0, fn (m, y) -> if y > m do y else m end)))
   end

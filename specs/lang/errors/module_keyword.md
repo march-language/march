@@ -14,7 +14,7 @@ it with `mod`. It fires for a top-level module and for a nested one.
 ```march
 module Main do
   needs IO.Console
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("hello")
   end
 end
@@ -27,7 +27,7 @@ Replace `module` with `mod`. `forge fix` and the editor's quick fix apply it.
 ```march
 mod Main do
   needs IO.Console
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("hello")
   end
 end

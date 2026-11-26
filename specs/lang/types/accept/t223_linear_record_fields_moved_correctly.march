@@ -30,7 +30,7 @@ mod Main do
     let r2 = { r with st: S1(k) }
     sink(r2.st)
   end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let p = spawn(Ep)
     send(p, Bump())
     send(p, Tally())

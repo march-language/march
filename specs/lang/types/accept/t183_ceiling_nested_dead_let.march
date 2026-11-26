@@ -13,7 +13,7 @@ mod NestedDeadLet do
       Err(_) -> ""
     end
   end
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println("hi")
     ()
   end

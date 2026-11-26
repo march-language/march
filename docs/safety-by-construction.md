@@ -38,7 +38,7 @@ if you want to know which of them you need.
 
 | The bug you want to make impossible | Layer | What you write |
 |---|---|---|
-| Code reads a file, opens a socket or spawns a process it was never granted | Capability | `needs IO.FileRead` on the module; `Cap(IO.FileRead)` as a parameter |
+| Code reads a file, opens a socket or spawns a process it was never granted | Capability | `needs IO.FileRead` on the module, and in `main`'s request |
 | A handle is used after it is closed, closed twice, or never closed | Linearity / typestate | `always_linear type File(s)`, with `File(Open)` and `File(Closed)` states |
 | Operations on a resource run in the wrong order | Typestate | A state parameter on the handle, so `read_chunk` demands `File(Open)` |
 | A negative offset, an oversized buffer, an index out of range | Refinement | `{Int \| _ >= 0}`, `{Int \| _ > 0 && _ <= 4096}` |
@@ -71,7 +71,7 @@ mod ChunkReader do
   tag Closed
 
   -- Opening yields a handle in the `Open` state.
-  fn open(cap : Cap(IO.FileRead), path : String) : File(Open) do ... end
+  fn open(path : String) : File(Open) do ... end
 
   -- (3) refinements: offset must be non-negative; size must be a sane page.
   -- The handle must be `Open`, and is returned still `Open` for the next read.
@@ -85,8 +85,8 @@ mod ChunkReader do
   fn close(f : File(Open)) : File(Closed) do ... end
 
   -- A correct caller, accepted by the compiler:
-  fn read_first(cap : Cap(IO.FileRead), path : String) : String do
-    let f0          = open(cap, path)
+  fn read_first(path : String) : String do
+    let f0          = open(path)
     let (bytes, f1) = read_chunk(f0, 0, 4096)   -- 0 >= 0 ✓ , 0 < 4096 ≤ 4096 ✓
     let f2          = close(f1)                  -- handle consumed exactly once
     match f2 do File(_) -> bytes end
@@ -100,10 +100,10 @@ three sections show what each layer rejects.
 ### What the capability layer rejects
 
 A module that never declares `needs IO.FileRead` cannot call `open` at all; the
-build fails and names the missing cap. And because `open` *takes* a
-`Cap(IO.FileRead)`, you cannot conjure one: it has to be threaded down from
-`main`'s root capability. There is no ambient "just read a file"; the
-permission is a value you must be given.
+build fails and names the missing cap. And a program whose `main` does not request
+`IO.FileRead` does not compile once anything it reaches reads a file. At run time
+the read is checked again against the authority in force, which a launch grant or a
+`restrict` block can narrow: there is no ambient "just read a file".
 
 ### What the typestate layer rejects
 
@@ -143,7 +143,7 @@ Each layer removes a distinct category of bug, and all of them fire at compile t
 
 | Layer | Syntax | Bug class it removes | Caught when |
 |-------|--------|--------------------|-------------|
-| **Capability** | `needs IO.FileRead`, `Cap(IO.FileRead)` | Ambient authority: code touching a resource it was never granted (surprise file/network access) | Compile time |
+| **Capability** | `needs IO.FileRead` | Ambient authority: code touching a resource it was never granted (surprise file/network access) | Compile time |
 | **Linearity / typestate** | `always_linear type` + `File(Open)` / `File(Closed)` states | Use-after-close, double-close, leaked (never-closed) handle, operations in the wrong order | Compile time |
 | **Refinement** | `{Int \| _ >= 0}`, `{Int \| _ > 0 && _ <= 4096}` | Out-of-range values: negative offsets, oversized/zero chunk sizes, bad indices | Compile time |
 

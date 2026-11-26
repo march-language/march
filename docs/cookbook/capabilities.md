@@ -28,7 +28,7 @@ A caller that doesn't declare `needs IO` will get a compile error if it tries to
 
 ## Proof capabilities
 
-`proof cap` declares a capability that can only be *created* inside one module, useful for authority tokens. Minting goes through the gated `mint_cap` builtin, which only typechecks inside a public function of the declaring module and takes the ambient `Cap(IO)` (or a narrower cap) to authorize the mint. Proof-cap types are always referred to by their qualified `Module.Name` form, even from inside the declaring module:
+`proof cap` declares a capability that can only be *created* inside one module, useful for authority tokens. Minting goes through the gated `mint_cap()` builtin, which only typechecks inside a public function of the declaring module. Proof-cap types are always referred to by their qualified `Module.Name` form, even from inside the declaring module:
 
 ```march
 mod Admin do
@@ -36,8 +36,8 @@ mod Admin do
   needs IO
   needs Admin.AdminCap
 
-  fn make_cap(io : Cap(IO)) : Cap(Admin.AdminCap) do
-    mint_cap(io)
+  fn make_cap() : Cap(Admin.AdminCap) do
+    mint_cap()
   end
 
   fn delete_all_users(_admin : Cap(Admin.AdminCap)) : Result((), String) do
@@ -52,7 +52,7 @@ Outside `Admin`, no code can manufacture a `Cap(Admin.AdminCap)`. It can only pa
 
 ## Realtime exclusion
 
-`Tagged(X, Realtime)` marks a computation as realtime-safe. Calling `Cap(Alloc)`, `Cap(IO)`, or `Cap(Panic)` inside a realtime-tagged function is a compile error:
+`Tagged(X, Realtime)` marks a computation as realtime-safe. Taking `Cap(Alloc)` or `Cap(Panic)` inside a realtime-tagged function is a compile error:
 
 ```march
 fn process_sample(buf : Tagged(Buffer, Realtime)) : Tagged(Buffer, Realtime) do
@@ -74,8 +74,8 @@ mod PluginDemo do
     needs IO
     needs Plugin.PluginCap
 
-    fn grant(io : Cap(IO)) : Cap(Plugin.PluginCap) do
-      mint_cap(io)
+    fn grant() : Cap(Plugin.PluginCap) do
+      mint_cap()
     end
 
     -- Stand-in for a real sandboxed evaluator — the point of this example is
@@ -93,8 +93,8 @@ mod PluginDemo do
     needs IO
     needs Plugin.PluginCap
 
-    fn main(root : Cap(IO)) do
-      let cap = Plugin.grant(root)
+    fn main() needs IO do
+      let cap = Plugin.grant()
       -- `cap` must be threaded explicitly into `run` below — capabilities
       -- are ordinary values passed as arguments, not ambient state; there is
       -- no way to manufacture one without going through `Plugin.grant`

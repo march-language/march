@@ -9,7 +9,7 @@ mod M do
   needs IO.Mut
   needs IO.Process
 
-  fn main(_m : Cap(IO.Mut), _p : Cap(IO.Process)) : Bool do
+  fn main() : Bool needs IO.Mut, IO.Process do
     let port = Config.key(:app, :port, Config.int())
     let host = Config.key_in(:app, :db, :host, Config.string())
     let flags = Config.key(:app, :flags, Config.list(Config.bool()))

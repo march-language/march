@@ -11,7 +11,7 @@ mod Main do
       _ -> 0
     end
   end
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(code(Red)))
     println(int_to_string(code(Green)))
     println(int_to_string(code(Blue)))

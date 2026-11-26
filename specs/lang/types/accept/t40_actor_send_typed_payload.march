@@ -24,7 +24,7 @@ mod Main do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let counter = spawn(Counter)
     send(counter, Inc(3))
     println(bool_to_string(is_alive(counter)))

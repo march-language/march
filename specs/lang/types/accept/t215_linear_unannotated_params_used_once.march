@@ -12,7 +12,7 @@ mod Main do
     if b do sink(st) else sink(st) end
   end
   fn id(x) do x end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let f = fn st -> sink(st)
     let xs = List.map([1, 2, 3], fn x -> x + 1)
     let n = id(2) + per_branch(true, S1(3)) + f(S1(4))

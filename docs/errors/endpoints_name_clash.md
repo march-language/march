@@ -29,7 +29,7 @@ mod Main do
     line: Client -> Server : String
   end
 
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end
 ```
 
@@ -52,7 +52,7 @@ mod Main do
     follow_up: Client -> Server : String
   end
 
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end
 ```
 

@@ -18,5 +18,5 @@ mod Main do
     Stream_Cons.close(s, Stream_Cons.choose_done(s, st, true))
   end
 
-  fn main(_c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

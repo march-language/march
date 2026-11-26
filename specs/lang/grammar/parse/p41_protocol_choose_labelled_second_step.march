@@ -13,7 +13,7 @@ mod P41ProtocolChooseLabelledSecondStep do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(1)
   end
 end

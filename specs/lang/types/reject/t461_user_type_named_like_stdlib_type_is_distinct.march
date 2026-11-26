@@ -6,7 +6,7 @@ mod Main do
   -- to be the one bare `Level`, so this passed `--check`
   -- (specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md).
   type Level = Low | High
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     Logger.set_module_level("m", Low)
     IO.puts("set")
   end

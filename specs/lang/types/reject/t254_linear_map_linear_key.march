@@ -7,7 +7,7 @@ mod Main do
   -- written without errors of its own, so `empty` gets one that never looks.)
   always_linear type S1 = S1(Int)
   fn sink(s : S1) : Int do match s do S1(e) -> e end end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let m : LinearMap(S1, Int) = LinearMap.empty(fn a -> fn b -> false)
     let (d, m2) = LinearMap.put(m, S1(1), 5)
     let n = match d do

@@ -392,7 +392,7 @@ mod Main do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let (alice, bob) = Chan.new(Echo)
     let pid = spawn(Responder)
     let alice2 = Chan.send(alice, "hello")    -- 1: advance OUR side first

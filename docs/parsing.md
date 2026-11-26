@@ -34,7 +34,7 @@ mod Main do
     Parser.take_while1("a number", is_digit)
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     match Parser.run_all(number(), "123") do
       Ok(v)  -> println("parsed " ++ v)
       Err(e) -> println(Parser.render("123", e))

@@ -3189,6 +3189,18 @@ always picks the first-listed branch (`:ok`).
 
 ### 2.8 Capabilities and effects: the IO permission lattice, `needs`, and `Cap(X)` signature enforcement
 
+> **Object-capability phase 7b (2026-11) retired `Cap(IO.X)` values.** The rules in this
+> section that type, thread or narrow an IO capability *value* (`Cap(IO.X)` parameters and
+> signatures, `cap_narrow`, `root_cap`, the `mint_cap(c)` form, §2.8.3–§2.8.10 where they
+> involve those values) describe the language before that phase, and their corpus witnesses
+> now draw the retirement diagnostics: a `Cap(IO.X)` type outside `main`'s parameters is
+> `cap_param_retired`, `cap_narrow` is `cap_narrow_retired`, `root_cap` is
+> `root_cap_reference`, and `fn main(c : Cap(IO.X))` is the deprecated request form
+> (`deprecated_main_cap`). Authority is the current authority: `main`'s `needs` clause asks
+> for it and each operation checks it (see [Capabilities]({{ site.baseurl }}/docs/capabilities/)).
+> The `needs` manifest, the lattice, subsumption, the behavioral caps (§2.8.11) and proof
+> capabilities (§2.8.13, minted with `mint_cap()`) are unchanged.
+
 March's capability system is a **compile-time-only, static** discipline: a
 `Cap(X)` value proves the holder is authorized to perform IO in the family
 named by `X`, but the proof is **runtime-erased**: `Cap(X)` values compile to

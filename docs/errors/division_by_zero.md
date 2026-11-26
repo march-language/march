@@ -30,7 +30,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(average(Stats(10, 2))))
   end
 end
@@ -56,7 +56,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(average(Stats(10, 2))))
   end
 end

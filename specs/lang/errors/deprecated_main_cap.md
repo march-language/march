@@ -18,7 +18,7 @@ the same authority as the clause. It will be removed in the next release.
 mod Main do
   needs IO.Console
 
-  fn main() needs IO.Console do
+  fn main(c : Cap(IO.Console)) do
     println("hello")
   end
 end

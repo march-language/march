@@ -11,7 +11,7 @@ mod Main do
       { state with n: sink(s) + sink(s) }
     end
   end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let p = spawn(A)
     send(p, Take(S1(1)))
     run_until_idle()

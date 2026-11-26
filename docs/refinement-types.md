@@ -4858,7 +4858,7 @@ mod UpDoc do
 
   fn f(n : {Int | is_prime(_)}) : Int do n end
 
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println(f(7))
   end
 end
@@ -6584,7 +6584,7 @@ mod NonlinearDivisor do
     if d == 0 do 0 else 10 / d end
   end
 
-  fn main(_cap : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(scale(2) + guarded(5)))
   end
 end
@@ -6621,7 +6621,7 @@ mod ImplDiv do
     end
   end
 
-  fn main(_cap : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(run(Box(2))))
   end
 end
