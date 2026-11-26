@@ -108,6 +108,24 @@ Not fixed, recorded in `specs/todos/2026-11-24-ocap-capture-inference-precision-
 task that is never awaited, a connection built from a socket's descriptor, `Seq` on the handle
 rejected, and three message and syntax-error roughnesses.
 
+## Checks run on the final branch (2026-11-26)
+
+- `scripts/run-tests.sh`, every suite: passed (captures 111, compiler 1772, codegen 804,
+  stdlib 923, errors 498 among them).
+- `scripts/oracle-base.sh all` against main at d7d12d8f4:
+  - IR: 8 of 530 programs changed, all users of `File` or `Socket`. Built again with the two
+    `scoped` markers taken out of the stdlib (doc edits kept), their IR differs from the
+    branch's only in the stdlib path strings, so the marker emits nothing; the 8 differ from
+    main because the doc edits moved stdlib line numbers that the IR embeds.
+  - refine and types: the only differences are in `stdlib/file.march` and
+    `stdlib/socket.march` (line numbers in existing diagnostics; the core AST of the two edited
+    files).
+- Cost (`scripts/capture-cost.sh -n 5`, load average about 7). The escape pass is the capture
+  pass, and it runs only for a program that names a function with a `scoped` parameter. Its own
+  time from `--timings`: 4 to 10 ms on the bench programs and `http_requests`, 141 ms on
+  `lab_app`. Wall-time ratios of `--check` with it forced on: 0.97 to 1.11, inside the noise at
+  that load.
+
 ## What is not covered
 
 - `HttpClient.with_connection` hands its callback a function, not a handle:
