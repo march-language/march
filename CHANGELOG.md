@@ -1385,6 +1385,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **An HTTP connection that reuses a closed connection's descriptor number works.** When
+  closing a connection timed out waiting for a task still using its socket, the next
+  connection given the same descriptor number had every wait on its socket fail until it
+  closed. The stale cancellation is now dropped when the number is reused.
 - **`march --jit` reports an interpreter-only builtin as an error in your program.** A
   program calling one (such as `App.stop`) is refused by `--compile` with a diagnostic at
   the call; `--jit` printed "internal compiler error", a backtrace and a request to file a
