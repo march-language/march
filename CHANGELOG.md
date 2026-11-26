@@ -1385,6 +1385,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march --jit` reports an interpreter-only builtin as an error in your program.** A
+  program calling one (such as `App.stop`) is refused by `--compile` with a diagnostic at
+  the call; `--jit` printed "internal compiler error", a backtrace and a request to file a
+  compiler bug, and exited 3. It now prints the same diagnostic and exits 1.
+- **A call into a lazily loaded standard-library module is type-checked.** Its functions
+  were bound with no type, so any argument was accepted; an ill-typed call could crash the
+  REPL and an `Int` result printed as a wrong number. Only the internal `LazyNicheProbe`
+  module is loaded this way today.
 - **On Linux, a TLS write to a peer that has gone no longer kills the process.**
   `Tls.write` (and a `Tls.read` or `Tls.close` that had to send) on a connection the peer
   had reset raised SIGPIPE, and the program exited with status 141. It now returns

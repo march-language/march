@@ -16,6 +16,9 @@ type export_entry = {
   ex_name : string;            (** Short name (e.g. "get") *)
   ex_kind : export_kind;
   ex_public : bool;
+  ex_fn : March_ast.Ast.fn_def option;
+  (** For an [ExFn] read from source: its definition, so the typechecker can
+      give a call the function's annotated signature.  [None] otherwise. *)
 }
 
 (** All exports from a single module. *)

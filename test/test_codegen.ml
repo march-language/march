@@ -2122,12 +2122,12 @@ let test_registry_record_field_bare_sibling_type_resolves () =
     me_name = "Widgets";
     me_entries = [
       (* A variant sibling type, referenced BARE by the record field below. *)
-      { ex_name = "Scope"; ex_kind = ExType 0; ex_public = true };
+      { ex_name = "Scope"; ex_kind = ExType 0; ex_public = true; ex_fn = None };
       (* The record whose stored field type names `Scope` by its bare name —
          exactly how the compiler serialises a same-module sibling reference. *)
       { ex_name = "Constraint";
         ex_kind = ExRecord (0, [("scope", bare_ty "Scope")]);
-        ex_public = true };
+        ex_public = true; ex_fn = None };
     ];
   };
   (* A DIFFERENT module references the qualified record type; expanding it must

@@ -1850,6 +1850,11 @@ let suggest_module_name (name : string) : string option =
      with _ -> ());
     !best
 
+(** The declared scheme of a function read from the registry, built from its
+    annotations; [None] when they do not give one.  Set by [Typecheck]
+    ([prebind_fn_scheme], which is defined after this module). *)
+let registry_fn_scheme : (Ast.fn_def -> scheme option) ref = ref (fun _ -> None)
+
 (** Load a module's exports into an env, returning the updated env.
     Injects "Mod.name" bindings for functions/values, types, and constructors.
     Cross-module interface exports are NOT injected here: registry-loaded
@@ -1881,7 +1886,20 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
       if not entry.ex_public then env
       else if StrMap.mem qname env.vars then env
       else
-        let env = { env with vars = StrMap.add qname (Mono (fresh_var 0)) env.vars } in
+        (* A function export is bound at its annotated signature where the
+           annotations give one.  It used to be a fresh variable always, so
+           any call typechecked: `LazyNicheProbe.first_or(true, "x")` was
+           accepted and crashed the native REPL, and a result of unknown type
+           printed as its tagged word.  An unannotated or exotic signature
+           keeps the placeholder, as [prebind_fn_scheme] documents. *)
+        let scheme =
+          match entry.ex_fn with
+          | Some def ->
+            (match !registry_fn_scheme def with
+             | Some sch -> sch
+             | None -> Mono (fresh_var 0))
+          | None -> Mono (fresh_var 0) in
+        let env = { env with vars = StrMap.add qname scheme env.vars } in
         (match entry.ex_kind with
          | ExFn -> { env with qual_fn_names = StrMap.add qname () env.qual_fn_names }
          | _ -> env)

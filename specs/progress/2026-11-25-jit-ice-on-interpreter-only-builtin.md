@@ -18,3 +18,15 @@ end
 
 `--jit` should either fall back to the interpreter with a notice (as it does for actor programs)
 or render the diagnostic and exit 1. The driver's `jit_run` guard in `bin/main.ml` is the place.
+
+## Fixed (2026-11-25)
+
+The second option: the `--jit` branch of `bin/main.ml` has an arm for `Diagnostic_exn`
+that renders the diagnostic as `--compile` does and exits 1. It used to fall into the
+catch-all (internal compiler error, backtrace, exit 3).
+
+Test: `test/test_jit.ml`, "march --jit renders a refused interpreter-only builtin, exit 1"
+(failed with exit 3 before the fix). The parity fixture `unlowerable` still skips `jit`,
+now because `--jit` refuses the program as `--compile` does.
+
+Not done: falling back to the interpreter with a notice, the todo's first option.
