@@ -61,7 +61,7 @@ dec_rc $init_state;
 $rc_4
 
 ## main
-fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) : () =
+fn main() : () =
   let p : Pid({ n : Int }) = let $raw_actor : Ptr(Unit) = Bump_spawn() in
 spawn($raw_actor) in
 let $rc_5 : Option(Unit) = let $t11 : Bump_Msg = let $t10 : Int = two_reads(1) in

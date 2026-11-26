@@ -667,7 +667,7 @@ ascending($t2, b) in
 alloc List.Cons(a, $t3)
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let $t1965 : String = let $t1964 : List(Int) = ascending(0, 5) in
 List.sum_int($t1964) in
 println($t1965);

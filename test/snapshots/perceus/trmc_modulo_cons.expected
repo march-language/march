@@ -298,7 +298,7 @@ let $t16 : '_ = alloc Cons(i, acc) in
 call_ptr go($t15, $t16)
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let $t1967 : String = let $t1966 : List(Int) = let $t1965 : List(Int) = List.range(1, 5) in
 bump($t1965) in
 let $rc_148 : String = List.sum_int($t1966) in

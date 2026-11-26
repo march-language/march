@@ -19,7 +19,7 @@ let x : Int = $f1 in
 panic("non-exhaustive pattern match")
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let $t16 : String = let $t15 : (Int, Int) = (0, 0) in
 describe($t15) in
 let $rc_3 : () = println($t16) in

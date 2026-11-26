@@ -321,7 +321,7 @@ fn keep(s : String) : List(String) =
 alloc List.Cons(s, $t9)
 
 ## main
-fn main(_c : Cap(IO.Console)) : () =
+fn main() : () =
   let ms : List({ addr : String, node_id : String }) = let $t16 : { addr : String, node_id : String } = let $t13 : String = let $t12 : String = int_to_string(0) in
 let $rc_153 : '_ = ++("n", $t12) in
 dec_rc $t12;

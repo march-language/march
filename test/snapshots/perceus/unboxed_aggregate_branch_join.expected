@@ -2,7 +2,7 @@
 type P2 = P2(Float, Float)
 -- fns (3) --
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let $t14 : String = let $t13 : Float = spin(10, 0.) in
 float_to_string($t13) in
 let $rc_1 : () = println($t14) in

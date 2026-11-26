@@ -27,7 +27,7 @@ fn keep(b : Box) : Box =
   b
 
 ## main
-fn main(_c : Cap(IO.Console)) : () =
+fn main() : () =
   let $p28 : Box = let $t25 : (String, Int, String) = ("a", 1, "b") in
 from_tuple($t25) in
 let $p27 : Box = let $t26 : Raw = alloc Raw.Raw("a", 1, "b") in

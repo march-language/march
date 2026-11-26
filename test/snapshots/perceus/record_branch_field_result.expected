@@ -2,7 +2,7 @@
 record Rel { seq : Int, signature : String }
 -- fns (3) --
 ## main
-fn main(_c : Cap(IO.Console)) : () =
+fn main() : () =
   let $t9 : String = let $t8 : { seq : Int, signature : String } = let $t7 : String = let $t6 : String = int_to_string(1) in
 let $rc_8 : '_ = ++("s", $t6) in
 dec_rc $t6;

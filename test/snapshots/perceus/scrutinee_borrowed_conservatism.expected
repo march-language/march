@@ -27,7 +27,7 @@ panic("non-exhaustive pattern match")
 panic("non-exhaustive pattern match")
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let $t15 : String = let $t14 : List(String) = let $t13 : List(String) = alloc List.Nil(String)() in
 alloc List.Cons("a", $t13) in
 first_or_recheck($t14, true) in

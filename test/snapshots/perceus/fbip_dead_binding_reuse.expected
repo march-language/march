@@ -13,7 +13,7 @@ alloc List.Nil(Int)()
 panic("non-exhaustive pattern match")
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let $t10 : List(Int) = let $t9 : List(Int) = let $t8 : List(Int) = alloc List.Nil(Int)() in
 alloc List.Cons(1, $t8) in
 bump_head($t9) in
