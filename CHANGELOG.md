@@ -1390,6 +1390,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **An HTTP connection that reuses a closed connection's descriptor number works.** When
+  closing a connection timed out waiting for a task still using its socket, the next
+  connection given the same descriptor number had every wait on its socket fail until it
+  closed. The stale cancellation is now dropped when the number is reused.
 - **Recursion through scoped functions no longer overflows the stack.** A function whose
   whole body is a `restrict` block, calling itself, and two functions with scoped `needs`
   clauses that tail-call each other, used one stack frame per call in a compiled program,
