@@ -1381,6 +1381,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Hamt` no longer loses a key, or hangs, when two hashes agree on their low 35 bits.**
+  With a hash function that returns more than 35 bits (the builtin `hash` returns 62),
+  the second of two such keys could not be found or removed, and inserting it again never
+  returned (a stack overflow when compiled). `Hamt.get`, `insert` and `remove` now use
+  only the bits the trie can tell apart. `Map` and `DataFrame` masked their hashes already
+  and were not affected.
 - **`File.close` reports a write that fails when the file is flushed.** Writes through a
   `File.Handle` are buffered, so a full disk or a quota often shows up only when the
   handle is closed. `File.close` returned `Ok(())` anyway and the data was lost silently.
