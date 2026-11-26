@@ -1385,6 +1385,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Hamt` no longer loses a key, or hangs, when two hashes agree on their low 35 bits.**
+  With a hash function that returns more than 35 bits (the builtin `hash` returns 62),
+  the second of two such keys could not be found or removed, and inserting it again never
+  returned (a stack overflow when compiled). Such keys are now kept side by side like any
+  other hash collision. `Map` and `DataFrame` masked their hashes already and were not
+  affected.
 - **On Linux, a TLS write to a peer that has gone no longer kills the process.**
   `Tls.write` (and a `Tls.read` or `Tls.close` that had to send) on a connection the peer
   had reset raised SIGPIPE, and the program exited with status 141. It now returns
