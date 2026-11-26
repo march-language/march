@@ -1396,6 +1396,14 @@ git log is authoritative for exact commits.
   `Safe(Float)` failed in clang; `Safe(Int)` beside the standard library's `Html.Safe`
   could pick either layout depending on program size). Each module's own code now uses its
   own layout.
+- **`march --jit` reports an interpreter-only builtin as an error in your program.** A
+  program calling one (such as `App.stop`) is refused by `--compile` with a diagnostic at
+  the call; `--jit` printed "internal compiler error", a backtrace and a request to file a
+  compiler bug, and exited 3. It now prints the same diagnostic and exits 1.
+- **A call into a lazily loaded standard-library module is type-checked.** Its functions
+  were bound with no type, so any argument was accepted; an ill-typed call could crash the
+  REPL and an `Int` result printed as a wrong number. Only the internal `LazyNicheProbe`
+  module is loaded this way today.
 - **`Logger.with_scope(fields, fn -> ...)` runs in the interpreter.** A thunk written with
   no parameter matched the declared type and ran compiled, but the interpreter stopped
   with "arity mismatch: expected 0 args, got 1". `Logger.with_span` and a direct
