@@ -149,6 +149,10 @@ let repl_unsupported : (string * string) list = [
    "the REPL's preload does not see an interface declared in a library module, so the \
     fixture's impl of it is `unknown_interface` there \
     (specs/todos/2026-11-23-repl-preload-lib-interface-impl.md)");
+  ("frame_mutual_tail",
+   "the REPL's preload checks each function alone, so two mutually recursive \
+    functions are each `unbound_variable` there, capabilities or not \
+    (specs/todos/2026-11-26-repl-preload-mutual-recursion-unbound.md)");
 ]
 
 let have_node = lazy (Sys.command "command -v node >/dev/null 2>&1" = 0)

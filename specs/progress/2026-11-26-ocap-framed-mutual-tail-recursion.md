@@ -41,3 +41,12 @@ force (`Authority.enter_grant` finds it and pushes nothing, so the layer list st
 but the wrapper's save, check and restore still run). Retargeting those calls to the callee's
 `$grant` body would remove both costs; it is sound only where the caller's grant is certainly
 in force, which for a dropped caller it is not (decision 6).
+
+## Fixed for function frames (2026-11-26)
+
+`Auth_rt.hop_tail_calls`: a tail call from a framed body to another framed function goes
+to the callee's body when its frame is in force. See
+`progress/2026-11-26-ocap-scoped-tail-calls.md`, test
+`test/cap_conformance/frame_mutual_tail.march`. The dependency-grant part above is not
+done: granted functions are skipped, and `grant_callback_reentry` stays at 1,000 deep. It
+is copied to `todos/2026-11-26-grant-frame-tail-calls.md`.

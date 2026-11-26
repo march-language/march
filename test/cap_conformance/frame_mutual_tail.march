@@ -1,0 +1,38 @@
+-- Two framed functions that tail-call each other loop instead of growing the
+-- stack (ocap A1.3). ping and pong carry scoped needs (so both are framed);
+-- a 100,000-deep ping/pong recursion completes in every runtime. A tail
+-- call between framed functions goes straight to the callee's body when
+-- the callee's frame is already in the authority chain (Auth_rt.frames), so
+-- only the first hop into each frame enters it. The authority is unchanged
+-- by that: re-entering a frame in force adds nothing. The innermost check
+-- sees both clauses, as an ordinary nested call would: /srv/x is allowed,
+-- /srv/y/z is outside pong's narrower scope, and main's authority is the
+-- same afterwards.
+mod FrameMutualTail do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(target : String) : String do
+    match Authority.check("IO.FileRead", target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn ping(n : Int, p : String) : String needs IO.FileRead("/srv/") do
+    if n == 0 do probe(p)
+    else pong(n - 1, p) end
+  end
+
+  fn pong(n : Int, p : String) : String needs IO.FileRead("/srv/x") do
+    if n == 0 do probe(p)
+    else ping(n - 1, p) end
+  end
+
+  fn main() do
+    println(ping(100000, "/srv/x"))
+    println(ping(100000, "/srv/y/z"))
+    println(ping(100001, "/srv/x"))
+    println(probe("/etc/hosts"))
+  end
+end
