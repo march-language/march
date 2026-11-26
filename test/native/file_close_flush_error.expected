@@ -1,0 +1,4 @@
+write_to: ok (buffered)
+close: io error
+second close: closed
+with_open_write: io error

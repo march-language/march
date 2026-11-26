@@ -41,21 +41,24 @@
  * SSL object would hide that. */
 #include "march_runtime.h"
 #include "march_reclaim.h"
+#include "march_scheduler.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
 /* march_scheduler.c.  Weak, so a test link that leaves the scheduler out
  * still links; every real link (core role) has it. */
-extern void march_sched_fdwait_cancel(int fd) __attribute__((weak));
-extern void march_sched_fdwait_forget(int fd) __attribute__((weak));
-extern void march_sched_fdwait_own(int fd, int owned) __attribute__((weak));
-extern void *march_sched_current(void) __attribute__((weak));
-extern int march_sched_park_self_until(int64_t deadline_ms) __attribute__((weak));
-extern int64_t march_now_ms(void) __attribute__((weak));
+#pragma weak march_sched_fdwait_cancel
+#pragma weak march_sched_fdwait_forget
+#pragma weak march_sched_fdwait_own
+#pragma weak march_sched_current
+#pragma weak march_sched_park_self_until
+#pragma weak march_now_ms
+#pragma weak march_sched_auth_state
 
 /* The descriptor a box of [kind] owns and can cancel waits on, or -1. */
 static inline int64_t owned_fd(int64_t kind, int64_t raw, int64_t aux) {
@@ -203,6 +206,56 @@ void *march_handle_new(int64_t kind, int64_t raw, int64_t aux) {
     return h;
 }
 
+/* ── The entered stack ────────────────────────────────────────────────────
+ *
+ * A use is handle_enter ... handle_leave in March code, and a panic between
+ * the two never leaves: the in-flight count stays up, so a close sets CLOSED
+ * and then waits for a leave that cannot come (a Listener keeps its port
+ * bound until the box is dropped).  So each green thread keeps the boxes it
+ * has entered and not left (march_auth_state.entered, beside the saved
+ * authorities), each with a reference so the box outlives the entry.  The
+ * panic catchers take the depth with their authority mark and unwind to it
+ * (march_cap_mark / march_cap_unwind); a green thread that dies inside a use
+ * (killed while parked in recv, the commoner case) has its entries left by
+ * the scheduler's reap.
+ *
+ * Uses nest (Tls over a Socket), so leave removes the newest entry for its
+ * box, which is the top one unless March code left out of order.  A leave
+ * that finds no entry (a C caller on a thread that did not enter) only
+ * counts.  close and close_drain take a count of their own without an
+ * entry: they are C code that cannot panic.
+ *
+ * Without a scheduler in the link (a unit test) the state is per OS thread. */
+static _Thread_local march_auth_state no_sched_state;
+static inline march_auth_state *entered_state(void) {
+    return march_sched_auth_state ? march_sched_auth_state() : &no_sched_state;
+}
+
+static void entered_push(void *h) {
+    march_auth_state *st = entered_state();
+    if (__builtin_expect(st->elen == st->ecap, 0)) {
+        uint32_t cap = st->ecap ? st->ecap * 2 : 8;
+        void **v = (void **)realloc(st->entered, (size_t)cap * sizeof(void *));
+        if (!v) { fprintf(stderr, "march: out of memory (entered handles)\n"); abort(); }
+        st->entered = v;
+        st->ecap = cap;
+    }
+    march_incrc(h);
+    st->entered[st->elen++] = h;
+}
+
+/* Removes the newest entry for [h]; 0 when this thread has none. */
+static int entered_pop(void *h) {
+    march_auth_state *st = entered_state();
+    for (uint32_t i = st->elen; i > 0; i--) {
+        if (st->entered[i - 1] != h) continue;
+        for (uint32_t j = i; j < st->elen; j++) st->entered[j - 1] = st->entered[j];
+        st->elen--;
+        return 1;
+    }
+    return 0;
+}
+
 int64_t march_handle_enter(void *h, int64_t kind) {
     check_box(h, "enter");
     int32_t k = h_kind(h);
@@ -213,13 +266,15 @@ int64_t march_handle_enter(void *h, int64_t kind) {
     for (;;) {
         if (s & ST_CLOSED) return -1;
         if (atomic_compare_exchange_weak_explicit(st, &s, s + IN_ONE,
-                                                  memory_order_acq_rel, memory_order_acquire))
+                                                  memory_order_acq_rel, memory_order_acquire)) {
+            entered_push(h);
             return h_raw(h);
+        }
     }
 }
 
-void march_handle_leave(void *h) {
-    check_box(h, "leave");
+/* One use fewer; releases when it was the last one of a closed box. */
+static void handle_leave_count(void *h) {
     _Atomic int64_t *st = h_state(h);
     int64_t s = atomic_load_explicit(st, memory_order_acquire);
     for (;;) {
@@ -236,6 +291,30 @@ void march_handle_leave(void *h) {
             return;
         }
     }
+}
+
+void march_handle_leave(void *h) {
+    check_box(h, "leave");
+    int mine = entered_pop(h);
+    handle_leave_count(h);
+    if (mine) march_decrc(h);          /* the entered stack's reference */
+}
+
+/* A use its thread will never leave: the one a caught panic jumped out of
+ * (march_handle_unwind_to), or one a dead green thread was inside (the
+ * scheduler's reap).  [h] is an entry taken off an entered stack. */
+void march_handle_leave_abandoned(void *h) {
+    handle_leave_count(h);
+    march_decrc(h);
+}
+
+uint32_t march_handle_depth(void) {
+    return entered_state()->elen;
+}
+
+void march_handle_unwind_to(uint32_t depth) {
+    march_auth_state *st = entered_state();
+    while (st->elen > depth) march_handle_leave_abandoned(st->entered[--st->elen]);
 }
 
 int64_t march_handle_close(void *h) {
@@ -261,7 +340,7 @@ int64_t march_handle_close(void *h) {
         (void)shutdown((int)h_auxv(h), SHUT_RD);      /* a reader parked in SSL_read */
         fd_cancel_waits(h_auxv(h));
     }
-    march_handle_leave(h);                             /* releases if nothing else is in flight */
+    handle_leave_count(h);                             /* releases if nothing else is in flight */
     return 1;
 }
 
@@ -332,7 +411,7 @@ int64_t march_handle_close_drain(void *h, int64_t timeout_ms) {
      * next connection that gets the number.  Owned kinds forget it at
      * release, which must still see it if a use is stranded. */
     if (woke && drained && k == MARCH_HANDLE_TCP_BORROWED) fd_forget_cancel(fd);
-    if (own) march_handle_leave(h);                /* releases (owned kinds) */
+    if (own) handle_leave_count(h);                /* releases (owned kinds) */
     return drained;
 }
 

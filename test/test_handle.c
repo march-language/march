@@ -539,6 +539,58 @@ static void test_to_string(void) {
     remove_counter();
 }
 
+/* ── unwind_leaves_abandoned_uses ──────────────────────────────────────────
+ * What a panic catcher does: take the depth of the thread's entered stack,
+ * run code that enters and never leaves (the panic), unwind to the depth.
+ * The uses entered before the mark stay; the ones after it are left, so a
+ * close then releases at once.  A nested use and an out-of-order leave keep
+ * the stack right. */
+static void test_unwind_leaves_abandoned_uses(void) {
+    int p[2], q[2];
+    if (pipe(p) != 0 || pipe(q) != 0) { perror("pipe"); exit(2); }
+    install_counter();
+    void *outer = march_handle_new(MARCH_HANDLE_DIR, p[0], 0);
+    void *inner = march_handle_new(MARCH_HANDLE_DIR, q[0], 0);
+    uint32_t base = march_handle_depth();
+    CHECK(march_handle_enter(outer, MARCH_HANDLE_DIR) == p[0], "enter before the mark");
+    uint32_t mark = march_handle_depth();
+    CHECK(mark == base + 1, "an enter is one entry");
+    CHECK(march_handle_enter(inner, MARCH_HANDLE_DIR) == q[0], "enter after the mark");
+    CHECK(march_handle_enter(inner, MARCH_HANDLE_DIR) == q[0], "... twice");
+    CHECK(march_handle_enter(outer, MARCH_HANDLE_DIR) == p[0], "... and the outer box again");
+    CHECK(march_handle_depth() == mark + 3, "three abandoned uses");
+    march_handle_unwind_to(mark);
+    CHECK(march_handle_depth() == mark, "the unwind pops to the mark");
+    CHECK(march_handle_close(inner) == 1, "close the abandoned box");
+    CHECK(atomic_load(&g_releases) == 1, "its close releases at once: no use is stranded");
+    CHECK(march_handle_close(outer) == 1, "close the box still in use");
+    CHECK(atomic_load(&g_releases) == 1, "the use from before the mark still defers the release");
+    march_handle_leave(outer);
+    CHECK(atomic_load(&g_releases) == 2, "its own leave releases");
+    CHECK(march_handle_depth() == base, "nothing is left on the stack");
+    march_handle_unwind_to(base);                 /* nothing to do: no abort */
+    /* Out of order: a, b, leave a, leave b. */
+    int r[2];
+    if (pipe(r) != 0) { perror("pipe"); exit(2); }
+    void *a = march_handle_new(MARCH_HANDLE_DIR, r[0], 0);
+    void *b = march_handle_new(MARCH_HANDLE_DIR, r[1], 0);
+    (void)march_handle_enter(a, MARCH_HANDLE_DIR);
+    (void)march_handle_enter(b, MARCH_HANDLE_DIR);
+    march_handle_leave(a);
+    CHECK(march_handle_depth() == base + 1, "an out-of-order leave removes its own entry");
+    march_handle_unwind_to(base);
+    CHECK(march_handle_close(b) == 1 && atomic_load(&g_releases) == 3, "the entry left was b's");
+    CHECK(march_handle_close(a) == 1 && atomic_load(&g_releases) == 4, "a was left by its leave");
+    march_decrc(a);
+    march_decrc(b);
+    march_decrc(outer);
+    march_decrc(inner);
+    CHECK(atomic_load(&g_releases) == 4, "no destructor releases again");
+    remove_counter();
+    close(p[1]);
+    close(q[1]);
+}
+
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
     test_enter_after_close_refused();
@@ -555,6 +607,7 @@ int main(void) {
     test_detach_refuses_in_flight_and_borrowed();
     test_msg_copy_shares();
     test_to_string();
+    test_unwind_leaves_abandoned_uses();
     if (g_failed) {
         fprintf(stderr, "test_handle: %d of %d checks FAILED\n", g_failed, g_checks);
         return 1;

@@ -1,0 +1,25 @@
+-- Data that holds function values: the set attaches to the value's type
+-- (design 4.2); a type argument carries its own set.
+mod Data do
+  needs IO.Console, IO.FileRead, IO.Mut
+
+  type Client = Client(String -> Result((), CapError))
+  type Job = { name : String, run : () -> Result((), CapError) }
+
+  fn make() do
+    Client(fn s -> println(s))
+  end
+
+  fn main() do
+    let c = make()
+    let fetch = match c do Client(f) -> f end
+    let job = { name: "a", run: fn -> println("job") }
+    let run = job.run
+    let both = [fn s -> println(s), fn s -> Result.map(File.read(s), fn _ -> ())]
+    let maybe = Some(c)
+    let table = Authority.must(Vault.new("captures_data"))
+    Vault.set(table, "k", fn s -> println(s))
+    let back = Vault.get(table, "k")
+    (fetch, run, both, maybe, back)
+  end
+end

@@ -1,0 +1,17 @@
+-- Private higher-order functions generalise their capture variables.
+mod HigherOrder do
+  needs IO.Console
+
+  pfn apply(f, x) do f(x) end
+  pfn chain(f, g) do fn x -> f(g(x)) end
+  pfn id(x) do x end
+
+  fn main() do
+    let say = fn s -> println(s)
+    let noisy = fn s -> apply(say, s)
+    let quiet = fn n -> apply(fn m -> m + 1, n)
+    let both = chain(say, fn s -> s ++ "!")
+    let same = id(say)
+    (noisy, quiet, both, same)
+  end
+end

@@ -1,0 +1,38 @@
+-- Function values held in data, called through a field and through a
+-- pattern, from inside other function values.
+mod CaptureDataFieldCall do
+  needs IO.Console, IO.FileRead
+
+  type Client = Client(String -> ())
+  type Job = { name : String, run : () -> () }
+  type Pair = Pair(Client, Int)
+
+  fn make() do
+    Client(fn s -> Authority.ignore(println("client: " ++ s)))
+  end
+
+  fn use_client(c) do
+    match c do
+      Client(f) -> f("used")
+    end
+  end
+
+  fn main() do
+    let c = make()
+    let j = { name: "read", run: fn -> Authority.ignore(File.read("/nonexistent/capture_data")) }
+    let by_field = fn () -> j.run()
+    let by_pattern = fn () -> use_client(c)
+    let nested = fn () ->
+      match Pair(c, 1) do
+        Pair(Client(f), _) -> f("nested")
+      end
+    let updated = { j with run: fn -> Authority.ignore(println("updated job")) }
+    let both = fn () ->
+      let _ = updated.run()
+      by_field()
+    by_field()
+    by_pattern()
+    nested()
+    both()
+  end
+end

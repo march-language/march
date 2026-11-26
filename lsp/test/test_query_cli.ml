@@ -29,6 +29,12 @@ let test_cli_type_json () =
   let out = run ["query"; "type"; "t.march"; "--line"; "2"; "--col"; "6"] ~src in
   Alcotest.(check bool) "json has a type field" true (has_sub out "\"type\"")
 
+let test_cli_type_json_has_needs () =
+  let src = "mod M do\n  needs IO.Console\n  fn main() do\n    let say = fn s -> println(s)\n    say\n  end\nend\n" in
+  (* 1-based: line 4, on the binding `say`. *)
+  let out = run ["query"; "type"; "t.march"; "--line"; "4"; "--col"; "9"] ~src in
+  Alcotest.(check bool) ("the type carries the capture set: " ^ out) true (has_sub out "needs IO.Console")
+
 let test_cli_symbols_json () =
   let src = "mod M do\n  fn f() : Int do 41 end\n  fn g() : Int do 7 end\nend\n" in
   let out = run ["query"; "symbols"; "t.march"] ~src in
@@ -133,6 +139,7 @@ let () =
       [ Alcotest.test_case "diagnostics" `Quick test_cli_diagnostics_json;
         Alcotest.test_case "hover" `Quick test_cli_hover_json;
         Alcotest.test_case "type" `Quick test_cli_type_json;
+        Alcotest.test_case "type shows a capture set" `Quick test_cli_type_json_has_needs;
         Alcotest.test_case "symbols" `Quick test_cli_symbols_json;
         Alcotest.test_case "diagnostics UTF-16 columns" `Quick test_cli_diagnostics_utf16_columns;
         Alcotest.test_case "unknown query" `Quick test_cli_unknown_query_is_error;

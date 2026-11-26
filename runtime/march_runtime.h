@@ -216,8 +216,9 @@ void   *march_cap_save(void);
 void    march_cap_restore(void *saved);
 void   *march_cap_push(void *layer);
 void   *march_cap_enter(void *auth);
-void   *march_cap_mark(void);
-void    march_cap_unwind(void *mark);
+typedef struct { void *auth; uint32_t depth; uint32_t handles; } march_cap_mark_t;
+march_cap_mark_t march_cap_mark(void);
+void    march_cap_unwind(march_cap_mark_t mark);
 void   *march_cap_grant_text(void);
 void   *march_cap_cwd(void);
 int64_t march_mock_register(void *handler);
@@ -431,6 +432,9 @@ void   *march_handle_new(int64_t kind, int64_t raw, int64_t aux);
  * TCP_BORROWED box satisfies an expected TCP. */
 int64_t march_handle_enter(void *h, int64_t kind);
 void    march_handle_leave(void *h);
+void    march_handle_leave_abandoned(void *h);
+uint32_t march_handle_depth(void);
+void    march_handle_unwind_to(uint32_t depth);
 /* 1 if this call closed the box, 0 if it was closed already.  Sockets (TCP,
  * LISTENER, UDP) are shut down first, so a reader parked in recv wakes; the
  * descriptor is released now, or by the last leave when a use is in flight. */
@@ -1181,6 +1185,7 @@ void   *march_file_read_chunk(void *handle, int64_t size);
 void   *march_file_open_write(void *path, int64_t mode);
 void   *march_file_write_handle(int64_t handle, void *data);
 void   *march_file_seek(int64_t handle, int64_t offset);
+void   *march_file_flush(int64_t handle);
 /* File.Dir (runtime/march_file_beneath.c): opens beneath a directory fd. */
 void   *march_dir_open(void *path);
 void   *march_dir_open_write(void *path);

@@ -1,0 +1,29 @@
+-- The design's opening example: a client whose type says what it reaches.
+mod Weather do
+  needs IO.Console, IO.NetConnect
+
+  type Client = Client(String -> Result(String, String))
+
+  fn new() do
+    Client(fn city ->
+      match HttpClient.get(HttpClient.new_client(), "https://api.weather.com/v1/" ++ city) do
+        Ok(_) -> Ok("sunny")
+        Err(_) -> Err("no forecast")
+      end)
+  end
+
+  fn print(c) do
+    match c do
+      Client(fetch) ->
+        match fetch("oslo") do
+          Ok(f) -> println(f)
+          Err(_) -> println("no forecast")
+        end
+    end
+  end
+
+  fn main() do
+    let weather = new()
+    print(weather)
+  end
+end

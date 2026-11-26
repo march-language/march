@@ -1965,6 +1965,15 @@ let base_env : env =
          with Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
       | _ -> eval_error "file_seek(fd, offset)"))
 
+  ; ("file_flush", VBuiltin ("file_flush", function
+      | [VInt h] ->
+        (match Hashtbl.find_opt write_chans h with
+         | None -> VCon ("Ok", [VUnit])
+         | Some oc ->
+           (try flush oc; VCon ("Ok", [VUnit])
+            with Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])])))
+      | _ -> eval_error "file_flush(fd)"))
+
   (* dir_open / dir_open_write: the same open (O_DIRECTORY); the two exist so
      each is charged its own capability.  The Int is the raw fd, which the
      File.Dir box (kind DIR) closes with tcp_close's bare close. *)
@@ -2897,6 +2906,14 @@ let base_env : env =
        compiled twin; the rule must match it exactly) ---- *)
   ; ("cap_check_raw", VBuiltin ("cap_check_raw", function
         | [VString _kind; VString _target] ->
+          (match !Eval_prim.capture_oracle with
+           | Some o ->
+             let rec texts = function
+               | VCon ("Cons", [ VCon (_, [ _; VString text; _ ]); rest ]) -> text :: texts rest
+               | _ -> []
+             in
+             o.co_op _kind _target (texts (cap_layers_now ()))
+           | None -> ());
           (* 0: nothing is in force (empty launch, empty slot);
              1: Authority.check walks the layers. *)
           VInt (if cap_is_empty (cap_layers_now ()) then 0 else 1)

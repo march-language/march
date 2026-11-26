@@ -34,7 +34,7 @@
  ; and which CI's `test` job therefore executes on both macOS and Linux.
  ; Its predecessor, test/test_http_native.sh, was wired into nothing at all,
  ; which is how a total outage of the compiled HTTP server went unnoticed.
- (modules test_stdlib_suite test_http_native test_https_native test_socket_timeout test_tls_groups)
+ (modules test_stdlib_suite test_http_native test_https_native test_socket_timeout test_tls_groups test_tls_sigpipe)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
@@ -53,7 +53,8 @@
 ; (`dune build @test/runtest-run_codegen`, ...) and runs everything else with
 ; MARCH_CI_RUNTEST_SPLIT=1 set, which drops exactly these three stanzas (exe
 ; and alias both) from `dune runtest`, along with run_cap_conformance,
-; run_errors, test_jit and run_dep_grants, which CI runs in the `forge` shard. Unset --
+; run_errors, test_jit and run_dep_grants, which CI runs in the `forge` shard,
+; and run_captures, which is its own shard (`captures`). Unset --
 ; every local run -- nothing
 ; changes. Do not set it outside that CI job: a local `dune runtest` with it
 ; set runs none of the three and still reports success.
@@ -112,6 +113,24 @@
  ; forge, for the end-to-end `forge build` cases (Task 7)
  (deps ../bin/main.exe ../forge/bin/main.exe (source_tree ../stdlib) (source_tree ../runtime)
        (source_tree dep_grants))
+ (action (run %{test} -e)))
+
+;; Capture sets (ocap phase 8a): the set algebra, capture inference and the
+;; golden `--dump-captures` corpus, and the soundness oracle.  CI runs it as
+;; its own ubuntu shard (`captures`) through its alias,
+;; @test/runtest-run_captures: about 15 CPU-minutes of cold `march --check`
+;; and interpreter runs, which no other shard has room for.  Not on macOS:
+;; nothing in it depends on the OS (typechecker and interpreter only).
+;; UPDATE_CAPTURES=1 ./_build/default/test/run_captures.exe -e
+(test
+ (name run_captures)
+ (enabled_if
+  (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
+       (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))   ; see "CI sharding" above
+ (modules run_captures test_capture_set test_captures test_capture_golden test_capture_oracle)
+ (libraries march_test_helpers march_caps march_ast march_parser march_desugar march_typecheck march_errors alcotest unix str)
+ (deps ../bin/main.exe (source_tree ../stdlib) (source_tree captures) (source_tree cap_conformance)
+       (source_tree ../bench) (source_tree ../examples))
  (action (run %{test} -e)))
 
 (test
@@ -15721,6 +15740,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/udp_close_while_recv.expected native_udp_close_while_recv.out)))
 
+; file_close_flush_error: File.close (and File.with_open_write) report a
+; write that only fails when the buffer is flushed. The file size limit makes
+; that flush fail (EFBIG) once SIGXFSZ is ignored; the limit is set for the
+; run only, not the compile. Compiled and interpreted against one golden.
+; The interpreted run gets its own HOME: under the limit the interpreter
+; cannot save its stdlib typecheck cache, and a cut-short cache file must not
+; land in the real one.
+(rule
+ (targets native_file_close_flush_error native_file_close_flush_error.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/file_close_flush_error.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_file_close_flush_error
+        native/file_close_flush_error.march)
+   (with-stdout-to native_file_close_flush_error.out
+        (system "trap '' XFSZ; ulimit -f 1; ./native_file_close_flush_error")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/file_close_flush_error.expected native_file_close_flush_error.out)))
+
+(rule
+ (targets native_file_close_flush_error_interp.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib)
+       (file native/file_close_flush_error.march))
+ (action
+  (with-stdout-to native_file_close_flush_error_interp.out
+       (system "mkdir -p fcfe_home; trap '' XFSZ; ulimit -f 1; HOME=$PWD/fcfe_home %{exe:../bin/main.exe} native/file_close_flush_error.march"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/file_close_flush_error.expected native_file_close_flush_error_interp.out)))
 ; udp_close_after_datagram: a datagram that arrived before Udp.close is
 ; returned by the receive that was parked on the socket, not dropped as
 ; Err(Closed). Linux only: the fixture needs a loopback send to have queued

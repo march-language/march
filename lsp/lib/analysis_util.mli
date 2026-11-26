@@ -157,6 +157,7 @@ type t =
   filename : string;
   doc : Utf16.doc;
   type_map : (Ast.span, Tc.ty) Hashtbl.t;
+  captures : March_typecheck.Capture.result Lazy.t;
   def_map : (string, Ast.span) Hashtbl.t;
   use_map : (Ast.span, string) Hashtbl.t;
   vars : (string * Tc.scheme) list;

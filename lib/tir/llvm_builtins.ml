@@ -751,6 +751,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_write_handle(i64 %handle, ptr %data)" };
   { march_name = "file_seek"; c_name = Some "march_file_seek"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_seek(i64 %handle, i64 %offset)" };
+  { march_name = "file_flush"; c_name = Some "march_file_flush"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_flush(i64 %handle)" };
   { march_name = "dir_open"; c_name = Some "march_dir_open"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_open(ptr %path)" };
   { march_name = "dir_open_write"; c_name = Some "march_dir_open_write"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
@@ -1971,6 +1973,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_file_open_write";
   PDeclare "march_file_write_handle";
   PDeclare "march_file_seek";
+  PDeclare "march_file_flush";
   PDeclare "march_dir_open";
   PDeclare "march_dir_open_write";
   PDeclare "march_file_open_at";

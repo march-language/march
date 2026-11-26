@@ -11,8 +11,8 @@
 # single slowest one rather than their sum:
 #
 #   (doc-lint lives in doc-lint.yml so it runs on Markdown-only changes too)
-#   test          (ubuntu) × 4          `dune runtest`, sharded: codegen, refinecheck,
-#                                       compiler, rest (see the job's comment)
+#   test          (ubuntu) × 6          `dune runtest`, sharded: codegen, refinecheck,
+#                                       compiler, rest, forge, captures (see the job's comment)
 #                 (macos)               `dune runtest`, unsharded
 #   macos-checks  (macos)               property groups (all but the oracle) + @vault-scale
 #   two-node      (ubuntu) × 3          two-node scenarios, sharded 1/3, 2/3, 3/3;
@@ -118,6 +118,7 @@ jobs:
           - { os: ubuntu-24.04, shard: compiler }
           - { os: ubuntu-24.04, shard: rest }
           - { os: ubuntu-24.04, shard: forge }
+          - { os: ubuntu-24.04, shard: captures }
           - { os: macos-26,     shard: all }
     runs-on: ${{ matrix.os }}
     # Must stay above the Test step's 75 plus setup (20) and build (10).
@@ -224,6 +225,13 @@ jobs:
             # run_dep_grants (seconds) is here too, to keep it off `rest` and
             # `compiler`, both near their step timeout.
             forge)       dune build @forge/runtest @test/runtest-run_errors @test/runtest-test_jit @test/runtest-run_cap_conformance @test/runtest-run_dep_grants ;;
+            # run_captures (capture sets, ocap phase 8a) is its own shard.
+            # It is ~15 CPU-min of `march --check` and interpreter runs, each
+            # from a cold cache. In `forge` (44-61 min on main) it took this
+            # step past 75 and starved upgrade-from's timing-sensitive
+            # migrating case into a failure (PR #1323). No other shard has
+            # the room: all five ran 42-61 min on main that week.
+            captures)    MARCH_TEST_PROCS=$(nproc) dune build @test/runtest-run_captures ;;
             # macOS skips the suites whose answer does not depend on the OS
             # (refinecheck, golden diagnostics, LSP; see "CI sharding" in
             # test/dune), and runs only the OS-sensitive groups listed in
@@ -822,10 +830,18 @@ jobs:
       # It has since grown back to the budget with no fallback: by 2026-11-10
       # the per-module REPL sessions alone summed to ~285 s on main (one cold
       # ~60 s prelude precompile, then 86 sessions of ~1-24 s), and a PR run
-      # timed out after printing "0 failed". The budget is 10 min; read the
-      # per-session lines before raising it again.
+      # timed out after printing "0 failed". The budget was 10 min then.
+      #
+      # 2026-11-25: the sessions sum to ~473 s on main (87 sessions; the two
+      # largest are actor.march at 51 s, which carries the cold prelude
+      # precompile, and control.march at 57 s for 249 expressions), and two
+      # PR runs on runners a uniform 26% slower (every session, none out of
+      # line) summed to ~597 s and timed out after printing "0 failed". The
+      # budget is 15 min. The growth since 2026-11-10 is in every session,
+      # so the next step is the per-session start-up cost, not this number;
+      # read the per-session lines before raising it again.
       - name: Check stdlib `march>` doctests
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           eval $(opam env)
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
