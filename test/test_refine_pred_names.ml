@@ -126,7 +126,7 @@ let shadowing =
         let src =
           "mod Shadow do\n  needs IO\n  fn len(xs : List(Int)) : Int do 7 end\n\n\
           \  fn need(xs : {List(Int) | len(_) == 1}) : Int do 0 end\n\n\
-          \  fn main(cap : Cap(IO)) : Unit do\n    println(int_to_string(len(Cons(1, Nil))))\n\
+          \  fn main() : Unit needs IO do\n    println(int_to_string(len(Cons(1, Nil))))\n\
           \    let _ = need(Cons(1, Nil))\n    ()\n  end\nend\n"
         in
         let out = U.run src in

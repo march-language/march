@@ -311,7 +311,7 @@ mod SbxDenyNet do
     fn probe_write_open() : Int = "sbx_probe_write_open"
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _p : Cap(IO.Process), _w : Cap(IO.FileWrite)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign, IO.Process, IO.FileWrite do
     let _anchor_proc = Authority.must(Process.pid())
     let _anchor_write = File.write("/tmp/march_sbx_anchor_write", "")
     println("socket=" ++ int_to_string(probe_socket()))
@@ -336,7 +336,7 @@ mod SbxDenyExec do
     fn probe_write_open() : Int = "sbx_probe_write_open"
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _w : Cap(IO.FileWrite)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign, IO.NetConnect, IO.FileWrite do
     let _anchor_net = Socket.connect("127.0.0.1", 1)
     let _anchor_write = File.write("/tmp/march_sbx_anchor_write", "")
     println("socket=" ++ int_to_string(probe_socket()))
@@ -361,7 +361,7 @@ mod SbxDenyWrite do
     fn probe_write_open() : Int = "sbx_probe_write_open"
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _p : Cap(IO.Process)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign, IO.NetConnect, IO.Process do
     let _anchor_net = Socket.connect("127.0.0.1", 1)
     let _anchor_proc = Authority.must(Process.pid())
     println("socket=" ++ int_to_string(probe_socket()))
@@ -391,7 +391,7 @@ mod SbxDenyListen do
     fn probe_connect() : Int = "sbx_probe_connect_refused"
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign, IO.NetConnect do
     let _anchor_net = Socket.connect("127.0.0.1", 1)
     println("socket=" ++ int_to_string(probe_socket()))
     println("bind=" ++ int_to_string(probe_bind()))
@@ -414,7 +414,7 @@ mod SbxHoldListen do
     fn probe_listen() : Int = "sbx_probe_listen_unbound"
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _l : Cap(IO.NetListen)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign, IO.NetListen do
     let _anchor_listen = Socket.listen(0)
     println("bind=" ++ int_to_string(probe_bind()))
     println("listen=" ++ int_to_string(probe_listen()))
@@ -503,7 +503,7 @@ mod SbxDenyNetMac do
     fn probe_write_open() : Int = "sbx_probe_write_open"
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _p : Cap(IO.Process), _w : Cap(IO.FileWrite)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign, IO.Process, IO.FileWrite do
     let _anchor_proc = Authority.must(Process.pid())
     let _anchor_write = File.write("/tmp/march_sbx_anchor_write", "")
     println("socket=" ++ int_to_string(probe_socket()))
@@ -529,7 +529,7 @@ mod SbxDenyProcessMac do
     fn probe_exec_inplace() : Int = "sbx_probe_exec_inplace"
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _w : Cap(IO.FileWrite)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign, IO.NetConnect, IO.FileWrite do
     let _anchor_net = Socket.connect("127.0.0.1", 1)
     let _anchor_write = File.write("/tmp/march_sbx_anchor_write", "")
     println("connect=" ++ int_to_string(probe_connect()))
@@ -555,7 +555,7 @@ mod SbxHoldProcessMac do
     fn probe_exec_inplace() : Int = "sbx_probe_exec_inplace"
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _p : Cap(IO.Process)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign, IO.Process do
     let _anchor_proc = Authority.must(Process.pid())
     println("fork=" ++ int_to_string(probe_fork()))
     println("exec=" ++ int_to_string(probe_exec_inplace()))
@@ -578,7 +578,7 @@ mod SbxDenyWriteMac do
     fn probe_write_open() : Int = "sbx_probe_write_open"
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _p : Cap(IO.Process)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign, IO.NetConnect, IO.Process do
     let _anchor_net = Socket.connect("127.0.0.1", 1)
     let _anchor_proc = Authority.must(Process.pid())
     println("connect=" ++ int_to_string(probe_connect()))
@@ -650,7 +650,7 @@ mod SbxDenyListenMac do
     fn probe_connect() : Int = "sbx_probe_connect_refused"
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign, IO.NetConnect do
     match Authority.must(Socket.connect("localhost", %d)) do
     Ok(s) ->
       println("roundtrip_connect=0")
@@ -684,7 +684,7 @@ mod SbxHoldListenMac do
     fn probe_connect() : Int = "sbx_probe_connect_refused"
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _l : Cap(IO.NetListen)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign, IO.NetListen do
     let _anchor_listen = Socket.listen(0)
     println("bind=" ++ int_to_string(probe_bind()))
     println("listen=" ++ int_to_string(probe_listen()))
@@ -770,7 +770,7 @@ mod %s do
     fn probe_write_open() : Int = "sbx_probe_write_open"
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _w : Cap(IO.FileWrite)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign, IO.FileWrite do
 %s
     println("outscope=" ++ int_to_string(probe_write_open()))
     ()
@@ -913,7 +913,7 @@ mod SbxEarlyThread do
     fn probe_bind() : Int = "sbx_probe_bind"
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     println("started=" ++ int_to_string(early_started()))
     println("main=" ++ int_to_string(probe_bind()))
     println("early=" ++ int_to_string(early_probe()))
@@ -971,7 +971,7 @@ mod SbxReload do
     fn wait_stdin() : Int = "sbx_wait_stdin"
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     println("up")
     println("waited=" ++ int_to_string(wait_stdin()))
     ()
@@ -1005,7 +1005,7 @@ let reload_write_src =
   extern "raw" : Cap(IO.Foreign) do
     fn wait_stdin() : Int = "sbx_wait_stdin"
   end
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _w : Cap(IO.FileWrite)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign, IO.FileWrite do
     let _anchor = File.write("/dev/null", "")
     println("up")
     println("waited=" ++ int_to_string(wait_stdin()))

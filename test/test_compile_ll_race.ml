@@ -37,7 +37,7 @@ let probe_src = {|
 mod LlRaceProbe do
   needs IO.Console
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let xs = List.map(List.range(0, 40), fn x -> x * 3)
     println("ll-race " ++ int_to_string(List.length(xs)))
     ()

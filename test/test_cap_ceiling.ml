@@ -228,7 +228,7 @@ mod CeilStdlib do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+  fn main() : () needs IO.Console, IO.FileWrite do
     Inner.go()
   end
 end
@@ -258,7 +258,7 @@ mod CeilSpanned do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+  fn main() : () needs IO.Console, IO.FileWrite do
     Inner.go()
   end
 end
@@ -311,7 +311,7 @@ mod CeilValue do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     Inner.go()
   end
 end
@@ -337,7 +337,7 @@ mod CeilApp do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     println(Dep.greet("world"))
     ()
   end
@@ -352,7 +352,7 @@ let test_a_correctly_declared_program_compiles () =
 mod CeilOkay do
   needs IO.Console
   needs IO.FileWrite
-  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+  fn main() : () needs IO.Console, IO.FileWrite do
     match File.write("/tmp/x", "d") do
       Ok(_)  -> Authority.ignore(println("ok"))
       Err(_) -> Authority.ignore(println("e"))
@@ -367,7 +367,7 @@ let test_parent_declaration_satisfies_the_ceiling () =
 mod CeilParent do
   needs IO.Console
   needs IO.FileSystem
-  fn main(_cap_console : Cap(IO.Console), _cap_filesystem : Cap(IO.FileSystem)) : () do
+  fn main() : () needs IO.Console, IO.FileSystem do
     match File.write("/tmp/x", "d") do
       Ok(_)  -> Authority.ignore(println("ok"))
       Err(_) -> Authority.ignore(println("e"))
@@ -401,7 +401,7 @@ mod CeilDeepOkay do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+  fn main() : () needs IO.Console, IO.FileWrite do
     if Innocent.DeeplyNested.write_it("d") do println("ok") else println("no") end
     ()
   end
@@ -451,7 +451,7 @@ mod NqOk do
   needs IO.Mut
   needs IO.Spawn
   needs IO.NetConnect
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     let _q = NodeQueue.start_local(fn _ -> ())
     println("ok")
   end
@@ -469,7 +469,7 @@ mod NqNarrow do
   needs IO.Mut
   needs IO.Spawn
   needs IO.NetConnect
-  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut), _s : Cap(IO.Spawn), _n : Cap(IO.NetConnect)) do
+  fn main() needs IO.Console, IO.Mut, IO.Spawn, IO.NetConnect do
     let _q = NodeQueue.start_local(fn _ -> ())
     println("ok")
   end
@@ -488,7 +488,7 @@ mod NqNoNet do
   needs IO.Console
   needs IO.Mut
   needs IO.Spawn
-  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Mut, IO.Spawn do
     let _q = NodeQueue.start_local(fn _ -> ())
     println("ok")
   end
@@ -675,7 +675,7 @@ mod CeilOptOut do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+  fn main() : () needs IO.Console, IO.FileWrite do
     Inner.go()
   end
 end
@@ -731,7 +731,7 @@ mod CeilActorOuter do
       send(pid, Zorp("hi"))
     end
   end
-  fn main(cap : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     Inner.run_it()
   end
 end
@@ -808,7 +808,7 @@ mod CeilImpl do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
+  fn main() needs IO.Console, IO.FileWrite do
     persist(Thing(1))
     println("done")
   end
@@ -891,7 +891,7 @@ mod CeilLibDepCrash do
 
   needs IO
 
-  fn main(_cap : Cap(IO)) do
+  fn main() needs IO do
     Leaky.slurp("/tmp/cap_ceiling_lib_dep_crash")
     println("ok")
   end
@@ -941,7 +941,7 @@ mod YamlApp do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+  fn main() : () needs IO.Console, IO.FileWrite do
     Yaml.go()
   end
 end

@@ -100,7 +100,7 @@ let ceiling_value needs =
       end
     end
   end
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     Inner.go()
   end
 end
@@ -112,7 +112,7 @@ let fn_bound bound =
     {|mod Main do
   needs IO.Console
   fn f(s : String) : Unit needs %s do Authority.ignore(println(s)) end
-  fn main(c : Cap(IO.Console)) do f("hi") end
+  fn main() needs IO.Console do f("hi") end
 end
 |}
     bound
@@ -132,7 +132,7 @@ let restrict_reach scope =
   Printf.sprintf
     {|mod Main do
   needs IO.Console
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     restrict %s do
       Authority.ignore(println("hi"))
     end
@@ -182,7 +182,7 @@ let path_scope path =
       Err(_) -> "none"
     end
   end
-  fn main(c : Cap(IO.Console), f : Cap(IO.FileRead)) do println(r()) end
+  fn main() needs IO.Console, IO.FileRead do println(r()) end
 end
 |}
     path
@@ -221,7 +221,7 @@ let host_scope url =
   mod A do
   %s
   end
-  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Console do
     println(A.go("q"))
   end
 end
@@ -251,7 +251,7 @@ end
 let dep_main =
   {|mod Main do
   needs IO.Console, IO.FileRead
-  fn main(c : Cap(IO.Console), f : Cap(IO.FileRead)) do
+  fn main() needs IO.Console, IO.FileRead do
     println(CapDep.slurp("/nonexistent/cap_parity"))
   end
 end
@@ -275,7 +275,7 @@ let stdlib_lambda writer_needs =
     %s
     fn run(xs) do Task.async_stream(xs, fn n -> n + 1) end
   end
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     match Writer.run([1, 2]) do
     Ok(_) -> println("ran")
     Err(_) -> println("refused")
@@ -293,7 +293,7 @@ let stdlib_lambda_repl writer_needs =
 let socket_write_main =
   {|mod Main do
   needs IO.Console, IO.NetConnect
-  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect)) do
+  fn main() needs IO.Console, IO.NetConnect do
     match Authority.must(Socket.connect("127.0.0.1", 9)) do
     Ok(s) ->
       let _ = Socket.write(s, "x")

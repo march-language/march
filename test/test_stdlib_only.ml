@@ -310,7 +310,7 @@ let contains ~needle hay =
 let forge_src = {|mod Forge do
   needs IO.Console
   needs IO.Registry
-  fn main(_c : Cap(IO.Console), _r : Cap(IO.Registry)) do
+  fn main() needs IO.Console, IO.Registry do
     let p = pid_of_int(0)
     let q = actor_whereis("x")
     let r = actor_registered()
@@ -1090,7 +1090,7 @@ let forged_peer_src = {|mod ForgedPeer do
     SwimDriver.dispatch(Swim.SendPing("victim"), reg, "me")
   end
   fn wrapped(fd : Int) : PeerRegistry.Fd do PeerRegistry.Fd(fd) end
-  fn main(_m : Cap(IO.Mut)) do poke(3) end
+  fn main() needs IO.Mut do poke(3) end
 end
 |}
 
@@ -1109,7 +1109,7 @@ let forged_link_src = {|mod ForgedLink do
     SessionNode.finish({ p0 with links: Cons(l, Nil) })
   end
   fn wd(fd : Int) do WorkDispatch.dispatch end
-  fn main(_m : Cap(IO.Mut), _s : Cap(IO.Spawn)) do poke(3) end
+  fn main() needs IO.Mut, IO.Spawn do poke(3) end
 end
 |}
 
@@ -1135,7 +1135,7 @@ let forged_actor_src = {|mod ForgedActor do
     ()
   end
   fn dotted() do spawn(NodeQueue.Writer) end
-  fn main(_m : Cap(IO.Mut)) do spawned(3) reconfigured(3) cluster(3) end
+  fn main() needs IO.Mut do spawned(3) reconfigured(3) cluster(3) end
 end
 |}
 

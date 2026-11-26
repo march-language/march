@@ -314,7 +314,7 @@ let test_matcher_agrees () =
   in
   let src =
     Printf.sprintf
-      "mod Diff do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) do\n%s\n  end\nend\n"
+      "mod Diff do\n  needs IO.Console\n  fn main() needs IO.Console do\n%s\n  end\nend\n"
       (String.concat "\n" lines)
   in
   let got = run_march src in
@@ -345,7 +345,7 @@ let test_method_matcher_agrees () =
   in
   let src =
     Printf.sprintf
-      "mod MDiff do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) do\n%s\n  end\nend\n"
+      "mod MDiff do\n  needs IO.Console\n  fn main() needs IO.Console do\n%s\n  end\nend\n"
       (String.concat "\n" lines)
   in
   let got = run_march src in
@@ -389,7 +389,7 @@ let test_path_matcher_agrees () =
   in
   let src =
     Printf.sprintf
-      "mod PDiff do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) do\n%s\n  end\nend\n"
+      "mod PDiff do\n  needs IO.Console\n  fn main() needs IO.Console do\n%s\n  end\nend\n"
       (String.concat "\n" lines)
   in
   let got = run_march src in
@@ -419,7 +419,7 @@ let test_url_parser_agrees () =
   in
   let src =
     Printf.sprintf
-      "mod UrlDiff do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) do\n%s\n  end\nend\n"
+      "mod UrlDiff do\n  needs IO.Console\n  fn main() needs IO.Console do\n%s\n  end\nend\n"
       (String.concat "\n" lines)
   in
   let got = run_march src in

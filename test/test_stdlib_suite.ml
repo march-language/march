@@ -1260,7 +1260,7 @@ let test_eval_pid_to_int_roundtrip () =
       init { x: 0 }
       on Noop() do { x: state.x } end
     end
-    fn main(io : Cap(IO)) do
+    fn main() needs IO do
       let intro = Authority.must(Actor.introspect())
       let pa = spawn(A)
       let n = pid_to_int(pa)
@@ -5854,7 +5854,7 @@ let test_compiled_pmap_matches_map () =
     "mod PmapParity do\n\
     \  needs IO.Process\n\
     \  needs IO.Spawn\n\
-    \  fn main(_cap_process : Cap(IO.Process), _cap_spawn : Cap(IO.Spawn)) : Unit do\n\
+    \  fn main() : Unit needs IO.Process, IO.Spawn do\n\
     \    let xs = List.range(0, 2000)\n\
     \    let map_ok = List.pmap(xs, fn x -> x * x) == List.map(xs, fn x -> x * x)\n\
     \    let flt_ok = List.pfilter(xs, fn x -> x % 2 == 0) == List.filter(xs, fn x -> x % 2 == 0)\n\
@@ -10568,7 +10568,7 @@ let test_compile_succeeds_from_other_cwd () =
   output_string oc
     "mod OtherCwd do\n\
     \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    println(\"hi\")\n\
     \  end\n\
      end\n";
@@ -10654,7 +10654,7 @@ let test_compiled_recursive_closure_capture () =
     \    end\n\
     \    go(1, 0)\n\
     \  end\n\
-    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
+    \  fn main() : Unit needs IO.Process do\n\
     \    if f(11) == 11 do () else Authority.ignore(Process.exit(1)) end\n\
     \  end\n\
      end\n";
@@ -10704,7 +10704,7 @@ let test_compiled_p12_type_preserving_alias () =
   output_string oc
     "mod P12Regress do\n\
     \  needs IO.Process\n\
-    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
+    \  fn main() : Unit needs IO.Process do\n\
     \    if List.length(List.range(0, 5)) == 5 do () else Authority.ignore(Process.exit(1)) end\n\
     \  end\n\
      end\n";
@@ -10734,7 +10734,7 @@ let test_compiled_sortby_heap_capturing_comparator () =
   output_string oc
     "mod SortByRegress do\n\
     \  needs IO.Process\n\
-    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
+    \  fn main() : Unit needs IO.Process do\n\
     \    let xs = List.range(0, 98)\n\
     \    let data = List.range(0, 5)\n\
     \    let cmp = fn (a : Int, b : Int) ->\n\
@@ -10794,7 +10794,7 @@ let test_compiled_dual_position_owned_borrowed () =
     \      \"short\"\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let s = \"hello-world-this-is-a-long-string-\" ++ to_string(37)\n\
     \    let r = both(s, s, 1)\n\
     \    println(r)\n\
@@ -10835,7 +10835,7 @@ let test_compiled_file_open_err_is_real_fileerror () =
     "mod FileOpenErrRegress do\n\
     \  needs IO.FileRead\n\
     \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) do\n\
+    \  fn main() needs IO.Console, IO.FileRead do\n\
     \    match file_open(\"/nonexistent/march_fileopenerr_test_xyz/does/not/exist\") do\n\
     \    Ok(_) -> println(\"unexpected-ok\")\n\
     \    Err(e) -> println(to_string(e))\n\
@@ -10908,7 +10908,7 @@ let test_compiled_csv_open_err_is_fileerror () =
     \    Err(_) -> println(\"cap error\")\n\
     \    end\n\
     \  end\n\
-    \  fn main(_c : Cap(IO.Console), _f : Cap(IO.FileRead)) do\n\
+    \  fn main() needs IO.Console, IO.FileRead do\n\
     \    let p = \"%s\"\n\
     \    report(\"read_all\", Csv.read_all(p, \",\", :rfc4180))\n\
     \    report(\"read_all simple\", Csv.read_all(p, \"\\t\", :simple))\n\
@@ -11021,7 +11021,7 @@ let test_compiled_file_dir_err_are_real_fileerrors () =
   output_string oc "mod FileDirErrRegress do\n";
   output_string oc "  needs IO.FileSystem\n";
   output_string oc "  needs IO.Console\n";
-  output_string oc "  fn main(_cap_console : Cap(IO.Console), _cap_fs : Cap(IO.FileSystem)) do\n";
+  output_string oc "  fn main() needs IO.Console, IO.FileSystem do\n";
   List.iter (fun (_, expr, _, _) ->
     Printf.fprintf oc
       "    match %s do\n    Ok(_) -> println(\"unexpected-ok\")\n    Err(e) -> println(to_string(e))\n    end\n"
@@ -11153,7 +11153,7 @@ let test_compiled_fbip_arity_no_overflow () =
     \  pfn mk_holder(n : Int) : Holder(Int, Int, Int, Int, Int) do\n\
     \    if n > 0 do Small(n) else Big(n, n, n, n, n) end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let n = churn(3)\n\
     \    let dead = mk_holder(n)\n\
     \    let q = mk_holder(n + 91)\n\
@@ -11215,7 +11215,7 @@ let test_compiled_actor_niche_msg_run_until_idle_kill () =
     \      state\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let pid = spawn(Counter)\n\
     \    println(\"alive_before=\" ++ bool_to_string(is_alive(pid)))\n\
     \    send(pid, Inc(10))\n\
@@ -11275,7 +11275,7 @@ let test_compiled_actor_program_exits_without_kill () =
     \      state\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let pid = spawn(Counter)\n\
     \    send(pid, Inc(7))\n\
     \    send(pid, Probe())\n\
@@ -11346,7 +11346,7 @@ let test_compiled_toml_section_4keys () =
     \      None -> Authority.ignore(Process.exit(1))\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
+    \  fn main() : Unit needs IO.Process do\n\
     \    let src = \"[package]\\nk1 = \\\"v1\\\"\\nk2 = \\\"v2\\\"\\nk3 = \\\"v3\\\"\\nk4 = \\\"v4\\\"\\n\"\n\
     \    match Toml.parse(src) do\n\
     \      Ok(root) ->\n\
@@ -11411,7 +11411,7 @@ let test_compiled_record_field_poly_mono () =
     \    Some(ct) -> String.concat(\"--\", ct)\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
+    \  fn main() : Unit needs IO.Process do\n\
     \    let conn = { hdrs : Cons((\"ct\", \"boundaryval\"), Nil) }\n\
     \    if run(conn) == \"--boundaryval\" do () else Authority.ignore(Process.exit(1)) end\n\
     \  end\n\
@@ -11476,7 +11476,7 @@ let test_compiled_record_put_large_even_int () =
       \      go2(i - 1, acc + get_i(u, \"a\") + get_i(u, \"b\") + get_i(u, \"c\"))\n\
       \    end\n\
       \  end\n\
-      \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
+      \  fn main() : Unit needs IO.Process do\n\
       \    let one = record_put(record_from_list([(\"a\", 1)]), \"a\", 4096)\n\
       \    if get_i(one, \"a\") == 4096 do () else Authority.ignore(Process.exit(1)) end\n\
       \    let n = 20000\n\
@@ -11522,7 +11522,7 @@ let test_compiled_hot_reload_dispatch () =
     \    fn b(n : Int) : Int do if n <= 0 do 0 else b(n - 1) + 1 end end\n\
     \    fn a(n : Int) : Int do b(n) end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do println(if Core.a(5) > 3 do \"dispatch works\" else \"no\" end) end\n\
+    \  fn main() needs IO.Console do println(if Core.a(5) > 3 do \"dispatch works\" else \"no\" end) end\n\
      end\n";
   close_out oc;
   (* Read the whole stdout of a command (trimmed). *)
@@ -11623,7 +11623,7 @@ let hcr_manifest_caps_fixture_src =
   \  mod Pure do\n\
   \    fn add(a : Int, b : Int) : Int do a + b end\n\
   \  end\n\
-  \  fn main(_cap_console : Cap(IO.Console)) do\n\
+  \  fn main() needs IO.Console do\n\
   \    Core.logger(\"hi\")\n\
   \    println(Pure.add(2, 3))\n\
   \  end\n\
@@ -11793,14 +11793,14 @@ end
        "let t = spawn(Tick)\n\
        \    send(t, Bump(1))\n\
        \    if List.length(Authority.must(Process.argv())) > 99 do\n\
-       \      let _ = Stream_Run.run_Cons(c, \"cons\", \"secret\", Stream_Run.addrs_from_env(),\n\
+       \      let _ = Stream_Run.run_Cons(\"cons\", \"secret\", Stream_Run.addrs_from_env(),\n\
        \        fn (s, con, fw, st) -> cons(s, con, st))\n\
        \      ()\n\
        \    else\n\
        \      sleep_ms(60000)\n\
        \    end"
      else
-       "let _ = Stream_Run.run_Cons(c, \"cons\", \"secret\", Stream_Run.addrs_from_env(),\n\
+       "let _ = Stream_Run.run_Cons(\"cons\", \"secret\", Stream_Run.addrs_from_env(),\n\
        \      fn (s, con, fw, st) -> cons(s, con, st))\n\
        \    ()")
 
@@ -12060,7 +12060,7 @@ let hcr_manifest_actor_handler_caps_fixture_src =
   \      send(pid, Zorp(\"hi\"))\n\
   \    end\n\
   \  end\n\
-  \  fn main(_cap : Cap(IO.Console)) do\n\
+  \  fn main() needs IO.Console do\n\
   \    Inner.run_it()\n\
   \  end\n\
    end\n"
@@ -12106,7 +12106,7 @@ let migrate_msg_tally_src ~v2 =
        \    end\n\
        \  end\n"
      else "")
-  ^ "  fn main(_io : Cap(IO)) do\n\
+  ^ "  fn main() needs IO do\n\
   \    let t = spawn(Tally)\n\
   \    let _ = Task.async(fn () -> feed(t, 0))\n\
   \    println(\"tally started\")\n\
@@ -12231,7 +12231,7 @@ let borrow_flip_src variant =
   \      serve(i + 1, n, acc + c + after)\n\
   \    end\n\
   \  end\n\
-  \  fn main(_io : Cap(IO)) do\n\
+  \  fn main() needs IO do\n\
   \    println(\"serving\")\n\
   \    let r = serve(0, 60000, 0)\n\
   \    println(\"served \" ++ int_to_string(r))\n\
@@ -12330,7 +12330,7 @@ let frame_pin_src version =
   ^ "\non Tick() do\nprintln(\"fresh-\" ++ int_to_string(calc()))\nstate\nend\non_stop do\n"
   ^ stop ^ "\nend\nend\n" ^ migration
   ^ "fn hold_frame(done : String, step : Int -> ()) : () do\nif Authority.must(File.exists(done)) do () else\nstep(0)\nhold_frame(done, step)\nend\nend\n"
-  ^ "fn main(_io : Cap(IO)) do\nlet a = spawn(Probe)\nprintln(\"frame-ready\")\n"
+  ^ "fn main() needs IO do\nlet a = spawn(Probe)\nprintln(\"frame-ready\")\n"
   ^ "let step = fn mark -> do\nif calc() != 101 do panic(\"old frame crossed ABI\") else () end\nif mark == 1 do Authority.ignore(println(\"old-closure-101\")) else () end\nsend(a, Tick())\nsleep_ms(50)\nend\n"
   ^ "hold_frame(Authority.must(Env.require(\"MARCH_FRAME_FINISH\")), step)\nstep(1)\n"
   ^ "if calc() != 101 do panic(\"old main crossed ABI\") else println(\"old-main-101\") end\n"
@@ -12462,7 +12462,7 @@ let hcr_manifest_disjoint_caps_fixture_src =
   \    let _ = File.write(path, \"data\")\n\
   \    0\n\
   \  end\n\
-  \  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do\n\
+  \  fn main() needs IO.Console, IO.FileWrite do\n\
   \    println(int_to_string(handle(1)))\n\
   \    println(int_to_string(writer(\"/tmp/march_hcr_disjoint_caps_test.txt\")))\n\
   \  end\n\
@@ -12619,7 +12619,7 @@ let test_string_stats_histogram_exact () =
       \      big(i + 1, n, acc + String.byte_size(s))\n\
       \    end\n\
       \  end\n\
-      \  fn main(_cap_console : Cap(IO.Console)) do\n\
+      \  fn main() needs IO.Console do\n\
       \    println(to_string(small(0, 100, 0) + big(0, 100, 0)))\n\
       \  end\n\
        end\n"
@@ -12652,7 +12652,7 @@ let test_string_stats_copy_bytes () =
       \      go(buf, i + 1, n, acc + String.byte_size(s))\n\
       \    end\n\
       \  end\n\
-      \  fn main(_cap_console : Cap(IO.Console)) do\n\
+      \  fn main() needs IO.Console do\n\
       \    let buf = String.repeat(\"abcdefghij\", 1000)\n\
       \    println(to_string(go(buf, 0, 100, 0)))\n\
       \  end\n\
@@ -12686,7 +12686,7 @@ let test_string_stats_copy_bytes_byte_loops () =
       \      go(buf, i + 1, n, acc + String.byte_size(lo))\n\
       \    end\n\
       \  end\n\
-      \  fn main(_cap_console : Cap(IO.Console)) do\n\
+      \  fn main() needs IO.Console do\n\
       \    let buf = String.repeat(\"abcdefghij\", 1000)\n\
       \    println(to_string(go(buf, 0, 50, 0)))\n\
       \  end\n\
@@ -12704,7 +12704,7 @@ let test_string_stats_copy_bytes_byte_loops () =
 let test_string_stats_off_by_default () =
   with_compiled_program ~tag:"march_strstats_off" ~env_prefix:""
     ~src_text:
-      "mod Off do\n  needs IO.Console\n  fn main(_cap_console : Cap(IO.Console)) do println(String.repeat(\"x\", 3)) end\nend\n"
+      "mod Off do\n  needs IO.Console\n  fn main() needs IO.Console do println(String.repeat(\"x\", 3)) end\nend\n"
     (fun err_file ->
        let contents = read_file_contents err_file in
        Alcotest.(check bool) "no stats emitted without the env var" false
@@ -12743,7 +12743,7 @@ let index_of_from_probe_src =
   \    None    -> \"none\"\n\
   \    end\n\
   \  end\n\
-  \  fn main(_cap_console : Cap(IO.Console)) do\n\
+  \  fn main() needs IO.Console do\n\
   \    let s = \"a,b,c\"\n\
   \    println(render(String.index_of_from(s, \",\", 0)))\n\
   \    println(render(String.index_of_from(s, \",\", 2)))\n\
@@ -12810,7 +12810,7 @@ let char_from_int_probe_src =
   \      rt(n + 1, acc + good)\n\
   \    end\n\
   \  end\n\
-  \  fn main(_cap_console : Cap(IO.Console)) do\n\
+  \  fn main() needs IO.Console do\n\
   \    println(to_string(rt(0, 0)))\n\
   \    println(to_string(char_to_int(char_from_int(256))))\n\
   \    println(to_string(char_to_int(char_from_int(511))))\n\
@@ -12870,7 +12870,7 @@ let search_edge_probe_src =
   \    None    -> \"none\"\n\
   \    end\n\
   \  end\n\
-  \  fn main(_cap_console : Cap(IO.Console)) do\n\
+  \  fn main() needs IO.Console do\n\
   \    println(render(String.index_of(\"abcabd\", \"abd\")))\n\
   \    println(render(String.index_of(\"aaaa\", \"aaaa\")))\n\
   \    println(render(String.index_of(\"aaa\", \"aaaa\")))\n\
@@ -12924,7 +12924,7 @@ let test_concat_chain_single_allocation () =
       \      go(a, b, i + 1, n, acc + String.byte_size(s))\n\
       \    end\n\
       \  end\n\
-      \  fn main(_cap_console : Cap(IO.Console)) do println(to_string(go(\"xx\", \"yy\", 0, 100000, 0))) end\n\
+      \  fn main() needs IO.Console do println(to_string(go(\"xx\", \"yy\", 0, 100000, 0))) end\n\
        end\n"
     (fun err_file ->
        let allocs = string_stat_of ~stderr_file:err_file "allocs" in
@@ -12951,7 +12951,7 @@ let test_concat_chain_values () =
   let src =
     "mod CatVal do\n\
     \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let a = \"a\"\n\
     \    let e = \"\"\n\
     \    println(a ++ a)\n\
@@ -13001,7 +13001,7 @@ let test_compress_decode_error_structured_both_backends () =
     \    end\n\
     \  end\n\
     \  pfn or_missing(k) do if k == \"unavailable\" do \"invalid_input\" else k end end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let garbage = Bytes.from_list([1, 2, 3, 4, 5, 6, 7, 8])\n\
     \    println(\"gzip \" ++ kind(Compress.Gzip.decode(garbage)))\n\
     \    println(\"deflate \" ++ kind(Compress.Deflate.decode(garbage)))\n\
@@ -13054,7 +13054,7 @@ let test_crypto_verify_password_malformed_both_backends () =
     \    Err(e) -> println(label ++ \" err \" ++ e)\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let salt = \"30313233343536373839616263646566\"\n\
     \    let dig = \"a63e13df90f6bf8b58982d6c4c9d72e6d70c00339db67406bee1e6c980d08768\"\n\
     \    report(\"good\", \"pbkdf2:sha256:1000:\" ++ salt ++ \":\" ++ dig)\n\
@@ -13130,7 +13130,7 @@ let test_csv_each_row_closes_on_callback_panic () =
       \    _ -> \"cannot open\"\n\
       \    end\n\
       \  end\n\
-      \  fn main(_c : Cap(IO.Console), _f : Cap(IO.FileRead)) do\n\
+      \  fn main() needs IO.Console, IO.FileRead do\n\
       \    burn(300, false)\n\
       \    println(\"each_row: \" ++ rows())\n\
       \    burn(300, true)\n\
@@ -13264,7 +13264,7 @@ let test_compiled_sanitize_clean_exit () =
   output_string oc
     "mod SanExit do\n\
     \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do println(\"sanitize ok\") end\n\
+    \  fn main() needs IO.Console do println(\"sanitize ok\") end\n\
      end\n";
   close_out oc;
   let bin = Filename.concat tmp "sanexit_bin" in
@@ -13348,7 +13348,7 @@ let test_sanitize_modes_do_not_share_cas_artifact () =
   output_string oc
     "mod SanKey do\n\
     \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do println(\"sanitize key\") end\n\
+    \  fn main() needs IO.Console do println(\"sanitize key\") end\n\
      end\n";
   close_out oc;
   (* The TSAN and ASAN runtimes are not on every clang (musl has neither), so
@@ -13432,7 +13432,7 @@ let test_compiled_io_read_byte () =
     output_string oc
       {|mod App do
   needs IO.Console
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let a = Authority.must(IO.read_byte())
     let b = Authority.must(IO.read_byte())
     let c = Authority.must(IO.read_byte())
@@ -13487,7 +13487,7 @@ let test_compiled_helper_name_collision () =
     \      if List.length(lst) == 3 do go(i + 1, n) else 1 end\n\
     \    end end\n\
     \  end\n\
-    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
+    \  fn main() : Unit needs IO.Process do\n\
     \    if go(0, 5) == 0 do () else Authority.ignore(Process.exit(1)) end\n\
     \  end\n\
      end\n";
@@ -13527,7 +13527,7 @@ let test_compiled_toplevel_fn_shadows_hof_param () =
     \  fn f(xs : List(Int)) : List(Int) do\n\
     \    List.map(xs, fn y -> y + 1)\n\
     \  end\n\
-    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
+    \  fn main() : Unit needs IO.Process do\n\
     \    match f([1, 2, 3]) do\n\
     \      Cons(a, Cons(b, Cons(c, Nil))) ->\n\
     \        if a == 2 && b == 3 && c == 4 do () else Authority.ignore(Process.exit(1)) end\n\
@@ -13571,7 +13571,7 @@ let test_compiled_builtin_first_class_value () =
     \  fn apply1(f : (String) -> Int, s : String) : Int do\n\
     \    f(s)\n\
     \  end\n\
-    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
+    \  fn main() : Unit needs IO.Process do\n\
     \    if apply1(string_length, \"hello\") == 5 do () else Authority.ignore(Process.exit(1)) end\n\
     \  end\n\
      end\n";
@@ -13607,7 +13607,7 @@ let test_compiled_vault_scalar_roundtrip () =
     {|mod VaultScalar do
   needs IO.Process
   needs IO.Mut
-  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do
+  fn main() : Unit needs IO.Mut, IO.Process do
     -- One table per element type: a Vault handle is Vault(v), phantom in
     -- the value type, so a single table cannot hold both a Bool and an
     -- Int. That is orthogonal to what this test guards (the runtime's
@@ -13657,7 +13657,7 @@ let test_compiled_vault_ns_get_missing_namespace () =
     {|mod VaultNsGetMissing do
   needs IO.Process
   needs IO.Mut
-  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do
+  fn main() : Unit needs IO.Mut, IO.Process do
     match Authority.must(Vault.ns_get("never_written_ns_xyz", "k")) do
       None -> ()
       Some(_) -> Authority.ignore(Process.exit(1))
@@ -13708,7 +13708,7 @@ let vault_update_src =
   fn inc(n) do
     n + 1
   end
-  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do
+  fn main() : Unit needs IO.Mut, IO.Process do
     -- One table per element type (Vault(v) is phantom in the value type),
     -- which changes nothing about what this guards: the Int table still
     -- exercises the tagged-scalar untag before the closure call and the
@@ -13789,7 +13789,7 @@ let test_compiled_string_to_int_overflow_is_none () =
     \      None -> false\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
+    \  fn main() : Unit needs IO.Process do\n\
     \    -- Int.min (-4611686018427387904) has no valid literal spelling: its\n\
     \    -- own magnitude, 4611686018427387904, exceeds the max POSITIVE March\n\
     \    -- literal (4611686018427387903) and the lexer rejects it before the\n\
@@ -13833,7 +13833,7 @@ let test_compiled_aliased_arg_no_double_free () =
   output_string oc
     "mod AliasDup do\n\
     \  needs IO.Process\n\
-    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
+    \  fn main() : Unit needs IO.Process do\n\
     \    let a = BigInt.from_int(7)\n\
     \    let sq = BigInt.mul(a, a)          -- f(x, x): a consumed twice\n\
     \    let s0 = BigInt.from_int(314159265358979)\n\
@@ -13941,7 +13941,7 @@ let test_interp_http_server_idle_client_does_not_block_others () =
       \  fn router(conn) do\n\
       \    conn |> HttpServer.text(200, \"hello\")\n\
       \  end\n\
-      \  fn main(_cap_netlisten : Cap(IO.NetListen)) do\n\
+      \  fn main() needs IO.NetListen do\n\
       \    Authority.must(HttpServer.new(%d)\n\
       \    |> HttpServer.plug(router)\n\
       \    |> HttpServer.listen())\n\
@@ -14086,7 +14086,7 @@ let test_interp_http_server_idle_websocket_does_not_block_others () =
       \      conn |> HttpServer.text(200, \"hello\")\n\
       \    end\n\
       \  end\n\
-      \  fn main(_cap_netlisten : Cap(IO.NetListen), _cap_websocket : Cap(IO.WebSocket)) do\n\
+      \  fn main() needs IO.NetListen, IO.WebSocket do\n\
       \    Authority.must(HttpServer.new(%d)\n\
       \    |> HttpServer.plug(router)\n\
       \    |> HttpServer.listen())\n\

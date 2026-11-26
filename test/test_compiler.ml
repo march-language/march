@@ -2146,7 +2146,7 @@ let test_linear_double_use_points_at_first_use () =
       String.byte_size(s)
     end
 
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       linear let token = "secret"
       let a = consume(token)
       let b = consume(token)
@@ -2184,7 +2184,7 @@ let test_linear_match_arms_each_consume_once_ok () =
       String.byte_size(s)
     end
 
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       linear let token = "secret"
       let flag = true
       let r = match flag do
@@ -2209,7 +2209,7 @@ let test_linear_if_branches_each_consume_once_ok () =
       String.byte_size(s)
     end
 
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       linear let token = "secret"
       let flag = true
       let r = if flag do consume(token) else consume(token) end
@@ -2226,7 +2226,7 @@ let test_linear_cond_arms_each_consume_once_ok () =
       String.byte_size(s)
     end
 
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       linear let token = "secret"
       let flag = true
       let r = match do
@@ -2251,7 +2251,7 @@ let test_linear_use_in_if_condition_then_branch_is_error () =
       String.byte_size(s)
     end
 
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       linear let token = "secret"
       let r = if consume(token) > 0 do consume(token) else 0 end
       println(int_to_string(r))
@@ -2267,7 +2267,7 @@ let test_linear_double_use_within_if_branch_is_error () =
       String.byte_size(s)
     end
 
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       linear let token = "secret"
       let flag = true
       let r = if flag do consume(token) + consume(token) else 0 end
@@ -2289,7 +2289,7 @@ let test_linear_double_use_within_arm_labels_same_arm () =
       String.byte_size(s)
     end
 
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       linear let token = "secret"
       let flag = true
       let r = match flag do
@@ -2507,7 +2507,7 @@ let test_session_mpst_choose_unsupported_message () =
       B -> C : Int
       C -> A : Bool
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (ea, eb, ec) = MPST.new(Tri)
       let eb2 = MPST.choose(eb, :yes)
       println("unused")
@@ -2524,7 +2524,7 @@ let test_session_user_mpst_module_not_swallowed () =
     mod MPST do
       fn helper(x) do x + 1 end
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let y = MPST.helper(41)
       if y > 0 do println("ok") else println("no") end
     end
@@ -2538,7 +2538,7 @@ let test_session_user_chan_module_not_swallowed () =
     mod Chan do
       fn helper(x) do x + 1 end
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let y = Chan.helper(41)
       if y > 0 do println("ok") else println("no") end
     end
@@ -2559,7 +2559,7 @@ let test_session_chan_send_wrong_arity_error () =
       Client -> Server : Int
       Server -> Client : Int
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let x = Chan.send(1)
       println("unused")
     end
@@ -2585,7 +2585,7 @@ let test_session_user_chan_new_recv_close_shadow_not_swallowed () =
       fn recv(a, b) do a end
       fn close(a, b) do a end
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let x = Chan.new(1, 2)
       let y = Chan.recv(x, 2)
       let z = Chan.close(y, 2)
@@ -2771,7 +2771,7 @@ let test_session_loop_two_iterations_ok () =
         Cons -> Prod : Bool
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, pp) = Chan.new(Str)
       let pp2 = Chan.send(pp, 1)
       let (x, cc2) = Chan.recv(cc)
@@ -2858,7 +2858,7 @@ let test_session_loop_stop_two_iterations_close_ok () =
         end
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, pp) = Chan.new(Stream)
       let pp1 = Chan.send(pp, 1)
       let (x1, cc1) = Chan.recv(cc)
@@ -3052,7 +3052,7 @@ let test_session_chan_new_multiparty_error () =
       B -> C : Int
       C -> A : Bool
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (x, y) = Chan.new(Tri)
       println("unused")
     end
@@ -3168,7 +3168,7 @@ let test_session_offer_unrefined_continuation_error () =
         err -> S -> C : String
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, sc) = Chan.new(D2)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -3194,7 +3194,7 @@ let test_session_offer_identical_branches_no_match_ok () =
         err -> S -> C : Int
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, sc) = Chan.new(Same)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, 7)
@@ -3229,7 +3229,7 @@ let test_session_offer_label_shadow_bypass_error () =
         err -> S -> C : String
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, sc) = Chan.new(D2)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -3263,7 +3263,7 @@ let test_session_offer_label_shadow_no_false_positive () =
         err -> S -> C : String
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, sc) = Chan.new(D2)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -3394,7 +3394,7 @@ let test_session_offer_guarded_catch_all_not_catch_all () =
         err -> S -> C : String
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, sc) = Chan.new(D6)
       let sc2 = Chan.choose(sc, :ok)
       let sc3 = Chan.send(sc2, 7)
@@ -3435,7 +3435,7 @@ let test_session_offer_unrefined_laundered_by_annotation () =
     protocol E7 do
       S -> C : Int
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, sc) = Chan.new(D7)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -3468,7 +3468,7 @@ let test_session_offer_unrefined_laundered_by_if_join () =
     protocol E8 do
       S -> C : Int
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, sc) = Chan.new(D8)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -3510,7 +3510,7 @@ let test_session_offer_unrefined_laundered_by_fn_param () =
       Chan.close(ch2)
       v
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, sc) = Chan.new(D9)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -3540,7 +3540,7 @@ let test_session_offer_unrefined_laundered_by_record_field () =
       S -> C : Int
     end
     type Box = { ch : Chan(C, EA), n : Int }
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, sc) = Chan.new(DA)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -3580,7 +3580,7 @@ let test_session_offer_unrefined_laundered_by_lambda_param () =
     protocol EL do
       S -> C : Int
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, sc) = Chan.new(DL)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -3613,7 +3613,7 @@ let test_session_offer_unrefined_laundered_by_inner_fn_param () =
     protocol EM do
       S -> C : Int
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, sc) = Chan.new(DM)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -3650,7 +3650,7 @@ let test_session_lambda_param_annotation_no_false_positive () =
     protocol EN do
       S -> C : Int
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let inc = fn (x : Int) -> x + 1
       let doubled = List.map([1, 2, 3], fn (x : Int) -> x * 2)
       fn triple(y : Int) do y * 3 end
@@ -3682,7 +3682,7 @@ let test_session_lambda_param_annotation_no_false_positive () =
 let test_lambda_param_annotation_mismatch_rejected () =
   let ctx = typecheck {|mod Test do
   needs IO.Console
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let f = fn (x : String) -> string_length(x)
       println(int_to_string(f(42)))
     end
@@ -3715,7 +3715,7 @@ let test_session_offer_unify_no_false_positive () =
       Chan.close(ch2)
       v
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, sc) = Chan.new(DB)
       let sc2 = Chan.choose(sc, :ok)
       let sc3 = Chan.send(sc2, 7)
@@ -3749,7 +3749,7 @@ let test_session_offer_unknown_arm_label_warning () =
         err -> S -> C : String
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, sc) = Chan.new(DC)
       let sc2 = Chan.choose(sc, :ok)
       let sc3 = Chan.send(sc2, 7)
@@ -3796,7 +3796,7 @@ let test_session_offer_unrefined_catch_all_message () =
         err -> S -> C : String
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let (cc, sc) = Chan.new(DD)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -4151,7 +4151,7 @@ let test_missing_needs_dedup_no_orphan_hint_main_cap_param () =
     let oc = open_out src in
     output_string oc
       "mod ManyCaps do\n\
-      \  fn main(cap : Cap(IO)) : () do\n\
+      \  fn main() : () needs IO do\n\
       \    println(\"a\")\n\
       \    let _ = file_write(\"/tmp/mc\", \"d\")\n\
       \    ()\n\
@@ -4201,7 +4201,7 @@ let handle_use_program ~wire ~use =
 %s
   end
 
-  fn main(_n : Cap(IO.NetConnect), _l : Cap(IO.NetListen), _c : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.NetListen, IO.Console do
 %s
     println("ok")
   end
@@ -4610,7 +4610,7 @@ end
    fix does not. *)
 let test_check1b_omits_caps_subsumed_by_check1 () =
   let ctx = typecheck {|mod Agg do
-    fn main(cap : Cap(IO)) : () do
+    fn main() : () needs IO do
       println("a")
       match file_write("/tmp/agg", "d") do
         Ok(_) -> ()
@@ -4790,7 +4790,7 @@ let test_actor_handler_escapes_grant_is_caught () =
         { n: state.n + 1 }
       end
     end
-    fn main(cap : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       let p = spawn(Exfil)
       send(p, Go("secrets"))
       println("done")
@@ -4818,7 +4818,7 @@ let test_actor_spawned_not_sent_still_charged () =
         { n: state.n + 1 }
       end
     end
-    fn main(cap : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       let _p = spawn(Z)
       println("never sent")
       ()
@@ -4841,7 +4841,7 @@ let test_actor_defined_never_spawned_is_free () =
         { n: state.n + 1 }
       end
     end
-    fn main(cap : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       println("Z is never spawned")
       ()
     end
@@ -4965,7 +4965,7 @@ let test_same_named_actors_only_spawned_one_charged () =
       end
     end
     needs IO.Console
-    fn main(cap : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       Safe.run()
     end
   end|} in
@@ -5004,7 +5004,7 @@ let test_same_named_actors_spawned_one_still_rejected () =
       end
     end
     needs IO.Console
-    fn main(cap : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       Safe.run()
     end
   end|} in
@@ -5033,7 +5033,7 @@ let test_nested_actor_msg_ctor_qualified_from_parent () =
         on Set(k : Int) do { n: k } end
       end
     end
-    fn main(_s : Cap(IO.Spawn)) do
+    fn main() needs IO.Spawn do
       let p = spawn(Inner.Box)
       %s
     end
@@ -5065,7 +5065,7 @@ let test_actor_msg_ctor_qualified_by_actor () =
       init { s: "" }
       on Tally(k : Int) do { s: int_to_string(k) } end
     end
-    fn main(_s : Cap(IO.Spawn)) do
+    fn main() needs IO.Spawn do
       let c = spawn(Counter)
       let l = spawn(Labels)
       %s
@@ -5498,7 +5498,7 @@ let count_errors_matching ctx needle =
 let test_let_annot_mismatch_rejects () =
   let ctx = typecheck {|mod M do
   needs IO.Console
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let x : Int = "foo"
       println(int_to_string(x))
     end
@@ -5511,7 +5511,7 @@ let test_let_annot_mismatch_rejects () =
 let test_let_annot_correct_accepts () =
   let ctx = typecheck {|mod M do
   needs IO.Console
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let x : Int = 5
       println(int_to_string(x))
     end
@@ -5524,7 +5524,7 @@ let test_let_annot_correct_accepts () =
 let test_let_annot_poly_instance_accepts () =
   let ctx = typecheck {|mod M do
   needs IO.Console
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let f : (Int) -> Int = fn n -> n
       println(int_to_string(f(5)))
     end
@@ -5543,7 +5543,7 @@ let test_zero_arg_lambda_unit_callback_accepts () =
   needs IO.Console
     fn call_it(cb : Unit -> Unit) : Unit do cb() end
     fn once() : Unit do Authority.ignore(println("ran")) end
-    fn main(_cap_console : Cap(IO.Console)) do call_it(fn -> once()) end
+    fn main() needs IO.Console do call_it(fn -> once()) end
   end|} in
   Alcotest.(check bool) "call_it(fn -> once()) : Unit -> Unit accepted"
     false (has_errors ctx)
@@ -5553,7 +5553,7 @@ let test_zero_arg_lambda_unit_callback_accepts () =
 let test_zero_arg_unit_call_returns_result () =
   let ctx = typecheck {|mod Main do
   needs IO.Console
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let n = int_max_value()
       println(int_to_string(n))
     end
@@ -5567,7 +5567,7 @@ let test_discard_arg_thunk_still_accepts () =
   let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod Main do
   needs IO.Console
     needs IO.Spawn
-    fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+    fn main() needs IO.Console, IO.Spawn do
       let _t = task_spawn(fn _ -> 42)
       println("spawned")
     end
@@ -5660,7 +5660,7 @@ let test_letfn_ret_annot_mismatch_single_diagnostic () =
       end
       go(n)
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       println(int_to_string(describe(3)))
     end
   end|} in
@@ -5683,7 +5683,7 @@ let test_letfn_two_distinct_errors_both_report () =
       let bad : Bool = 42
       go(n)
     end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       println(int_to_string(describe(3)))
     end
   end|} in
@@ -5712,7 +5712,7 @@ let dup_wrap body = Printf.sprintf {|mod M do
   needs IO.Console
   type P = Pair(Int, Int)
 %s
-  fn main(_cap_console : Cap(IO.Console)) do () end
+  fn main() needs IO.Console do () end
 end|} body
 
 let test_duplicate_binder_rejects () =
@@ -5766,7 +5766,7 @@ let test_duplicate_binder_accepts () =
 let test_tuple_eq_structural_accepts () =
   let ctx = typecheck {|mod M do
   needs IO.Console
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let a = (1, "x") == (1, "x")
       let b = ((1, "s"), 2.5, true) != ((1, "s"), 2.0, false)
       if a && b do println("y") else println("n") end
@@ -5779,7 +5779,7 @@ let test_tuple_eq_component_without_eq_rejects () =
   let ctx = typecheck {|mod M do
   needs IO.Console
     type Hue = Rood | Bloo
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       if (1, Rood) == (1, Bloo) do println("y") else println("n") end
     end
   end|} in
@@ -5790,7 +5790,7 @@ let test_tuple_eq_component_without_eq_rejects () =
 let test_tuple_ord_structural_accepts () =
   let ctx = typecheck {|mod M do
   needs IO.Console
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let a = (1, "x") < (1, "y")
       let b = compare(((1, "s"), 2.5), ((1, "s"), 2.0)) > 0
       let c = (1, 2, 3) >= (1, 2, 3)
@@ -5805,7 +5805,7 @@ let test_tuple_ord_component_without_ord_rejects () =
   let ctx = typecheck {|mod M do
   needs IO.Console
     type Hue = Rood | Bloo
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       if (1, Rood) < (1, Bloo) do println("y") else println("n") end
       println(int_to_string(compare((Rood, 1), (Bloo, 2))))
     end
@@ -5824,7 +5824,7 @@ let test_generic_when_constraint_unsatisfied_rejects () =
   needs IO.Console
     type Hue = Rood | Bloo
     fn same(a, b) when Eq(a) do a == b end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       if same(Rood, Rood) do println("y") else println("n") end
     end
   end|} in
@@ -5841,7 +5841,7 @@ let test_generic_when_constraint_satisfied_accepts () =
   needs IO.Console
     fn max(a, b) when Ord(a) do if a > b do a else b end end
     fn same(a, b) when Eq(a) do a == b end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       println(int_to_string(max(1, 2)))
       if same(1, 1) do println("eq") else println("neq") end
       if same("x", "y") do println("eq") else println("neq") end
@@ -5855,7 +5855,7 @@ let test_generic_no_constraint_accepts () =
   let ctx = typecheck {|mod M do
   needs IO.Console
     fn id(a) do a end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       println(int_to_string(id(5)))
       println(id("hi"))
     end
@@ -6736,7 +6736,7 @@ let test_session_compile_odd_int_roundtrip () =
       \    Client -> Server : Int\n\
       \    Server -> Client : Int\n\
       \  end\n\
-      \  fn main(_cap_console : Cap(IO.Console)) do\n\
+      \  fn main() needs IO.Console do\n\
       \    let (cc, sc) = Chan.new(Echo)\n\
       \    let cc2 = Chan.send(cc, 43)\n\
       \    let (n, sc2) = Chan.recv(sc)\n\
@@ -6840,7 +6840,7 @@ let test_session_compile_bool_roundtrip () =
       \  protocol B do\n\
       \    Client -> Server : Bool\n\
       \  end\n\
-      \  fn main(_cap_console : Cap(IO.Console)) do\n\
+      \  fn main() needs IO.Console do\n\
       \    let (cc, sc) = Chan.new(B)\n\
       \    let cc2 = Chan.send(cc, true)\n\
       \    let (b, sc2) = Chan.recv(sc)\n\
@@ -8856,7 +8856,7 @@ let test_opaque_ctor_qualified_bypass_rejected () =
   (* Sibling module constructs the private opaque ctor by qualified name. *)
   let bypass_src = {|mod OqBypass do
   needs IO.Console
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let t = OqToken.Token("direct-bypass")
     println(OqToken.value(t))
   end
@@ -8900,7 +8900,7 @@ end
 |} in
   let entry_src = {|mod PubUse do
   needs IO.Console
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let c = PubColor.Red
     println(PubColor.name(c))
   end
@@ -9237,7 +9237,7 @@ let test_unrelated_broken_lib_module_is_pruned () =
     (* (1) Entry references only GoodLib: BrokenUnrelated must be pruned. *)
     let entry_ok = Filename.concat dir "entry_ok.march" in
     write_file entry_ok
-      "mod EntryOk do\n  needs IO.Console\n  fn main(_cap_console : Cap(IO.Console)) do println(int_to_string(GoodLib.helper(21))) end\nend\n";
+      "mod EntryOk do\n  needs IO.Console\n  fn main() needs IO.Console do println(int_to_string(GoodLib.helper(21))) end\nend\n";
     let m = parse_and_desugar (read_file_contents entry_ok) in
     let (resolve_errors, extra_decls, _uf) =
       March_resolver.Resolver.resolve_imports ~source_file:entry_ok m in
@@ -9326,7 +9326,7 @@ let test_shared_type_name_does_not_load_unreferenced_module () =
     let (m, resolve_errors, extra) = resolve "main.march"
         {|mod Main do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println(int_to_string(Alpha.one()))
     ()
   end
@@ -12172,7 +12172,7 @@ let test_fn_cap_closure_two_level_nesting () =
         fn f(x) do println(x) end
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) do Lib.Sub.f("hi") end
+    fn main() needs IO.Console do Lib.Sub.f("hi") end
   end|} in
   let closures = March_typecheck.Typecheck.fn_capability_closures env in
   Alcotest.(check bool) "not falsely keyed under bare immediate-parent name" true
@@ -13499,7 +13499,7 @@ let test_module_fn_shadowing_builtin_is_not_a_cap_use () =
     fn file_read(x : Int) : Int do
       x + 100
     end
-    fn main(_cap_console : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       println(int_to_string(file_read(1)))
       ()
     end
@@ -13517,7 +13517,7 @@ let test_module_let_shadowing_builtin_is_not_a_cap_use () =
   let ctx = typecheck {|mod ShadowLet do
     needs IO.Console
     let random_bytes = fn n -> n * 2
-    fn main(_cap_console : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       println(int_to_string(random_bytes(3)))
       ()
     end
@@ -13536,7 +13536,7 @@ let test_dns_resolve_shadow_witness () =
     fn dns_resolve(x : Int) : Int do
       x + 1
     end
-    fn main(_cap_console : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       println(int_to_string(dns_resolve(1)))
       ()
     end
@@ -13929,7 +13929,7 @@ let test_dotted_ffi_capability_with_io_leaf_collision_still_accepted_2 () =
 let test_grant_narrow_covers_console () =
   let ctx = typecheck {|mod GrantOk do
     needs IO.Console
-    fn main(cap : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       println("hi")
       ()
     end
@@ -13944,7 +13944,7 @@ let test_grant_narrow_rejects_filewrite () =
   let ctx = typecheck {|mod GrantViolate do
     needs IO.Console
     needs IO.FileWrite
-    fn main(cap : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       match file_write("/tmp/grant_x", "d") do
         Ok(_) -> Authority.ignore(println("ok"))
         Err(_) -> Authority.ignore(println("e"))
@@ -13968,7 +13968,7 @@ let test_grant_violation_through_helper () =
         Err(_) -> ()
       end
     end
-    fn main(cap : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       save()
       println("hi")
       ()
@@ -13993,7 +13993,7 @@ let test_grant_violation_names_the_user_module () =
         Err(_) -> ""
       end
     end
-    fn main(cap : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       println(helper("/etc/passwd"))
       ()
     end
@@ -14015,7 +14015,7 @@ let test_grant_full_io_accepts_everything () =
      established entry-point convention (test/native/main_cap_io.march). *)
   let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod GrantFull do
     needs IO
-    fn main(cap : Cap(IO)) : () do
+    fn main() : () needs IO do
       match file_write("/tmp/grant_f", "d") do
         Ok(_) -> Authority.ignore(println("ok"))
         Err(_) -> Authority.ignore(println("e"))
@@ -14079,7 +14079,7 @@ let test_grant_narrow_refuses_foreign () =
     extern "rt" : Cap(Ffi) do
       fn ffi_id(x : Int) : Int = "march_test_ffi_id"
     end
-    fn main(cap : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       println(int_to_string(ffi_id(1)))
       ()
     end
@@ -14101,7 +14101,7 @@ let test_grant_dead_code_is_not_charged () =
         Err(_) -> ()
       end
     end
-    fn main(cap : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       println("hi")
       ()
     end
@@ -14116,7 +14116,7 @@ let test_main_signature_accepts_narrow_cap () =
     false
     (desugar_has_errors {|mod GrantSig do
       needs IO.Console
-      fn main(cap : Cap(IO.Console)) : () do
+      fn main() : () needs IO.Console do
         println("hi")
         ()
       end
@@ -14441,7 +14441,7 @@ let test_main_multi_cap_signature_accepted () =
     (desugar_has_errors {|mod StageDMulti do
       needs IO.Console
       needs IO.Spawn
-      fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn)) : () do
+      fn main() : () needs IO.Console, IO.Spawn do
         println("hi")
         ()
       end
@@ -14482,7 +14482,7 @@ let test_main_grant_is_the_union_of_its_cap_params () =
   let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod StageDUnion do
     needs IO.Console
     needs IO.Spawn
-    fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn)) : () do
+    fn main() : () needs IO.Console, IO.Spawn do
       println("start")
       let _t = task_spawn(fn _ -> println("worker"))
       ()
@@ -14496,7 +14496,7 @@ let test_main_grant_union_still_rejects_outside () =
     needs IO.Console
     needs IO.Spawn
     needs IO.FileWrite
-    fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn)) : () do
+    fn main() : () needs IO.Console, IO.Spawn do
       match file_write("/tmp/stage_d_u", "d") do
         Ok(_) -> Authority.ignore(println("ok"))
         Err(_) -> Authority.ignore(println("e"))
@@ -14519,7 +14519,7 @@ let test_main_explicit_foreign_grant_accepted () =
     extern "rt" : Cap(Ffi) do
       fn ffi_id3(x : Int) : Int = "march_test_ffi_id"
     end
-    fn main(cap_console : Cap(IO.Console), cap_foreign : Cap(IO.Foreign)) : () do
+    fn main() : () needs IO.Console, IO.Foreign do
       println(int_to_string(ffi_id3(1)))
       ()
     end
@@ -14534,7 +14534,7 @@ let test_main_foreign_under_console_still_refused () =
     extern "rt" : Cap(Ffi) do
       fn ffi_id4(x : Int) : Int = "march_test_ffi_id"
     end
-    fn main(cap_console : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       println(int_to_string(ffi_id4(1)))
       ()
     end
@@ -15719,7 +15719,7 @@ let test_same_name_type_collision_note () =
     type Thing = MkThing(Int)
     fn make() : Thing do MkThing(5) end
     fn use_inner(t : Inner.Thing) : Int do t.a end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let x = make()
       println(int_to_string(use_inner(x)))
     end
@@ -18585,7 +18585,7 @@ let test_record_field_mismatch_note_polarity () =
   let ctx = typecheck {|mod T do
   needs IO.Console
     fn width({ w: w }) : Int do w end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(width({ w: 8, h: 9 })))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(width({ w: 8, h: 9 })))) end
   end|} in
   let notes =
     List.concat_map (fun (d : March_errors.Errors.diagnostic) -> d.notes)
@@ -19686,7 +19686,7 @@ let node_send_prog body = Printf.sprintf {|mod App do
   needs IO.NetConnect
   needs IO.Mut
 %s
-  fn main(_n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
+  fn main() needs IO.NetConnect, IO.Mut do
     ()
   end
 end
@@ -19739,7 +19739,7 @@ let test_handle_remote_actor () =
       { total: state.total + h.n }
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let _ = spawn(Counter)
     ()
   end
@@ -19851,7 +19851,7 @@ let test_launch_request_cap_param () =
     ("IO.Console", false)
     (launch_request_of {|mod M do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) do println("x") end
+  fn main() needs IO.Console do println("x") end
 end|})
 
 let test_launch_request_module_needs () =
@@ -19869,7 +19869,7 @@ let test_launch_request_union_and_options () =
     ("IO.Console, IO.NetConnect(\"api.x.com\", methods(get), no_redirects)", true)
     (launch_request_of {|mod M do
   needs IO.Console, IO.NetConnect
-  fn main(_c : Cap(IO.Console)) needs IO.NetConnect("api.x.com", methods(get), no_redirects) do println("x") end
+  fn main() needs IO.Console, IO.NetConnect("api.x.com", methods(get), no_redirects) do println("x") end
 end|});
   Alcotest.(check (pair string bool)) "no main, no needs: the empty request"
     ("", false)

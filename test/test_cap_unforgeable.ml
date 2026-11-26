@@ -42,7 +42,7 @@ let test_type_decl_position_counts_as_a_use () =
 
   type Handle = { id : Int, tok : Cap(IO.FileWrite) }
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("declared and used")
   end
 end|} in
@@ -68,7 +68,7 @@ let test_body_annotation_position_counts_as_a_use () =
   needs IO.Console
   needs IO.FileWrite
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let take = fn (w : Cap(IO.FileWrite)) -> 1
     println("declared and used")
   end
@@ -94,7 +94,7 @@ let test_derive_json_over_cap_is_a_desugar_error () =
   needs IO.Console
   type Loot = Loot(Cap(IO))
   derive Json for Loot
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("x")
   end
 end|});
@@ -106,7 +106,7 @@ end|});
   needs IO.Console
   type Loot = Loot(Int)
   derive Json for Loot
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("x")
   end
 end|})
@@ -143,7 +143,7 @@ let test_attenuation_widening_is_rejected () =
     cap_narrow(c)
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("should not typecheck")
   end
 end|} in
@@ -198,7 +198,7 @@ let test_forge_direct_cap_result_with_dispatch_live () =
   type FjdBeta = { fjd_beta : Int }
   derive Json for A
   derive Json for FjdBeta
-  fn main(cap : Cap(IO)) do
+  fn main() needs IO do
     let forged : Cap(IO) = from_json("{}")
     println("forged")
   end
@@ -220,7 +220,7 @@ let test_forge_cap_hidden_in_a_record_field () =
   type A = { a : Int }
   type FjdHolder = { fjd_cap : Cap(IO), fjd_n : Int }
   derive Json for A
-  fn main(cap : Cap(IO)) do
+  fn main() needs IO do
     let h : FjdHolder = from_json("{}")
     println("forged")
   end

@@ -2771,7 +2771,7 @@ let test_fusion_no_fuse_impure () =
       end
     end
 
-    fn main(_cap_console : Cap(IO.Console)) : Int do
+    fn main() : Int needs IO.Console do
       let xs = ICons(1, ICons(2, INil))
       let ys = imap_print(xs, fn x -> x * 2)
       ifold(ys, 0, fn (a, b) -> a + b)
@@ -4687,7 +4687,7 @@ let test_perceus_list_length_then_nth_incrc () =
       n == 1 && first == "hello"
     end
 
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let xs = Cons("hello", Nil)
       let ok = check(xs)
       if ok do println("pass") else println("fail") end
@@ -4777,7 +4777,7 @@ let test_perceus_tuple_param_multi_destruct_no_rc_underflow () =
       end
     end
 
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let pair = ("hello", "world")
       println(process_pairs(pair, 3, 0))
     end
@@ -4856,7 +4856,7 @@ let test_perceus_local_record_field_no_spurious_decrc () =
       String.byte_size(t)
     end
 
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       println(render("hello"))
     end
 
@@ -5274,7 +5274,7 @@ let test_main_cap_io_runs () =
 let test_main_zero_arity_still_runs () =
   let src = {|mod Test do
   needs IO.Console
-    fn main(_cap_console : Cap(IO.Console)) : () do
+    fn main() : () needs IO.Console do
       println("zero-arity main ran")
       ()
     end
@@ -5696,7 +5696,7 @@ let test_default_method_across_files () =
         "mod Alg do\n  interface Sem(a) do\n    fn combine : a -> a -> a\n    fn twice : a -> a do\n      fn x -> combine(x, x)\n    end\n  end\nend\n");
   Out_channel.with_open_bin (Filename.concat dir "run.march") (fun oc ->
       output_string oc
-        "mod Run do\n  needs IO.Console\n  use Alg.*\n  impl Sem(Int) do\n    fn combine(x, y) do x + y end\n  end\n  fn main(_cap : Cap(IO.Console)) do\n    println(int_to_string(twice(21)))\n  end\nend\n");
+        "mod Run do\n  needs IO.Console\n  use Alg.*\n  impl Sem(Int) do\n    fn combine(x, y) do x + y end\n  end\n  fn main() needs IO.Console do\n    println(int_to_string(twice(21)))\n  end\nend\n");
   let exe = Filename.quote (Test_helpers.find_main_exe ()) in
   let sh cmd =
     let out = Filename.concat dir "out.txt" in

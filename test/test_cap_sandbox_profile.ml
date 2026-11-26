@@ -85,7 +85,7 @@ let fixture_src =
 mod SbxDrift do
   needs IO.Console
   needs IO.FileWrite
-  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
+  fn main() needs IO.Console, IO.FileWrite do
     match Authority.must(File.write("/tmp/sbx_drift_out", "d")) do
       Ok(_)  -> println("ok")
       Err(_) -> println("e")
@@ -262,7 +262,7 @@ mod SbxLet do
   needs IO.Console
   needs IO.FileWrite
   let touched = File.write("/tmp/sbx_let_out", "d")
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("hi")
   end
 end
@@ -283,7 +283,7 @@ mod SbxNest do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
+  fn main() needs IO.Console, IO.FileWrite do
     Inner.save()
     println("hi")
   end
@@ -308,7 +308,7 @@ mod SbxImpl do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
+  fn main() needs IO.Console, IO.FileWrite do
     persist(Thing(1))
     println("hi")
   end
@@ -326,7 +326,7 @@ let net_connect_src =
 mod SbxNetConnect do
   needs IO.Console
   needs IO.NetConnect
-  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect)) do
+  fn main() needs IO.Console, IO.NetConnect do
     match Socket.connect("127.0.0.1", 1) do
       Ok(_) -> println("ok")
       Err(_) -> println("e")
@@ -340,7 +340,7 @@ let net_listen_src =
 mod SbxNetListen do
   needs IO.Console
   needs IO.NetListen
-  fn main(_c : Cap(IO.Console), _l : Cap(IO.NetListen)) do
+  fn main() needs IO.Console, IO.NetListen do
     match Socket.listen(0) do
       Ok(_) -> println("ok")
       Err(_) -> println("e")

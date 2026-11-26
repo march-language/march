@@ -54,7 +54,7 @@ let shop_march = {|mod Shop do
     init { n: 0 }
   end
 
-  fn main(c : Cap(IO)) do 0 end
+  fn main() needs IO do 0 end
 end
 |}
 

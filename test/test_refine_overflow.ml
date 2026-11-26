@@ -53,7 +53,7 @@ let tests =
             {|mod E do
   needs IO.Console
   fn negm(x : Int) : Int do x / -1 end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(negm(0 - 4611686018427387903 - 1)))
   end
 end

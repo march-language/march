@@ -19,7 +19,7 @@ let probe_src = {|
 mod ArgvProbe do
   needs IO.Console
   needs IO.Process
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) : () do
+  fn main() : () needs IO.Console, IO.Process do
     println(String.join(Authority.must(System.argv()), ","))
     ()
   end

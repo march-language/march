@@ -108,7 +108,7 @@ let relay = {|
   end
 |}
 
-let wrap body = "mod Main do\n  needs IO\n  needs Session.Live\n" ^ body ^ "\n  fn main(c : Cap(IO)) do () end\nend\n"
+let wrap body = "mod Main do\n  needs IO\n  needs Session.Live\n" ^ body ^ "\n  fn main() needs IO do () end\nend\n"
 
 (* ── shape ─────────────────────────────────────────────────────────────── *)
 
@@ -879,7 +879,7 @@ let replayed = bad "sending twice on one state is a linearity error (replay)" "i
 |}))
 
 let abandoned = bad "registering and never driving the session is a linearity error (abandon)" "was never used" (wrap (stream ^ {|
-  fn go(c : Cap(IO)) do
+  fn go() do
     let s = Authority.must(Session.attach({ register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _f, _h) -> e, close: fn _e -> (), fail: fn (_e, w) -> panic(w), on_cancel: fn (e, _h) -> e, leave: fn (_e, _w) -> (), on_crash: fn (e, _r, _h) -> e, suspend_at_boundary: fn (e, _f, _h) -> e, on_drain: fn (e, _h) -> e }))
     let st = Stream_Prod.register(s, 0)
     ()
@@ -1151,7 +1151,7 @@ let cli_pid_one_arg =
       end
     end
   end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let w = spawn(W)
     let v = spawn(Watcher)
     send(v, Watch(w))
@@ -1183,7 +1183,7 @@ let cli_derive_eq_single_ctor =
   needs IO.Console
   type V = V(Int, Int)
   derive Eq for V
-  fn main(c : Cap(IO.Console)) do println(if V(1, 2) == V(1, 2) do "eq" else "ne" end) end
+  fn main() needs IO.Console do println(if V(1, 2) == V(1, 2) do "eq" else "ne" end) end
 end
 |} in
       Alcotest.(check int) "exit code" 0 rc;
@@ -1719,15 +1719,19 @@ let narrow_count src m f : int =
 
 let session = "Cap(Session.Live)"
 
+(* Ocap phase 7b: a grant is a compile-time limit on the role's code, not a
+   set of `Cap(P)` values.  A granted role's body has the same type as an
+   ungranted one's, every front narrows nothing, and no front takes `Cap(IO)`
+   or the grant. *)
 let granted_body_type =
-  Alcotest.test_case "a granted role's body takes one Cap per `needs` path, in order, before the entry state" `Quick
+  Alcotest.test_case "a granted role's body has the plain two-parameter type; no front takes caps" `Quick
     (fun () ->
        let src = wrap stream_granted in
        Alcotest.(check string) "run_Cons body"
-         (session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> Stream_Cons.S_recv_Msg_Prod_Cons_1 -> Stream_Cons.Yield")
+         (session ^ " -> Stream_Cons.S_recv_Msg_Prod_Cons_1 -> Stream_Cons.Yield")
          (param_ty src "Stream_Run" "run_Cons" "body");
        Alcotest.(check string) "run_Prod body"
-         (session ^ " -> Cap(IO.Console) -> Stream_Prod.S_send_Msg_Prod_Cons_1 -> Stream_Prod.Yield")
+         (session ^ " -> Stream_Prod.S_send_Msg_Prod_Cons_1 -> Stream_Prod.Yield")
          (param_ty src "Stream_Run" "run_Prod" "body");
        (* every front, not only run_ *)
        List.iter
@@ -1735,40 +1739,25 @@ let granted_body_type =
             Alcotest.(check string) (f ^ " body")
               (param_ty src "Stream_Run" "run_Cons" "body") (param_ty src "Stream_Run" f "body"))
          [ "cluster_Cons"; "offer_Cons"; "offer_work_Cons"; "__offer_work_start_Cons"; "initiate_Cons" ];
-       (* the hosted fronts thread the grant through `start` *)
-       Alcotest.(check string) "host_Cons start"
-         (session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> ()") (param_ty src "Stream_Run" "host_Cons" "start");
-       Alcotest.(check string) "host_Cons_or start"
-         (session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> ()") (param_ty src "Stream_Run" "host_Cons_or" "start");
-       Alcotest.(check string) "offer_hosted_Cons start"
-         ("String -> " ^ session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> ()")
-         (param_ty src "Stream_Run" "offer_hosted_Cons" "start");
+       Alcotest.(check string) "host_Cons start" (session ^ " -> ()") (param_ty src "Stream_Run" "host_Cons" "start");
+       Alcotest.(check string) "host_Cons_or start" (session ^ " -> ()") (param_ty src "Stream_Run" "host_Cons_or" "start");
        List.iter (fun f ->
-         Alcotest.(check string) (f ^ " start grants")
-           (param_ty src "Stream_Run" "offer_hosted_Cons" "start")
-           (param_ty src "Stream_Run" f "start"))
-         [ "offer_work_hosted_Cons"; "__offer_work_hosted_start_Cons" ];
-       Alcotest.(check string) "cluster_hosted_Cons start"
-         ("String -> " ^ session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> ()")
-         (param_ty src "Stream_Run" "cluster_hosted_Cons" "start");
-       (* the fronts narrow from `io` once per cap *)
-       Alcotest.(check int) "run_Cons narrows twice" 2 (narrow_count src "Stream_Run" "run_Cons");
-       Alcotest.(check int) "run_Prod narrows once" 1 (narrow_count src "Stream_Run" "run_Prod");
-       Alcotest.(check int) "host_Cons narrows twice" 2 (narrow_count src "Stream_Run" "host_Cons"))
+         Alcotest.(check string) (f ^ " start")
+           ("String -> " ^ session ^ " -> ()") (param_ty src "Stream_Run" f "start"))
+         [ "offer_hosted_Cons"; "offer_work_hosted_Cons"; "__offer_work_hosted_start_Cons"; "cluster_hosted_Cons" ];
+       List.iter (fun f -> Alcotest.(check int) (f ^ " narrows nothing") 0 (narrow_count src "Stream_Run" f))
+         [ "run_Cons"; "run_Prod"; "host_Cons"; "host_Cons_or" ])
 
 let ungranted_body_type_unchanged =
-  Alcotest.test_case "a role with no `needs` line keeps the two-parameter body type and narrows nothing" `Quick
+  Alcotest.test_case "a role with no `needs` line has the same body type as a granted one" `Quick
     (fun () ->
-       let src = wrap stream in
-       Alcotest.(check string) "run_Cons body"
-         (session ^ " -> Stream_Cons.S_recv_Msg_Prod_Cons_1 -> Stream_Cons.Yield")
-         (param_ty src "Stream_Run" "run_Cons" "body");
-       Alcotest.(check string) "host_Cons start" (session ^ " -> ()") (param_ty src "Stream_Run" "host_Cons" "start");
-       Alcotest.(check string) "offer_hosted_Cons start"
-         ("String -> " ^ session ^ " -> ()") (param_ty src "Stream_Run" "offer_hosted_Cons" "start");
-       Alcotest.(check int) "no narrowing" 0 (narrow_count src "Stream_Run" "run_Cons"))
+       let plain = wrap stream and granted = wrap stream_granted in
+       List.iter
+         (fun (f, p) ->
+            Alcotest.(check string) (f ^ " " ^ p) (param_ty granted "Stream_Run" f p) (param_ty plain "Stream_Run" f p))
+         [ ("run_Cons", "body"); ("host_Cons", "start"); ("offer_hosted_Cons", "start"); ("initiate_Cons", "body") ])
 
-(* ── the cluster fronts take what the runner needs, not `Cap(IO)` ─────── *)
+(* ── no front takes a capability value (ocap phase 7b) ─────────────────── *)
 
 (** The parameter names of [f] in generated module [m], in order. *)
 let param_names src m f : string list =
@@ -1780,49 +1769,34 @@ let param_names src m f : string list =
   let fd = List.find_map (function DFn (fd, _) when fd.fn_name.txt = f -> Some fd | _ -> None) decls |> Option.get in
   List.filter_map (function FPNamed pr -> Some pr.param_name.txt | _ -> None) (List.hd fd.fn_clauses).fc_params
 
-(* A front over a running cluster node is given the node, and the node can
-   attach a session itself (`ClusterNode.with_session`), so the front has no
-   use for the root capability.  The role's grant is then the CALLER's to
-   hand over: one parameter per `needs` path, after the node, passed on to the
-   body unchanged.  A front that took `Cap(IO)` and narrowed it made every
-   program that plays a role hold the root capability. *)
+(* A front over a running cluster node is given the node and its own
+   arguments; one with connections of its own, the node id, secret and
+   addresses.  Neither takes the root capability or the role's grant: there
+   are no capability values to take (ocap phase 7b). *)
 let cluster_fronts_take_no_root =
-  Alcotest.test_case "a cluster front takes the node and one Cap per granted path, never Cap(IO)" `Quick
+  Alcotest.test_case "fronts take no Cap(IO) and no grant, granted role or not" `Quick
     (fun () ->
-       let src = wrap stream_granted in
-       let names f = param_names src "Stream_Run" f in
-       let g = [ "io_console"; "io_filewrite" ] in
-       let check f expected = Alcotest.(check (list string)) f expected (names f) in
-       check "cluster_Cons" ([ "node" ] @ g @ [ "session"; "body" ]);
-       check "offer_Cons" ([ "node" ] @ g @ [ "capacity"; "body" ]);
-       check "offer_work_Cons" ([ "node" ] @ g @ [ "capacity"; "body" ]);
-       check "__offer_work_start_Cons" ([ "node" ] @ g @ [ "session"; "abandoned"; "body" ]);
-       check "initiate_Cons" ([ "node" ] @ g @ [ "body" ]);
-       check "offer_hosted_Cons" ([ "node" ] @ g @ [ "capacity"; "host"; "start"; "deliver"; "cancel" ]);
-       check "offer_work_hosted_Cons" ([ "node" ] @ g @ [ "capacity"; "host"; "start"; "deliver"; "cancel" ]);
-       check "__offer_work_hosted_start_Cons"
-         ([ "node" ] @ g @ [ "session"; "abandoned"; "host"; "start"; "deliver"; "cancel" ]);
-       check "cluster_hosted_Cons" ([ "node" ] @ g @ [ "session"; "host"; "start"; "deliver"; "cancel" ]);
-       check "offer_Prod" [ "node"; "io_console"; "capacity"; "body" ];
-       Alcotest.(check string) "the grant parameter's type" "Cap(IO.FileWrite)"
-         (param_ty src "Stream_Run" "offer_Cons" "io_filewrite");
-       (* nothing to narrow from: the caps arrive as given *)
-       List.iter (fun f -> Alcotest.(check int) (f ^ " narrows nothing") 0 (narrow_count src "Stream_Run" f))
-         [ "cluster_Cons"; "offer_Cons"; "offer_work_Cons"; "__offer_work_start_Cons"; "initiate_Cons";
-           "offer_hosted_Cons"; "offer_work_hosted_Cons"; "__offer_work_hosted_start_Cons"; "cluster_hosted_Cons" ];
-       (* a role with no grant: the node and the front's own arguments *)
-       let plain = wrap stream in
-       Alcotest.(check (list string)) "ungranted offer" [ "node"; "capacity"; "body" ]
-         (param_names plain "Stream_Run" "offer_Cons");
-       Alcotest.(check (list string)) "ungranted initiate" [ "node"; "body" ]
-         (param_names plain "Stream_Run" "initiate_Cons");
-       (* the runner with connections of its own still starts from the root *)
-       Alcotest.(check (list string)) "run_Cons" [ "io"; "node_id"; "secret"; "addrs"; "body" ]
-         (names "run_Cons"))
+       let check src f expected =
+         Alcotest.(check (list string)) f expected (param_names src "Stream_Run" f) in
+       List.iter
+         (fun src ->
+            check src "cluster_Cons" [ "node"; "session"; "body" ];
+            check src "offer_Cons" [ "node"; "capacity"; "body" ];
+            check src "offer_work_Cons" [ "node"; "capacity"; "body" ];
+            check src "__offer_work_start_Cons" [ "node"; "session"; "abandoned"; "body" ];
+            check src "initiate_Cons" [ "node"; "body" ];
+            check src "offer_hosted_Cons" [ "node"; "capacity"; "host"; "start"; "deliver"; "cancel" ];
+            check src "offer_work_hosted_Cons" [ "node"; "capacity"; "host"; "start"; "deliver"; "cancel" ];
+            check src "__offer_work_hosted_start_Cons"
+              [ "node"; "session"; "abandoned"; "host"; "start"; "deliver"; "cancel" ];
+            check src "cluster_hosted_Cons" [ "node"; "session"; "host"; "start"; "deliver"; "cancel" ];
+            check src "run_Cons" [ "node_id"; "secret"; "addrs"; "body" ];
+            check src "host_Cons" [ "node_id"; "secret"; "addrs"; "host"; "start"; "deliver" ])
+         [ wrap stream_granted; wrap stream ])
 
-(* Against the real stdlib (`SessionNode` is not in the thin one): a body
-   written with the grant typechecks at the runner, one written without it
-   does not, and the error names the cap the body did not take. *)
+(* Against the real stdlib (`SessionNode` is not in the thin one): a granted
+   role's body written with the plain two-parameter type typechecks at every
+   front; one that still takes the grant as `Cap` parameters does not. *)
 let granted_cli_src = {|
 mod GOk do
   needs IO
@@ -1841,7 +1815,7 @@ mod GOk do
       end
     end
   end
-  pfn cons(s : Cap(Session.Live), con : Cap(IO.Console), fw : Cap(IO.FileWrite), st : Stream_Cons.Entry) : Stream_Cons.Yield do
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.Entry) : Stream_Cons.Yield do
     Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
       println(int_to_string(n))
       Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
@@ -1853,31 +1827,34 @@ mod GOk do
   actor Host do
     state { n : Int }
     init { n: 0 }
-    on Start(s : Cap(Session.Live), con : Cap(IO.Console), fw : Cap(IO.FileWrite)) do state end
+    on Start(s : Cap(Session.Live)) do state end
   end
-  fn main(c : Cap(IO)) do
-    let _ = Stream_Run.run_Cons(c, "n", "s", Stream_Run.addrs_from_env(), fn (s, con, fw, st) -> cons(s, con, fw, st))
-    let _ = Stream_Run.run_Prod(c, "n", "s", Stream_Run.addrs_from_env(), fn (s, st) -> prod(s, st))
+  fn main() needs IO do
+    let _ = Stream_Run.run_Cons("n", "s", Stream_Run.addrs_from_env(), fn (s, st) -> cons(s, st))
+    let _ = Stream_Run.run_Prod("n", "s", Stream_Run.addrs_from_env(), fn (s, st) -> prod(s, st))
     let h = spawn(Host)
-    let _ = Stream_Run.host_Cons(c, "n", "s", Stream_Run.addrs_from_env(), h,
-      fn (s, con, fw) -> do let _ = send(h, Start(s, con, fw)) () end, fn (_s, _f, _m, _e) -> ())
+    let _ = Stream_Run.host_Cons("n", "s", Stream_Run.addrs_from_env(), h,
+      fn s -> do let _ = send(h, Start(s)) () end, fn (_s, _f, _m, _e) -> ())
     ()
   end
 end
 |}
 
 let cli_granted_body_ok =
-  Alcotest.test_case "CLI: a body taking the granted caps typechecks at run_/host_" `Quick (fun () ->
+  Alcotest.test_case "CLI: a granted role's two-parameter body typechecks at run_/host_" `Quick (fun () ->
       let rc, out = check_cli granted_cli_src in
       Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc)
 
 let cli_granted_body_missing_caps =
-  Alcotest.test_case "CLI: a body without the granted caps is refused at the runner" `Quick (fun () ->
-      let src = replace_all ~needle:"fn (s, con, fw, st) -> cons(s, con, fw, st)" ~by:"fn (s, st) -> prod(s, st)" granted_cli_src in
+  Alcotest.test_case "CLI: a body still taking the grant as Cap parameters is refused" `Quick (fun () ->
+      let src = replace_all ~needle:"fn (s, st) -> cons(s, st)"
+          ~by:"fn (s, st) -> cons(s, st)" granted_cli_src in
+      let src = replace_all ~needle:"pfn cons(s : Cap(Session.Live), st"
+          ~by:"pfn cons(s : Cap(Session.Live), st" src in
       let rc, out = check_cli src in
       Alcotest.(check int) "exit code" 1 rc;
-      Alcotest.(check bool) ("names the cap (output: " ^ out ^ ")") true
-        (contains_text out "got `Cap(IO.Console)`"))
+      Alcotest.(check bool) ("the retired parameter and the arity (output: " ^ out ^ ")") true
+        (contains_text out "cap_param_retired" && contains_text out "arity"))
 
 (* ── check_role_grants: the walk from each runner callback ────────────── *)
 
@@ -1906,13 +1883,13 @@ mod GBad do
     let _ = File.write("/tmp/n", int_to_string(n))
     ()
   end
-  pfn cons(s : Cap(Session.Live), con : Cap(IO.Console), st : Stream_Cons.Entry) : Stream_Cons.Yield do
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.Entry) : Stream_Cons.Yield do
     Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
       save(n)
       Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
   end
-  fn main(c : Cap(IO)) do
-    let _ = Stream_Run.run_Cons(c, "n", "s", Stream_Run.addrs_from_env(), fn (s, con, st) -> cons(s, con, st))
+  fn main() needs IO do
+    let _ = Stream_Run.run_Cons("n", "s", Stream_Run.addrs_from_env(), fn (s, st) -> cons(s, st))
     ()
   end
 end
@@ -1930,7 +1907,7 @@ let cli_role_grant_violation =
             direct builtin call
             (specs/todos/2026-11-17-ocap-merged-needs-report-at-entry-points.md;
             test/errors/role_grant_exceeded_1 pins the span trace). *)
-         (contains_text out "Role `Stream.Cons` is granted `Cap(IO.Console)`"
+         (contains_text out "Role `Stream.Cons` is granted `IO.Console`"
           && contains_text out
                "reaches `IO.FileWrite` (reached from the body: body → cons → save)"))
 
@@ -1945,33 +1922,32 @@ let cli_role_grant_cluster_fronts =
     (fun () ->
        let with_call call =
          let src = replace_all ~needle:"  needs Session.Live\n" ~by:"  needs Session.Live\n  needs ClusterNode.Live\n  needs IO.Spawn\n" violation_src in
-         let src = replace_all ~needle:"  fn main(c : Cap(IO)) do\n"
-             ~by:"  actor Host do\n    state { n : Int }\n    init { n: 0 }\n    on Ping() do state end\n  end\n  fn main(c : Cap(IO)) do\n    let node = Authority.must(ClusterNode.attach(ClusterNode.ops_stub(\"n\")))\n    let h = spawn(Host)\n" src in
+         let src = replace_all ~needle:"  fn main() needs IO do\n"
+             ~by:"  actor Host do\n    state { n : Int }\n    init { n: 0 }\n    on Ping() do state end\n  end\n  fn main() needs IO do\n    let node = Authority.must(ClusterNode.attach(ClusterNode.ops_stub(\"n\")))\n    let h = spawn(Host)\n" src in
          replace_all
-           ~needle:"Stream_Run.run_Cons(c, \"n\", \"s\", Stream_Run.addrs_from_env(), fn (s, con, st) -> cons(s, con, st))"
+           ~needle:"Stream_Run.run_Cons(\"n\", \"s\", Stream_Run.addrs_from_env(), fn (s, st) -> cons(s, st))"
            ~by:call src
        in
-       let body = "fn (s, con, st) -> cons(s, con, st)" in
-       let hosted = "h, fn (_sid, _s, _con) -> save(1), fn (_sid, _s, _f, _m, _e) -> (), fn (_sid, _s, _r, _w, _e) -> ()" in
+       let body = "fn (s, st) -> cons(s, st)" in
+       let hosted = "h, fn (_sid, _s) -> save(1), fn (_sid, _s, _f, _m, _e) -> (), fn (_sid, _s, _r, _w, _e) -> ()" in
        List.iter
          (fun (front, call) ->
             let rc, out = check_cli (with_call call) in
             Alcotest.(check int) (front ^ ": exit code (output: " ^ out ^ ")") 1 rc;
             Alcotest.(check bool) (front ^ ": names the grant (output: " ^ out ^ ")") true
-              (contains_text out "is granted `Cap(IO.Console)` (`role Cons needs IO.Console`)");
-            (* widening the grant here is three edits, not two: the call
-               takes the grant as arguments, and the help says so *)
-            Alcotest.(check bool) (front ^ ": the help names the call's new argument (output: " ^ out ^ ")") true
-              (contains_text out "so it gains an argument: a `Cap(IO.FileWrite)`"))
-         [ ("cluster_", "Stream_Run.cluster_Cons(node, cap_narrow(c), \"sid\", " ^ body ^ ")");
-           ("offer_", "Stream_Run.offer_Cons(node, cap_narrow(c), 4, " ^ body ^ ")");
-           ("initiate_", "Stream_Run.initiate_Cons(node, cap_narrow(c), " ^ body ^ ")");
-           ("offer_hosted_", "Stream_Run.offer_hosted_Cons(node, cap_narrow(c), 4, " ^ hosted ^ ")");
-           ("cluster_hosted_", "Stream_Run.cluster_hosted_Cons(node, cap_narrow(c), \"sid\", " ^ hosted ^ ")") ])
+              (contains_text out "is granted `IO.Console` (`role Cons needs IO.Console`)");
+            (* since ocap phase 7b widening the grant line is the whole edit *)
+            Alcotest.(check bool) (front ^ ": the help is the grant line alone (output: " ^ out ^ ")") true
+              (contains_text out "`role Cons needs IO.Console, IO.FileWrite`. Or remove the use."))
+         [ ("cluster_", "Stream_Run.cluster_Cons(node, \"sid\", " ^ body ^ ")");
+           ("offer_", "Stream_Run.offer_Cons(node, 4, " ^ body ^ ")");
+           ("initiate_", "Stream_Run.initiate_Cons(node, " ^ body ^ ")");
+           ("offer_hosted_", "Stream_Run.offer_hosted_Cons(node, 4, " ^ hosted ^ ")");
+           ("cluster_hosted_", "Stream_Run.cluster_hosted_Cons(node, \"sid\", " ^ hosted ^ ")") ])
 
 let cli_role_grant_named_body =
   Alcotest.test_case "CLI: a named function passed as the body is walked too" `Quick (fun () ->
-      let src = replace_all ~needle:"fn (s, con, st) -> cons(s, con, st)" ~by:"cons" violation_src in
+      let src = replace_all ~needle:"fn (s, st) -> cons(s, st)" ~by:"cons" violation_src in
       let rc, out = check_cli src in
       Alcotest.(check int) "exit code" 1 rc;
       Alcotest.(check bool) ("chain through cons (output: " ^ out ^ ")") true
@@ -1982,8 +1958,8 @@ let cli_role_grant_widened_ok =
       let src = replace_all ~needle:"role Cons needs IO.Console
 " ~by:"role Cons needs IO.Console, IO.FileWrite
 " violation_src in
-      let src = replace_all ~needle:"con : Cap(IO.Console), st" ~by:"con : Cap(IO.Console), fw : Cap(IO.FileWrite), st" src in
-      let src = replace_all ~needle:"fn (s, con, st) -> cons(s, con, st)" ~by:"fn (s, con, fw, st) -> cons(s, con, fw, st)" src in
+      let src = replace_all ~needle:"st" ~by:"st" src in
+      let src = replace_all ~needle:"fn (s, st) -> cons(s, st)" ~by:"fn (s, st) -> cons(s, st)" src in
       let rc, out = check_cli src in
       Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc)
 
@@ -2006,13 +1982,13 @@ mod GWide do
       end
     end
   end
-  fn main(c : Cap(IO.Console)) do () end
+  fn main() needs IO.Console do () end
 end
 |} in
       let rc, out = check_cli src in
       Alcotest.(check int) "exit code" 1 rc;
       Alcotest.(check bool) ("names main's grant (output: " ^ out ^ ")") true
-        (contains_text out "`role Cons needs IO.FileWrite` is wider than `main`'s grant, which is `Cap(IO.Console)`"))
+        (contains_text out "`role Cons needs IO.FileWrite` is wider than `main`'s grant, which is `needs IO.Console`"))
 
 (* A hosted role: `start` is charged, and so is the actor behind `host`
    when it is spawned in the same function. *)
@@ -2039,14 +2015,14 @@ mod GHost do
   actor Host do
     state { n : Int }
     init { n: 0 }
-    on Start(s : Cap(Session.Live), con : Cap(IO.Console)) do
+    on Start(s : Cap(Session.Live)) do
       let _ = File.write("/tmp/n", "0")
       state
     end
   end
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let h = spawn(Host)
-    let _ = Stream_Run.host_Cons(c, "n", "s", Stream_Run.addrs_from_env(), h,
+    let _ = Stream_Run.host_Cons("n", "s", Stream_Run.addrs_from_env(), h,
       fn (s, con) -> do let _ = send(h, Start(s, con)) () end, fn (_s, _f, _m, _e) -> ())
     ()
   end
@@ -2063,8 +2039,8 @@ let cli_dump_role_authority =
       let src = replace_all ~needle:"role Cons needs IO.Console
 " ~by:"role Cons needs IO.Console, IO.FileWrite
 " violation_src in
-      let src = replace_all ~needle:"con : Cap(IO.Console), st" ~by:"con : Cap(IO.Console), fw : Cap(IO.FileWrite), st" src in
-      let src = replace_all ~needle:"fn (s, con, st) -> cons(s, con, st)" ~by:"fn (s, con, fw, st) -> cons(s, con, fw, st)" src in
+      let src = replace_all ~needle:"st" ~by:"st" src in
+      let src = replace_all ~needle:"fn (s, st) -> cons(s, st)" ~by:"fn (s, st) -> cons(s, st)" src in
       let rc, out = check_cli ~flags:"--dump-role-authority" src in
       Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc;
       List.iter
@@ -2106,12 +2082,12 @@ mod GLet do
     let _ = File.delete("/tmp/n" ++ int_to_string(n))
     ()
   end
-  fn main(c : Cap(IO)) do
-    let body = fn (s, nc, st) ->
+  fn main() needs IO do
+    let body = fn (s, st) ->
       Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
         wipe(n)
         Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
-    let _ = Stream_Run.run_Cons(c, "n", "s", Stream_Run.addrs_from_env(), body)
+    let _ = Stream_Run.run_Cons("n", "s", Stream_Run.addrs_from_env(), body)
     ()
   end
 end
@@ -2123,7 +2099,7 @@ let cli_role_grant_let_bound_body =
        let rc, out = check_cli let_bound_src in
        Alcotest.(check int) "exit code" 1 rc;
        Alcotest.(check bool) ("names the grant, the cap and the chain (output: " ^ out ^ ")") true
-         (contains_text out "Role `Stream.Cons` is granted `Cap(IO.NetConnect)`"
+         (contains_text out "Role `Stream.Cons` is granted `IO.NetConnect`"
           && contains_text out "the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite`"
           && contains_text out "body → wipe"))
 
@@ -2131,19 +2107,19 @@ let cli_role_grant_let_bound_body =
    is the lambda `main` passes at the call site. *)
 let cli_role_grant_parameter_body =
   Alcotest.test_case "CLI: a body passed through a parameter is resolved at the call site" `Quick (fun () ->
-      let src = replace_all ~needle:{|  fn main(c : Cap(IO)) do
-    let body = fn (s, nc, st) ->
+      let src = replace_all ~needle:{|  fn main() needs IO do
+    let body = fn (s, st) ->
       Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
         wipe(n)
         Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
-    let _ = Stream_Run.run_Cons(c, "n", "s", Stream_Run.addrs_from_env(), body)
+    let _ = Stream_Run.run_Cons("n", "s", Stream_Run.addrs_from_env(), body)
     ()
-  end|} ~by:{|  pfn go(c : Cap(IO), b) do
-    let _ = Stream_Run.run_Cons(c, "n", "s", Stream_Run.addrs_from_env(), b)
+  end|} ~by:{|  pfn go(b) do
+    let _ = Stream_Run.run_Cons("n", "s", Stream_Run.addrs_from_env(), b)
     ()
   end
-  fn main(c : Cap(IO)) do
-    go(c, fn (s, nc, st) ->
+  fn main() needs IO do
+    go(fn (s, st) ->
       Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
         wipe(n)
         Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))))
@@ -2155,7 +2131,7 @@ let cli_role_grant_parameter_body =
 
 (* [violation_src] with the receive written INLINE in `main`'s lambda, so a
    local of `main` is in scope where `save` is called. *)
-let violation_inline_src = replace_all ~needle:"fn (s, con, st) -> cons(s, con, st)" ~by:{|fn (s, con, st) ->
+let violation_inline_src = replace_all ~needle:"fn (s, st) -> cons(s, st)" ~by:{|fn (s, st) ->
       Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
         save(n)
         Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))|} violation_src
@@ -2163,8 +2139,8 @@ let violation_inline_src = replace_all ~needle:"fn (s, con, st) -> cons(s, con, 
 (* `let sv = save` in `main`: the alias resolves to the named function. *)
 let cli_role_grant_aliased_fn =
   Alcotest.test_case "CLI: a body calling a `let`-aliased function is charged the function" `Quick (fun () ->
-      let src = replace_all ~needle:"fn main(c : Cap(IO)) do
-" ~by:"fn main(c : Cap(IO)) do
+      let src = replace_all ~needle:"fn main() needs IO do
+" ~by:"fn main() needs IO do
     let sv = save
 " violation_inline_src in
       let src = replace_all ~needle:"        save(n)
@@ -2179,8 +2155,8 @@ let cli_role_grant_aliased_fn =
    part of the body's code (plan section 2), so it is charged, and the chain
    names it by its local name. *)
 let local_closure_src =
-  let src = replace_all ~needle:"fn main(c : Cap(IO)) do
-" ~by:"fn main(c : Cap(IO)) do
+  let src = replace_all ~needle:"fn main() needs IO do
+" ~by:"fn main() needs IO do
     let sv = fn n -> save(n)
 " violation_inline_src in
   replace_all ~needle:"        save(n)
@@ -2197,14 +2173,14 @@ let cli_role_grant_local_closure =
 (* A body BUILT by a call is bounded by what the callee reaches. *)
 let cli_role_grant_call_built_body =
   Alcotest.test_case "CLI: a body returned by a function is charged that function's reach" `Quick (fun () ->
-      let src = replace_all ~needle:"fn main(c : Cap(IO)) do
-    let _ = Stream_Run.run_Cons(c, \"n\", \"s\", Stream_Run.addrs_from_env(), fn (s, con, st) -> cons(s, con, st))
+      let src = replace_all ~needle:"fn main() needs IO do
+    let _ = Stream_Run.run_Cons(\"n\", \"s\", Stream_Run.addrs_from_env(), fn (s, st) -> cons(s, st))
 " ~by:"pfn pick() do
-    fn (s, con, st) -> cons(s, con, st)
+    fn (s, st) -> cons(s, st)
   end
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let b = pick()
-    let _ = Stream_Run.run_Cons(c, \"n\", \"s\", Stream_Run.addrs_from_env(), b)
+    let _ = Stream_Run.run_Cons(\"n\", \"s\", Stream_Run.addrs_from_env(), b)
 " violation_src in
       let rc, out = check_cli src in
       Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 1 rc;
@@ -2216,7 +2192,7 @@ let cli_role_grant_call_built_body =
    left every other case green. *)
 let cli_role_grant_direct_builtin =
   Alcotest.test_case "CLI: a body lambda calling a capability builtin directly is refused" `Quick (fun () ->
-      let src = replace_all ~needle:"fn (s, con, st) -> cons(s, con, st)" ~by:{|fn (s, con, st) ->
+      let src = replace_all ~needle:"fn (s, st) -> cons(s, st)" ~by:{|fn (s, st) ->
       Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
         let _ = File.write("/tmp/n", int_to_string(n))
         Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))|} violation_src in
@@ -2231,12 +2207,12 @@ let cli_role_grant_direct_builtin =
 let cli_role_grant_unresolvable_body_warns =
   Alcotest.test_case "CLI: a body read from a data structure is reported as not statically known, not passed silently" `Quick
     (fun () ->
-       let src = replace_all ~needle:"fn main(c : Cap(IO)) do
-    let _ = Stream_Run.run_Cons(c, \"n\", \"s\", Stream_Run.addrs_from_env(), fn (s, con, st) -> cons(s, con, st))
-" ~by:"type Cfg = { body : (Cap(Session.Live)) -> (Cap(IO.Console)) -> (Stream_Cons.Entry) -> Stream_Cons.Yield }
-  fn main(c : Cap(IO)) do
-    let cfg = { body: fn (s, con, st) -> cons(s, con, st) }
-    let _ = Stream_Run.run_Cons(c, \"n\", \"s\", Stream_Run.addrs_from_env(), cfg.body)
+       let src = replace_all ~needle:"fn main() needs IO do
+    let _ = Stream_Run.run_Cons(\"n\", \"s\", Stream_Run.addrs_from_env(), fn (s, st) -> cons(s, st))
+" ~by:"type Cfg = { body : (Cap(Session.Live)) -> (Stream_Cons.Entry) -> Stream_Cons.Yield }
+  fn main() needs IO do
+    let cfg = { body: fn (s, st) -> cons(s, st) }
+    let _ = Stream_Run.run_Cons(\"n\", \"s\", Stream_Run.addrs_from_env(), cfg.body)
 " violation_src in
        let rc, out = check_cli src in
        Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc;
@@ -2245,22 +2221,21 @@ let cli_role_grant_unresolvable_body_warns =
           && contains_text out "value not statically known"
           && not (contains_text out "reaches `IO.FileWrite`")))
 
-(* D34: the grant is the body's own type.  A named body whose Cap parameter
-   is a DIFFERENT capability than the role's line cannot reach the runner:
-   the type refuses it before the walk runs. *)
+(* Ocap phase 7b retired D34 (the grant as the body's own type): a named
+   body that still takes a `Cap` parameter is refused as a retired
+   parameter, and the call that passes it does not match the body type. *)
 let cli_role_grant_wrong_cap_type =
-  Alcotest.test_case "CLI: a body typed with a cap other than the role's grant does not typecheck at the runner" `Quick
+  Alcotest.test_case "CLI: a named body that still takes a Cap parameter is refused" `Quick
     (fun () ->
-       let src = replace_all ~needle:"con : Cap(IO.Console), st" ~by:"fw : Cap(IO.FileWrite), st" violation_src in
-       let src = replace_all ~needle:"fn (s, con, st) -> cons(s, con, st)" ~by:"cons" src in
+       let src = replace_all ~needle:"pfn cons(s : Cap(Session.Live), st"
+           ~by:"pfn cons(s : Cap(Session.Live), fw : Cap(IO.FileWrite), st" violation_src in
+       let src = replace_all ~needle:"fn (s, st) -> cons(s, st)" ~by:"cons" src in
        let src = replace_all ~needle:"      save(n)
 " ~by:"" src in
        let rc, out = check_cli src in
        Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 1 rc;
-       Alcotest.(check bool) ("the type names both caps, and the walk adds nothing (output: " ^ out ^ ")") true
-         (contains_text out "Cap(IO.Console)" && contains_text out "Cap(IO.FileWrite)"
-          && contains_text out "expected `IO.Console`"
-          && not (contains_text out "Role `Stream.Cons` is granted")))
+       Alcotest.(check bool) ("the retired parameter (output: " ^ out ^ ")") true
+         (contains_text out "`cons` takes a `Cap(IO.FileWrite)` parameter"))
 
 (* Review finding 2026-09-24-dd-review-role-authority-report-omits-local-closures:
    the report lists the local closures the body captures and the pids it
@@ -2270,8 +2245,6 @@ let cli_dump_role_authority_local_closures =
       let src = replace_all ~needle:"role Cons needs IO.Console
 " ~by:"role Cons needs IO.Console, IO.FileWrite
 " local_closure_src in
-      let src = replace_all ~needle:"con : Cap(IO.Console), st" ~by:"con : Cap(IO.Console), fw : Cap(IO.FileWrite), st" src in
-      let src = replace_all ~needle:"fn (s, con, st) ->" ~by:"fn (s, con, fw, st) ->" src in
       let src = replace_all ~needle:"        sv(n)
 " ~by:"        let _ = send(h, Tick())
         sv(n)
@@ -2280,7 +2253,7 @@ let cli_dump_role_authority_local_closures =
 " ~by:"    let sv = fn n -> save(n)
     let h = spawn(Keeper)
 " src in
-      let src = replace_all ~needle:"  fn main(c : Cap(IO)) do
+      let src = replace_all ~needle:"  fn main() needs IO do
 " ~by:"  actor Keeper do
     state { n : Int }
     init { n: 0 }
@@ -2289,7 +2262,7 @@ let cli_dump_role_authority_local_closures =
       state
     end
   end
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
 " src in
       let rc, out = check_cli ~flags:"--dump-role-authority" src in
       Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc;
@@ -2321,7 +2294,7 @@ mod GNonIO do
       end
     end
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end
 |} in
            let rc, out = check_cli (replace_all ~needle:"CAP" ~by:cap src) in
@@ -2358,7 +2331,7 @@ mod FP do
       end
     end
   end
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println(Stream_Msg.fingerprint())
   end
 end
@@ -2398,13 +2371,17 @@ let peers_shape =
            "Expect_Msg_L_I_2"; "Send_Msg_I_C_1"; "Send_Msg_I_L_1" ]
          (Option.get (variant_ctors lsrc "Logging_I" "Step")))
 
+(* Ocap phase 7b: a granted role's script and chaos peers take no `Cap`
+   parameters either; they are ordinary bodies of the role's type. *)
 let granted_peers_take_the_caps =
-  Alcotest.test_case "a granted role's script and chaos take its Cap parameters after the session" `Quick
+  Alcotest.test_case "a granted role's script and chaos take no Cap parameters" `Quick
     (fun () ->
-       let src = wrap stream_granted in
-       Alcotest.(check string) "script cap 1" "Cap(IO.Console)" (param_ty src "Stream_Cons" "script" "_cap1");
-       Alcotest.(check string) "script cap 2" "Cap(IO.FileWrite)" (param_ty src "Stream_Cons" "script" "_cap2");
-       Alcotest.(check string) "chaos cap 1" "Cap(IO.Console)" (param_ty src "Stream_Cons" "chaos" "_cap1"))
+       let src = wrap stream_granted and plain = wrap stream in
+       Alcotest.(check (list string)) "script" (param_names plain "Stream_Cons" "script")
+         (param_names src "Stream_Cons" "script");
+       Alcotest.(check (list string)) "chaos" (param_names plain "Stream_Cons" "chaos")
+         (param_names src "Stream_Cons" "chaos");
+       Alcotest.(check (list string)) "script params" [ "s"; "st"; "steps" ] (param_names src "Stream_Cons" "script"))
 
 (* The rule for user payload types: the chaos peer takes one
    `Gen.Generator(T)` per distinct non-builtin type the role SENDS, in order
@@ -2450,7 +2427,7 @@ mod Mismatch do
       end
     end
   end
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let t = Session.in_process()
     let s = Authority.must(Session.attach(t.ops))
     let _ = Stream_Cons.script(s, Stream_Cons.register(s, 0), [ Stream_Cons.Choose_more(true) ])
@@ -2477,7 +2454,7 @@ mod Short do
   protocol Ping do
     A -> B : Int
   end
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let t = Session.in_process()
     let s = Authority.must(Session.attach(t.ops))
     let _ = Ping_B.script(s, Ping_B.register(s, 0), [ Ping_B.Expect_Msg_A_B_1(fn _ -> ()) ])
@@ -2715,7 +2692,7 @@ let shared_bystander_native =
       println(int_to_string(n))
       Three_C.close(s, next))
   end
-  fn main(io : Cap(IO)) do
+  fn main() needs IO do
     let t = Session.in_process()
     let s = Authority.must(Session.attach(t.ops))
     let _ = c(s, Three_C.register(s, 0))

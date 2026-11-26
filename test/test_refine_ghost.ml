@@ -149,7 +149,7 @@ let accepts =
     Alcotest.test_case "a user `member` with ghost parameters next to List.member" `Quick (fun () ->
         let out =
           U.run ~args:""
-            "mod R do\n  needs IO.Console\n  fn member(x : Int, ghost s : Int) : Int do x end\n  fn main(cap : Cap(IO.Console)) do\n    let a = if List.member([1, 2], 2) do member(7, 0) else 0 end\n    println(int_to_string(a))\n  end\nend\n"
+            "mod R do\n  needs IO.Console\n  fn member(x : Int, ghost s : Int) : Int do x end\n  fn main() needs IO.Console do\n    let a = if List.member([1, 2], 2) do member(7, 0) else 0 end\n    println(int_to_string(a))\n  end\nend\n"
         in
         if not (printed out "7") then Alcotest.failf "expected 7:\n%s" out);
     (* A bare ghost call resolves only in its own file, so a wildcard
@@ -170,7 +170,7 @@ let accepts =
     Alcotest.test_case "qualified call into a nested module runs" `Quick (fun () ->
         let out =
           U.run ~args:""
-            "mod Q do\n  needs IO.Console\n  mod Inner do\n    fn bump(ghost b : Int, x : {Int | _ == b}) : {Int | _ == b + 1} do x + 1 end\n  end\n  fn main(cap : Cap(IO.Console)) do\n    let a = 1\n    println(int_to_string(Inner.bump(a, a)))\n  end\nend\n"
+            "mod Q do\n  needs IO.Console\n  mod Inner do\n    fn bump(ghost b : Int, x : {Int | _ == b}) : {Int | _ == b + 1} do x + 1 end\n  end\n  fn main() needs IO.Console do\n    let a = 1\n    println(int_to_string(Inner.bump(a, a)))\n  end\nend\n"
         in
         if not (printed out "2") then Alcotest.failf "expected 2:\n%s" out);
     Alcotest.test_case "formatter keeps the keyword" `Quick (fun () ->

@@ -68,7 +68,7 @@ let warn_src = {|mod B7Warn do
     [n, n + 1]
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(List.length(build(3))))
   end
 end
@@ -124,7 +124,7 @@ let run_out dir =
 let main_src = {|mod Main do
   needs IO.Console
   import Helpers
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(Helpers.twice(21)))
   end
 end
@@ -242,7 +242,7 @@ let test_libprobe_in_cas_key () =
   write_file (Filename.concat dir "m.march")
     {|mod M do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println("hi")
     ()
   end
@@ -281,7 +281,7 @@ end
 let panic_src = {|mod B7Panic do
   needs IO.Console
   fn f(n : Int) : Int do if n > 0 do panic("boom") else 1 end end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(f(3)))
   end
 end

@@ -11,7 +11,7 @@ let src = {|mod ScopeFixture do
   fn show_build(r : Result(Scope, ScopeError)) do
     println(show(r))
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let a = Scope.literal("IO.Console")
     let b = Scope.literal("IO.FileRead(\"/srv/\")")
     let none = Scope.literal("()")

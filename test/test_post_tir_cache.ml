@@ -28,7 +28,7 @@ let compiler_exe =
 let src = {|mod PostTirCacheProbe do
   needs IO.Console
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println("post-tir " ++ int_to_string(6 * 7))
     ()
   end
@@ -126,7 +126,7 @@ let test_comment_edit_hit_skips_emit_and_clang () =
 let marker_src ~name ~needs = Printf.sprintf {|mod %s do
   needs %s
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println("markers")
     ()
   end

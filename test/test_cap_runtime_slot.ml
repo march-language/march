@@ -107,7 +107,7 @@ let slot_src = {|mod CapSlotFixture do
   fn raw() : Int do
     cap_check_raw("IO.Console", "")
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let before = raw()
     let s0 = cap_save()
     let old = cap_push(Authority.Layer(ByFnNeeds("f"), "IO.Console", Nil))
@@ -134,7 +134,7 @@ let test_slot () =
 
 let grant_src = {|mod CapGrantFixture do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("\"" ++ cap_grant_text() ++ "\"")
   end
 end
@@ -161,7 +161,7 @@ let leak_src = {|mod CapSlotLeak do
       spin(n - 1 + r - 1)
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     spin(10)
     let before = live_allocs()
     spin(1000)
@@ -203,7 +203,7 @@ let drop_src = {|mod CapSlotDrop do
       spin(b - 3)
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     spin(10)
     let before = live_allocs()
     spin(1000)
@@ -254,7 +254,7 @@ let unwind_adopt_src = {|mod CapUnwindAdopt do
       under(act, n - 1, acc + c + depth - 1)
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let act = fn _ -> boom(1)
     let caught = bare(act, 200, 0) + under(act, 200, 0)
     println("caught " ++ int_to_string(caught))
@@ -344,7 +344,7 @@ let unwind_exact_src = {|mod CapUnwindExact do
       "under a frame leaves " ++ int_to_string(c - b) ++ ", bare " ++ int_to_string(b - a) end))
     warm + x + y
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = measure("one frame", fn _ -> one(1))
       + measure("two frames", fn _ -> two(1))
       + measure("entered twice", fn _ -> again(1))
@@ -377,7 +377,7 @@ let enter_same_src = {|mod CapEnterSame do
     Cons(x, rest) -> int_to_string(x) ++ " " ++ show(rest)
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let s0 = cap_save()
     let e0 = cap_enter(s0)
     let a = n()
@@ -458,7 +458,7 @@ let fast_leak_src = {|mod CapFastLeak do
       spin(n - 1 + d, h)
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let h = compose(fn x -> x + 1, fn x -> x * 2)
     spin(10, h)
     let before = live_allocs()
@@ -643,7 +643,7 @@ let handle_unwind_src = {|mod HandleUnwind do
     _ -> "still bound"
     end
   end
-  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetListen)) do
+  fn main() needs IO.Console, IO.NetListen do
     match Socket.listen(0) do
     Ok(Ok(l)) ->
       let port = match Socket.local_port(l) do

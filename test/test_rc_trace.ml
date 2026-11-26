@@ -99,7 +99,7 @@ let small_src =
   "mod Rt do\n\
   \  needs IO.Console\n\
   \  pfn greet(n : Int) : String do \"n=\" ++ int_to_string(n) end\n\
-  \  fn main(_cap : Cap(IO.Console)) : Unit do Authority.ignore(println(greet(3))) end\n\
+  \  fn main() : Unit needs IO.Console do Authority.ignore(println(greet(3))) end\n\
    end\n"
 
 let emit_llvm ~env src =
@@ -194,7 +194,7 @@ let clean_src =
   \      churn(n - 1, acc + String.byte_size(s))\n\
   \    end\n\
   \  end\n\
-  \  fn main(_cap : Cap(IO.Console)) : Unit do\n\
+  \  fn main() : Unit needs IO.Console do\n\
   \    println(\"total: \" ++ int_to_string(churn(200, 0)))\n\
   \    ()\n\
   \  end\n\
@@ -226,7 +226,7 @@ let discarded_ok_src =
   "mod Discard do\n\
   \  needs IO.Console\n\
   \  pfn pick(n : Int) : Int do n * 2 end\n\
-  \  fn main(_cap : Cap(IO.Console)) : () do\n\
+  \  fn main() : () needs IO.Console do\n\
   \    match pick(1) do\n\
   \      2 -> println(\"two\")\n\
   \      _ -> println(\"other\")\n\

@@ -61,7 +61,7 @@ let program ?(a_needs = {|needs IO.NetConnect("example.com")|}) ?(extra = "")
 %s
   end
 %s
-  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Console do
     println(%s)
   end
 end
@@ -220,7 +220,7 @@ let test_two_modules_two_hosts () =
       %s
     end
   end
-  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Console do
     println(A.go() ++ B.go())
   end
 end
@@ -374,7 +374,7 @@ let test_prelude_named_entry_fn_checked () =
       Err(_) -> "err"
     end
   end
-  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Console do
     println(inspect("https://example.com/"))
   end
 end
@@ -464,7 +464,7 @@ let test_actor_glue_names_not_leaked () =
     end
   end
 
-  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.NetConnect, IO.Console, IO.Spawn do
     let _p = spawn(F.Fetcher)
     println("x")
   end
@@ -501,7 +501,7 @@ let test_impl_method_name_not_leaked () =
     fn go(u : String) : String do Fetch.fetch(T(u)) end
   end
 
-  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Console do
     println(B.go("q"))
   end
 end
@@ -537,7 +537,7 @@ let test_same_short_name_modules_each_own_scope () =
     end
   end
 
-  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Console do
     println(P1.Inner.go())
     println(Inner.go())
   end
@@ -569,7 +569,7 @@ end
     end
   end
 
-  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Console do
     println(P1.Inner.go())
     println(Inner.go())
   end
@@ -601,7 +601,7 @@ end
     end
   end
 
-  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Console do
     println(P1.Inner.go())
     println(Inner.go())
   end

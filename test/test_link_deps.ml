@@ -52,7 +52,7 @@ let programs = [
   "hello",
   {|mod Hello do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println("hi")
     ()
   end
@@ -63,7 +63,7 @@ end
   {|mod Tlsp do
   needs IO.Console
   needs IO.NetConnect.TLS
-  fn main(_c : Cap(IO.Console), _t : Cap(IO.NetConnect.TLS)) : Unit do
+  fn main() : Unit needs IO.Console, IO.NetConnect.TLS do
     match Authority.must(Tls.client_ctx(Tls.default_client_config())) do
       Ok(_) -> Authority.ignore(println("tls ctx ok"))
       Err(e) -> Authority.ignore(println("tls err " ++ Tls.error_to_string(e)))
@@ -75,7 +75,7 @@ end
   "gz",
   {|mod Gz do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     match Compress.Gzip.encode(Bytes.from_string("hello hello")) do
       Ok(z) -> match Compress.Gzip.decode(z) do
         Ok(x) -> Authority.ignore(println("gz " ++ Bytes.to_string(x)))
@@ -90,7 +90,7 @@ end
   "zs",
   {|mod Zs do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     match Compress.Zstd.encode(Bytes.from_string("zstd zstd")) do
       Ok(z) -> match Compress.Zstd.decode(z) do
         Ok(x) -> Authority.ignore(println("zs " ++ Bytes.to_string(x)))
@@ -230,7 +230,7 @@ let test_missing_codec_refused () =
 let http_server_src ~tls =
   Printf.sprintf
     "mod Srv do\n  needs IO.NetListen\n\
-     \  fn main(_l : Cap(IO.NetListen)) : Unit do\n\
+     \  fn main() : Unit needs IO.NetListen do\n\
      \    Authority.must(HttpServer.new(18099)\n\
      %s\
      \    |> HttpServer.plug(fn c -> HttpServer.text(c, 200, \"ok\"))\n\

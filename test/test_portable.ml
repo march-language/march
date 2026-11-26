@@ -81,7 +81,7 @@ end
 
 let program body main =
   prelude ^ body
-  ^ "\nfn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _s : Cap(IO.Spawn)) : Unit do\n"
+  ^ "\nfn main() : Unit needs IO.Console, IO.Foreign, IO.Spawn do\n"
   ^ main ^ "\n  ()\nend\nend\n"
 
 (* ── Rejected ────────────────────────────────────────────────────────── *)

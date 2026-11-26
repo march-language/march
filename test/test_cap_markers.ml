@@ -51,7 +51,7 @@ let file_src =
 mod MarkerFileApp do
   needs IO.Console
   needs IO.FileRead
-  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     match file_read("/etc/hosts") do
       Ok(_) -> Authority.ignore(println("ok"))
       Err(_) -> Authority.ignore(println("err"))
@@ -64,7 +64,7 @@ let pure_src =
   {|
 mod MarkerPureApp do
   needs IO.Console
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println("hi")
     ()
   end
@@ -103,7 +103,7 @@ mod MarkerDirectPassApp do
     f(p)
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     match apply1(file_read, "/etc/hosts") do
       Ok(_)  -> Authority.ignore(println("ok"))
       Err(_) -> Authority.ignore(println("err"))
@@ -148,7 +148,7 @@ mod AttribApp do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     println(Dep.slurp("/etc/hosts"))
     ()
   end
@@ -183,7 +183,7 @@ mod WrapApp do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     println(Dep.slurp("/etc/hosts"))
     ()
   end
@@ -218,7 +218,7 @@ mod PartialApp do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println(int_to_string(Dep.add(2, 3)))
     ()
   end
@@ -299,7 +299,7 @@ mod UserDnsResolveApp do
   fn dns_resolve(x : Int) : Int do
     x + 1
   end
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println(int_to_string(dns_resolve(41)))
     ()
   end
@@ -311,7 +311,7 @@ let real_dns_resolve_src =
 mod RealDnsResolveApp do
   needs IO.Console
   needs IO.Network
-  fn main(_cap_console : Cap(IO.Console), _cap_net : Cap(IO.Network)) : () do
+  fn main() : () needs IO.Console, IO.Network do
     match dns_resolve("localhost") do
       Ok(_) -> Authority.ignore(println("ok"))
       Err(_) -> Authority.ignore(println("err"))
@@ -355,7 +355,7 @@ let clock_src call =
 mod ClockMarkerApp do
   needs IO.Console
   needs IO.Clock
-  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) : () do
+  fn main() : () needs IO.Console, IO.Clock do
     println(%s)
     ()
   end
