@@ -10477,8 +10477,15 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
                 && Err.Code.slug_of d.Err.code = Err.Code.cap_grant
                 && span_within fb_span d.Err.span) env.errors.Err.diagnostics
        in
+       (* `main`'s clause is the program's request, judged as its grant is
+          ([check_main_grant], design §D3): at `main` the program is closed,
+          every closure it invokes was made inside it and is charged where it
+          was made, so an untraceable call there refuses nothing.  Since ocap
+          phase 7b the clause replaced `main`'s `Cap` parameters, whose grant
+          never refused one either. *)
+       let is_main = fb_origin = Fn_decl && qname = "main" in
        if not reported_as_grant then begin
-       if row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound) then
+       if row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound) && not is_main then
          Err.error ~code:Err.Code.cap_bound env.errors ~span
            (Printf.sprintf
               "%s is bounded by %s, but its body invokes a function \
@@ -10938,13 +10945,13 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
 
             Since ocap phase 7b the grant is a `needs` clause: the fix writes
             one after the (empty) parameter list.  A `main` with a return type
-            already has `: T` there; the clause then goes before its `do`,
-            which this fix cannot find, so it inserts `: () needs ...` only
-            when the parameter list is followed by `do` on the same line. *)
+            already has `: T` there; then the clause belongs after it, which
+            this fix does not find, so it writes `needs ...` right after the
+            parameter list, which is valid only without a return type. *)
          let grant_fix =
            Err.FReplace { span = { params_span with Ast.start_line = params_span.Ast.end_line;
                                                      start_col = params_span.Ast.end_col };
-                          text = Printf.sprintf " : () needs %s" suggested } in
+                          text = Printf.sprintf " needs %s" suggested } in
          (* `main`'s own `needs` clause, when it has one: with an empty
             request that can only be `needs ()`. *)
          let main_needs_span =
@@ -11000,7 +11007,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                %s; a `main` with no `needs` clause and no module `needs` line \
                is granted nothing.\n\
                help: request what `main` actually needs —\n\
-              \        fn main() : () needs %s\n\
+              \        fn main() needs %s\n\
                or everything with `needs IO`.\n\
                `forge fix` can apply this."
               show_caps suggested))

@@ -335,10 +335,9 @@ let check_module ~(iter_expr : (Ast.expr -> unit) -> Ast.expr -> unit) (errors :
                        let l = ref (fst after) and col = ref (snd after) in
                        String.iter (fun ch -> if ch = '\n' then (incr l; col := 0) else incr col) pre;
                        let at = { Ast.file; start_line = !l; start_col = !col; end_line = !l; end_col = !col } in
-                       let has_ret = String.contains pre ':' in
-                       let text =
-                         (if has_ret then "" else ": () ") ^ "needs " ^ String.concat ", " uniq ^ " "
-                       in
+                       (* no return type is added: a `main` without one
+                          returns whatever its last expression does *)
+                       let text = "needs " ^ String.concat ", " uniq ^ " " in
                        Some (Err.FReplace { span = at; text }))
                 in
                 (match params_edit, needs_edit with
@@ -350,7 +349,7 @@ let check_module ~(iter_expr : (Ast.expr -> unit) -> Ast.expr -> unit) (errors :
                 "`main` asks for its authority with `Cap` parameters, which are deprecated and will be \
                  removed in the next release: a capability value grants nothing since the current \
                  authority replaced it.\n\
-                 help: request it with a `needs` clause: `fn main() : () needs %s do`."
+                 help: request it with a `needs` clause: `fn main() needs %s do`."
                 (String.concat ", " uniq)
             in
             match fix with
