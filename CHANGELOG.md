@@ -36,6 +36,10 @@ git log is authoritative for exact commits.
   `needs IO` no longer covers inspecting other actors) and `IO.Cluster`; `main` requests
   them with a parameter such as `Cap(Actor.Introspect)`. Write `Authority.must(Actor.introspect())` where you wrote
   `Actor.introspect(io)`.
+- **Compiles are about another 0.27 s faster.** Functions the program cannot reach are now
+  dropped before monomorphization instead of after closure conversion, so those passes see a
+  few dozen functions on a small program instead of the whole standard library (hello world:
+  1.38 s to 1.12 s before code generation). `--disable-pass dce-pre-mono` turns it off.
 - **Compiles are about 0.3 s faster.** Lemma erasure collected the names the program
   mentions once per `@[lemma]` declaration, walking the whole program (stdlib included)
   each time; it now walks it once. What gets erased is unchanged.
