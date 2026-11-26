@@ -1059,9 +1059,11 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 (* Module-level let bindings are compiled as zero-arg functions
                    so they can be referenced by qualified name after
                    rename_tir_vars renames the short name to prefix^name. *)
-                let rhs = lower_expr mod_env b.bind_expr in
+                let rhs, locals =
+                  Lower_state.with_fn_body (fun () -> lower_expr mod_env b.bind_expr) in
                 (match b.bind_pat with
                  | Ast.PatVar n ->
+                   Provenance.attach_locals (prefix ^ n.txt) locals;
                    let fn : Tir.fn_def = {
                      fn_name   = prefix ^ n.txt;
                      fn_params = [];

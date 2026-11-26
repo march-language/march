@@ -1390,6 +1390,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **An overflow panic inside a local function names that function's own file and line.** A
+  local function (`fn go(...)` inside another function) was reported at the declaration of
+  whichever local function of the same name the compiler had processed last, so an Int
+  overflow in the standard library's `length` printed a line of `stdlib/shell_render.march`.
+  The same wrong location was in the function table that crash backtraces and
+  `--debug-info` read. Each local function now reports its own declaration, and a
+  top-level standard-library function such as `reverse` or `map`, which could lose its
+  location to a module function of the same name, keeps it.
 - **Two modules that each declare a type of the same name, with a constructor of the same
   name but different fields, now compile correctly.** Compiled code laid both out as one of
   them, so the other module's field was stored at the wrong type (`Safe(Int)` beside

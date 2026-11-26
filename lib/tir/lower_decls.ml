@@ -231,8 +231,11 @@ let uniquify_fn (fn : Tir.fn_def) : Tir.fn_def =
       let env', fns_named =
         List.fold_left (fun (env, acc) (f : Tir.fn_def) ->
             if SMap.mem f.Tir.fn_name env then
+              (* No [Provenance.rename]: a nested fn that can shadow is a
+                 local named fn, and its span is not kept under its name
+                 ([Provenance.local_span] reads `go$sh1` as `go`).  A rename
+                 here moved the span of a TOP-LEVEL fn of that name. *)
               let nn = fresh f.Tir.fn_name in
-              Provenance.rename ~old:f.Tir.fn_name ~new_:nn;
               (SMap.add f.Tir.fn_name nn env, { f with Tir.fn_name = nn } :: acc)
             else
               (SMap.add f.Tir.fn_name f.Tir.fn_name env, f :: acc)) (env, []) fns in
@@ -435,13 +438,15 @@ let lower_fn_def (env : Lower_state.env) (def : Ast.fn_def) : Tir.fn_def =
   let saved_scope = Hashtbl.copy Lower_state._fn_param_types in
   Hashtbl.clear Lower_state._fn_param_types;
   List.iter (fun v -> Hashtbl.replace Lower_state._fn_param_types v.Tir.v_name v.Tir.v_ty) params;
-  let body =
-    Lower_state.with_host
-      (Lower_state.host_name ~mod_prefix:env.Lower_state.mod_prefix def.fn_name.txt)
-      (fun () -> Lower_match.lower_expr env clause.fc_body) in
+  let body, locals =
+    Lower_state.with_fn_body (fun () ->
+        Lower_state.with_host
+          (Lower_state.host_name ~mod_prefix:env.Lower_state.mod_prefix def.fn_name.txt)
+          (fun () -> Lower_match.lower_expr env clause.fc_body)) in
   Hashtbl.clear Lower_state._fn_param_types;
   Hashtbl.iter (fun k v -> Hashtbl.replace Lower_state._fn_param_types k v) saved_scope;
   Provenance.note_span def.fn_name.txt def.fn_name.span;
+  Provenance.attach_locals def.fn_name.txt locals;
   { fn_name = def.fn_name.txt; fn_params = params; fn_ret_ty = ret_ty; fn_body = body;
     fn_kind = Tir.FnNormal }  (* parsed user/stdlib/impl-method fn *)
 
@@ -542,7 +547,9 @@ let rec lower_stdlib_mod_decls ?(enclosing = []) (env : Lower_state.env) prefix 
            can be referenced by qualified name (e.g. Crypto.pw_dklen). *)
         (match b.bind_pat with
          | Ast.PatVar n ->
-           let rhs = Lower_match.lower_expr env b.bind_expr in
+           let rhs, locals =
+             Lower_state.with_fn_body (fun () -> Lower_match.lower_expr env b.bind_expr) in
+           Provenance.attach_locals (prefix ^ n.txt) locals;
            let fn : Tir.fn_def = {
              fn_name   = prefix ^ n.txt;
              fn_params = [];

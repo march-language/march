@@ -128,6 +128,26 @@ let fresh_nested_name ~(host : string) (prefix : string) : string =
 let fresh_var ?(lin = Tir.Unr) (ty : Tir.ty) : Tir.var =
   { v_name = fresh_name "t"; v_ty = ty; v_lin = lin }
 
+(* ── One top-level function's body ───────────────────────────────────────
+   Whatever lowers the body of ONE top-level fn (a parsed fn, a module-level
+   let's zero-arg fn, an actor handler or spawn glue, a test) brackets it
+   with [enter_fn_body] / [leave_fn_body], or [with_fn_body].  The scope
+   collects the local named fns met inside it; the caller attaches them to
+   the fn ([Provenance.attach_locals]) under the name it has then. *)
+type fn_body_scope = { fb_locals : Provenance.locals }
+
+let enter_fn_body () : fn_body_scope =
+  { fb_locals = Provenance.enter_locals () }
+
+let leave_fn_body (s : fn_body_scope) : Provenance.locals =
+  Provenance.leave_locals s.fb_locals
+
+let with_fn_body (f : unit -> 'a) : 'a * Provenance.locals =
+  let s = enter_fn_body () in
+  match f () with
+  | r -> (r, leave_fn_body s)
+  | exception e -> ignore (leave_fn_body s); raise e
+
 (** Function-typed module-level lets outside the entry module: qualified TIR
     fn name -> the let's value type (a [TFn]).  Such a let is lowered to a
     zero-parameter fn RETURNING the closure, so a reference to it must call
