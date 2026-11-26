@@ -44,15 +44,5 @@ and add `IO.FileWrite` to `main`'s request.
     run `march --explain cap_needs`
 
 
--- CAPABILITY ----------------- errors/cap_needs_10.march
-
-`main` is bounded by `needs IO.Console`, but reaches `IO.FileWrite` (via save). [cap_bound]
-help: add `IO.FileWrite` to the bound, or remove the use.
-
-18 |   fn main() needs IO.Console do
-                 ^^^^^^^^^^^^^^^^
-
-
-
 
 after fix: exit 0

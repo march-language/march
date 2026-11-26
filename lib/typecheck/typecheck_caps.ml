@@ -892,9 +892,16 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                      help: add `needs %s` to the module, or narrow the bound."
                     def.Ast.fn_name.txt (String.concat ", " bound) c c))
         bound;
-      Hashtbl.replace env.fn_bound_points qname
-        { fb_caps = List.sort_uniq String.compare bound; fb_span = nsp;
-          fb_site = def.Ast.fn_name.Ast.span; fb_origin = origin }
+      (* The top-level `main`'s clause is the program's request: its reach is
+         judged as its grant by [Typecheck.check_main_grant] (design §D3: at
+         `main` the program is closed), so it is not a bound point too.  Since
+         ocap phase 7b every program asks this way, and a bound point makes
+         [check_fn_bounds] solve rows over the whole environment, which grows
+         without limit in a long-lived env (the LSP, the property suite). *)
+      if not (qname = "main" && origin = Fn_decl) then
+        Hashtbl.replace env.fn_bound_points qname
+          { fb_caps = List.sort_uniq String.compare bound; fb_span = nsp;
+            fb_site = def.Ast.fn_name.Ast.span; fb_origin = origin }
   in
   (* An interface method's bound limits OTHER modules' impls, so unlike a
      function's it need not lie within this module's [needs] (the impl's own

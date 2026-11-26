@@ -16,15 +16,5 @@ help: add `IO.FileRead` to `main`'s request (its `needs` clause, or the module's
     run `march --explain cap_grant_exceeded`
 
 
--- CAPABILITY --------- errors/cap_grant_exceeded_2.march
-
-`main` is bounded by `needs IO.Console`, but reaches `IO.FileRead` (via slurp). [cap_bound]
-help: add `IO.FileRead` to the bound, or remove the use.
-
-33 |   fn main() : () needs IO.Console do
-                      ^^^^^^^^^^^^^^^^
-
-
-
 
 after fix: exit 0

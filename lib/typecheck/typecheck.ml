@@ -10477,15 +10477,8 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
                 && Err.Code.slug_of d.Err.code = Err.Code.cap_grant
                 && span_within fb_span d.Err.span) env.errors.Err.diagnostics
        in
-       (* `main`'s clause is the program's request, judged as its grant is
-          ([check_main_grant], design §D3): at `main` the program is closed,
-          every closure it invokes was made inside it and is charged where it
-          was made, so an untraceable call there refuses nothing.  Since ocap
-          phase 7b the clause replaced `main`'s `Cap` parameters, whose grant
-          never refused one either. *)
-       let is_main = fb_origin = Fn_decl && qname = "main" in
        if not reported_as_grant then begin
-       if row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound) && not is_main then
+       if row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound) then
          Err.error ~code:Err.Code.cap_bound env.errors ~span
            (Printf.sprintf
               "%s is bounded by %s, but its body invokes a function \

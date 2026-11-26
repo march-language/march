@@ -19,10 +19,15 @@ Follows phase 7a (`2026-11-24-ocap-p7a-mock.md`) and its gap fixes
   - `mint_cap()` takes no argument (`mint_cap(c)` is `mint_cap_invalid` with a fix);
     `root_cap` is refused everywhere (`root_cap_reference`, new message); the
     `root_cap_allowed` exemption for tests, setup blocks and the REPL is gone.
-- **`main`'s `needs` clause is judged as its grant.** A function-level bound refuses
-  untraceable calls; `main`'s does not (design §D3, the program is closed at `main`), as
-  its `Cap` parameters never did. Without this the migration failed programs that call a
-  closure from a record field.
+- **`main`'s `needs` clause is judged as its grant, not as a function bound.** The
+  top-level `main`'s clause is not recorded as a bound point: its reach is judged by
+  `check_main_grant` (design §D3, the program is closed at `main`), as its `Cap`
+  parameters' was. Two reasons, both found by the migration: a function bound refuses
+  untraceable calls, which failed programs that call a closure from a record field; and a
+  bound point makes `check_fn_bounds` solve rows over the whole environment, which in a
+  long-lived env (the property suite, the LSP) grows with every check, so the property
+  run went from 181 s to 1,950 s once every generated `main` asked with `needs`. The
+  clause must still lie within the module's `needs` (`cap_bound_needs`).
 - **A function `needs` clause counts as a use of the module line it names**
   (`unused_needs`): `cap_bound_needs` requires that line, and `main` now names kinds the
   program reaches only through other modules (`IO.Foreign` behind `Js.Dom`).
