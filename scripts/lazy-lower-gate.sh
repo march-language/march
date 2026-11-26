@@ -7,7 +7,9 @@
 # as stubs (specs/progress/2026-11-26-lazy-stdlib-lowering.md).  Its whole
 # claim is that the emitted program is the one eager lowering emits.  This
 # script checks that claim on every program of the IR-oracle corpus
-# (test/native, test/snapshots/src, bench), plus the multi-file fixtures
+# (test/native, test/snapshots/src, bench) and the capability conformance
+# programs (test/cap_conformance: the frames, restricts and grants whose
+# passes mint calls after lowering), plus the multi-file fixtures
 # test/native/<name>/entry.march with their lib/ on MARCH_LIB_PATH: each is
 # compiled with
 # `--emit-llvm` twice by the SAME compiler, once as is and once with
@@ -141,6 +143,7 @@ if [ ${#FILES[@]} -gt 0 ]; then
 else
   ls "$ROOT"/test/native/*.march "$ROOT"/test/native/*/entry.march \
     "$ROOT"/test/snapshots/src/*.march "$ROOT"/bench/*.march \
+    "$ROOT"/test/cap_conformance/*.march \
     2>/dev/null > "$WORK/fixtures.txt"
 fi
 if [ -n "$SHARD" ]; then

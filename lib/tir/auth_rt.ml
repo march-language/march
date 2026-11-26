@@ -1445,10 +1445,15 @@ let captures (m : Tir.tir_module) ~(has_frames : bool) ~(repl : bool) : Tir.tir_
 let minted_callees ~(needs : (string, Lower_state.fn_needs) Hashtbl.t)
     ~(sites : (string, Lower_state.restrict_site) Hashtbl.t)
     ~(grants : (string, Lower_state.fn_grant) Hashtbl.t) : string list =
+  (* [frames] turns a tail call between two framed functions into a test of
+     [Authority.frame_in_force]; a frame comes from a [needs] clause or a
+     [restrict]. *)
   (if Hashtbl.length needs > 0
-   then [ Tir_names.enter_fn_name; Tir_names.frame_layer_fn_name ] else [])
+   then [ Tir_names.enter_fn_name; Tir_names.frame_layer_fn_name;
+          Tir_names.frame_in_force_name ] else [])
   @ (if Hashtbl.length sites > 0
-     then [ Tir_names.enter_fn_name; restrict_layer_fn_name ] else [])
+     then [ Tir_names.enter_fn_name; restrict_layer_fn_name;
+            Tir_names.frame_in_force_name ] else [])
   @ (if Hashtbl.length grants > 0
      then [ Tir_names.enter_grant_name; Tir_names.grant_layer_builtin_name;
             Tir_names.foreign_guard_name ] else [])
