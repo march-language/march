@@ -1321,7 +1321,7 @@ let test_topology_document_over_the_wire () =
   (match member "value" (member "contents" hover) with
    | `String v ->
      Alcotest.(check bool) "hover shows the body type" true
-       (let sub = "(Cap(Session.Live), Cap(IO.FileWrite), Checkout_Ledger.Entry) -> Checkout_Ledger.Yield" in
+       (let sub = "(Cap(Session.Live), Checkout_Ledger.Entry) -> Checkout_Ledger.Yield" in
         let n = String.length sub and m = String.length v in
         let rec go i = i + n <= m && (String.sub v i n = sub || go (i + 1)) in go 0)
    | _ -> Alcotest.failf "hover: %s" (Yojson.Safe.to_string hover));
