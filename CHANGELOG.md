@@ -1391,6 +1391,11 @@ git log is authoritative for exact commits.
   `Safe(Float)` failed in clang; `Safe(Int)` beside the standard library's `Html.Safe`
   could pick either layout depending on program size). Each module's own code now uses its
   own layout.
+- **`Logger.with_scope(fields, fn -> ...)` runs in the interpreter.** A thunk written with
+  no parameter matched the declared type and ran compiled, but the interpreter stopped
+  with "arity mismatch: expected 0 args, got 1". `Logger.with_span` and a direct
+  `try_finally` with `fn -> ...` callbacks had the same failure. Both `fn -> ...` and
+  `fn _ -> ...` now work on both.
 - **`Hamt` no longer loses a key, or hangs, when two hashes agree on their low 35 bits.**
   With a hash function that returns more than 35 bits (the builtin `hash` returns 62),
   the second of two such keys could not be found or removed, and inserting it again never
