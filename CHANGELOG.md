@@ -1385,6 +1385,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **On Linux, a TLS write to a peer that has gone no longer kills the process.**
+  `Tls.write` (and a `Tls.read` or `Tls.close` that had to send) on a connection the peer
+  had reset raised SIGPIPE, and the program exited with status 141. It now returns
+  `Err(TlsError)`. macOS was not affected.
 - **`File.close` reports a write that fails when the file is flushed.** Writes through a
   `File.Handle` are buffered, so a full disk or a quota often shows up only when the
   handle is closed. `File.close` returned `Ok(())` anyway and the data was lost silently.
