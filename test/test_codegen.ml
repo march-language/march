@@ -11378,7 +11378,7 @@ let short_circuit_src = {|mod ShortCircuit do
 
   type Win = Win(Int, NativeU8Arr)
 
-  fn side(_c : Cap(IO.Console), tag : String, v : Bool) : Bool do
+  fn side(tag : String, v : Bool) : Bool do
     println("ran " ++ tag)
     v
   end
@@ -11401,13 +11401,13 @@ let short_circuit_src = {|mod ShortCircuit do
     label ++ "=" ++ bool_to_string(b)
   end
 
-  fn main(c : Cap(IO.Console)) do
-    println(verdict("f&&", false && side(c, "A", true)))
-    println(verdict("t||", true || side(c, "B", false)))
-    println(verdict("t&&", true && side(c, "C", false)))
-    println(verdict("f||", false || side(c, "D", true)))
-    println(verdict("chain", 1 > 2 && side(c, "E", true) && side(c, "F", true)))
-    println(verdict("mixed", (1 > 2 && side(c, "G", true)) || side(c, "H", true)))
+  fn main() needs IO.Console do
+    println(verdict("f&&", false && side("A", true)))
+    println(verdict("t||", true || side("B", false)))
+    println(verdict("t&&", true && side("C", false)))
+    println(verdict("f||", false || side("D", true)))
+    println(verdict("chain", 1 > 2 && side("E", true) && side("F", true)))
+    println(verdict("mixed", (1 > 2 && side("G", true)) || side("H", true)))
     println(verdict("div0", ratio_ok(0)))
     println(verdict("div2", ratio_ok(2)))
     println(verdict("or0", ratio_or(0)))
@@ -11417,7 +11417,7 @@ let short_circuit_src = {|mod ShortCircuit do
     println(verdict("past", solid(w, 9)))
     println(verdict("named", named("y", Cons(1, Nil))))
     println(verdict("named2", named("x", Cons(1, Nil))))
-    let r = if 0 > 1 && side(c, "I", true) do "yes" else "no" end
+    let r = if 0 > 1 && side("I", true) do "yes" else "no" end
     println("if=" ++ r)
   end
 end
@@ -11983,7 +11983,7 @@ fn role_b(s : Cap(Session.Live), st : Pq_B.Entry) : Pq_B.Yield do
 end
 
 -- From inside the declaring module: relative names.
-fn run_inside(c : Cap(IO)) : () do
+fn run_inside() : () do
   let t = Session.in_process()
   let s = Authority.must(Session.attach(t.ops))
   let _ = role_b(s, Pq_B.register(s, 0))
@@ -11992,7 +11992,7 @@ fn run_inside(c : Cap(IO)) : () do
 end
 
 -- Never called: the runner must typecheck (and link) from here.
-fn serve_b(c : Cap(IO)) : String do
+fn serve_b() : String do
   match Pq_Run.run_B("node-b", "secret", Pq_Run.addrs_from_env(), fn (s, st) -> role_b(s, st)) do
     Ok(_) -> "closed"
     Err(e) -> SessionNode.run_error_message(e)
@@ -12000,8 +12000,8 @@ fn serve_b(c : Cap(IO)) : String do
 end|}
 
 (* [P.] is replaced by the declaring module's path from the caller. *)
-let endpoints_placement_user = {|fn use_from_outside(c : Cap(IO)) : () do
-  P.run_inside(c)
+let endpoints_placement_user = {|fn use_from_outside() : () do
+  P.run_inside()
   let t = Session.in_process()
   let s = Authority.must(Session.attach(t.ops))
   let _ = P.Pq_B.script(s, P.Pq_B.register(s, 0), [P.Pq_B.Expect_Hi(fn n -> Authority.ignore(println("script B got " ++ int_to_string(n)))), P.Pq_B.Send_Back({ pq: 7, text: "scripted" })])
@@ -12041,7 +12041,7 @@ let endpoints_nested_src =
   \  mod Caller do\n" ^ endpoints_indent 4 endpoints_placement_needs ^ "\n"
   ^ endpoints_indent 4 (endpoints_placement_user_for "Outer") ^ "\n\
   \  end\n\
-  \  fn main(c : Cap(IO)) do Caller.use_from_outside(c) end\n\
+  \  fn main() needs IO do Caller.use_from_outside() end\n\
    end\n"
 
 (* The protocol in a MARCH_LIB_PATH module, driven from the app. *)
@@ -12049,7 +12049,7 @@ let write_endpoints_lib_project ~name =
   let (project_root, main_exe, src, tmp) = write_march_source ~name
     ("mod App do\n" ^ endpoints_indent 2 endpoints_placement_needs ^ "\n"
      ^ endpoints_indent 2 (endpoints_placement_user_for "PqLib") ^ "\n\
-     \  fn main(c : Cap(IO)) do use_from_outside(c) end\n\
+     \  fn main() needs IO do use_from_outside() end\n\
       end\n") in
   let lib_dir = Filename.concat tmp "lib" in
   Unix.mkdir lib_dir 0o755;
@@ -12167,7 +12167,7 @@ let test_endpoints_lib_compiled () =
 
 let endpoints_stdlib_project name =
   write_endpoints_stdlib_project ~name
-    ~main_body:"    use_from_outside(c)\n"
+    ~main_body:"    use_from_outside()\n"
     (endpoints_placement_user_for "Control")
 
 let test_endpoints_stdlib_interpreted () =
@@ -13886,7 +13886,8 @@ end
    bug: `--check` cached a "clean check" CAS artifact after ANY successful
    check (bin/main.ml), then a later identical-source invocation hit that
    cache and `exit 0`ed BEFORE the diagnostic-printing pass — so a module
-   that emits a warning/hint (here: the Check-3 `Cap(IO)`-narrowing HINT)
+   that emits a warning/hint (here: the `deprecated_main_cap` warning; until
+   ocap phase 7b it was the Check-3 `Cap(IO)`-narrowing HINT, since removed)
    printed it on the first (cache-miss) run and stayed SILENT on every
    subsequent (cache-hit) run. Because the CAS store lives at the shared
    project-root `.march/cas` and is cleared intermittently (concurrent
@@ -13904,7 +13905,7 @@ let test_check_diagnostic_display_deterministic () =
     write_march_source ~name:"march_capcheck_determinism"
       "mod CapCheckDet do\n\
       \  needs IO\n\
-      \  fn run(io : Cap(IO)) do io end\n\
+      \  fn main(io : Cap(IO)) do () end\n\
        end\n"
   in
   let check_cmd = Printf.sprintf
@@ -13914,12 +13915,12 @@ let test_check_diagnostic_display_deterministic () =
   in
   let iterations = 12 in
   let first = read_cmd_output check_cmd in
-  (* The narrowing HINT must actually appear (otherwise the test is vacuous —
-     it would pass trivially if `--check` printed nothing at all). *)
+  (* The warning must actually appear (otherwise the test is vacuous — it
+     would pass trivially if `--check` printed nothing at all). *)
   Alcotest.(check bool)
-    "the Cap(IO)-narrowing HINT is present in --check output"
+    "the deprecated_main_cap warning is present in --check output"
     true
-    (ir_contains first "narrowing" || ir_contains first "HINT");
+    (ir_contains first "deprecated_main_cap");
   let all_identical = ref true in
   for _ = 2 to iterations do
     let out = read_cmd_output check_cmd in
@@ -19123,7 +19124,7 @@ declare ptr  @march_csv_close(ptr %handle)
 declare void @march_own(ptr %pid, ptr %value)
 ; Capability builtins
 declare ptr  @march_cap_narrow(ptr %cap)
-declare ptr  @march_mint_cap(ptr %cap)
+declare ptr  @march_mint_cap()
 declare ptr  @march_cap_impl(ptr %cap, ptr %dict)
 declare ptr  @march_cap_dict(ptr %cap)
 ; Monitor/supervision builtins
