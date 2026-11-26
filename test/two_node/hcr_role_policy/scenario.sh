@@ -104,7 +104,7 @@ done
 cp "$work/node_base" "$work/node_a"; cp "$work/node_base" "$work/node_b"
 
 # What the bug was about: the role body's own caps hold the session.
-grep -q '^Back.serve_one .*caps=IO.Console,IO.Mut,Session.Live$' "$work/v2/v2.so.hcr_manifest" \
+grep -q '^Back.serve_one .*caps=Session.Live$' "$work/v2/v2.so.hcr_manifest" \
   || fail "serve_one's manifest line no longer holds Session.Live: $(grep '^Back.serve_one ' "$work/v2/v2.so.hcr_manifest")"
 
 # The node policy, as forge host init writes it for the back pool.

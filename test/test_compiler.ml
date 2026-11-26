@@ -4609,8 +4609,11 @@ end
    error still fires, but Check 1b's redundant, narrower echo of the same
    fix does not. *)
 let test_check1b_omits_caps_subsumed_by_check1 () =
+  (* Check 1 reads `Cap(X)` in a signature, so this keeps `main`'s deprecated
+     `Cap(IO)` parameter form (still accepted, with a warning, until the
+     release that removes it): the subsumption it pins exists only there. *)
   let ctx = typecheck {|mod Agg do
-    fn main() : () needs IO do
+    fn main(cap : Cap(IO)) : () do
       println("a")
       match file_write("/tmp/agg", "d") do
         Ok(_) -> ()
@@ -4691,7 +4694,8 @@ let test_actor_handler_cap_missing_needs_error () =
       end
     end
   end|} in
-  Alcotest.(check bool) "actor handler cap without needs: error" true (has_errors ctx)
+  Alcotest.(check bool) "actor handler cap without needs: error" true
+    (has_error_with ctx "`IO.Console` is not declared in `needs`")
 
 (* ── C1 fix: actor handler BODY IO with no declared `needs` ───────────────
    Finding C1 (final whole-branch review, HCR Phase 5C): [record_fn_caps] was
@@ -4799,7 +4803,7 @@ let test_actor_handler_escapes_grant_is_caught () =
   end|} in
   Alcotest.(check bool)
     "a handler's IO.FileWrite under a Console-only grant is a grant error"
-    true (has_error_with ctx "granted `Cap(IO.Console)`");
+    true (has_error_with ctx "granted `needs IO.Console`");
   Alcotest.(check bool) "the escaping capability is named"
     true (has_error_with ctx "IO.FileWrite")
 
@@ -4825,7 +4829,7 @@ let test_actor_spawned_not_sent_still_charged () =
     end
   end|} in
   Alcotest.(check bool) "spawning the actor charges its handler to the grant"
-    true (has_error_with ctx "granted `Cap(IO.Console)`")
+    true (has_error_with ctx "granted `needs IO.Console`")
 
 (* Dead-code-is-free is preserved: an actor DEFINED but never spawned can never
    run, so its handler's caps must NOT be charged to the grant. *)
@@ -4848,7 +4852,7 @@ let test_actor_defined_never_spawned_is_free () =
   end|} in
   Alcotest.(check bool)
     "a never-spawned actor's handler caps are not charged to the grant"
-    false (has_error_with ctx "granted `Cap(IO.Console)`")
+    false (has_error_with ctx "granted `needs IO.Console`")
 
 (* The `init { ... }` initializer runs at spawn time, so its transitive IO is
    reachable exactly when a handler's is.  A helper-reached file_write from
@@ -4910,15 +4914,15 @@ let test_narrowed_cap_cannot_reach_wide_signature () =
 let test_wide_grant_reaches_wide_signature () =
   let ctx = typecheck {|mod Wide do
     needs IO
-    fn wants_io(c : Cap(IO)) : () do
+    fn wants_io() : () needs IO do
       ()
     end
-    fn narrow(c : Cap(IO.NetListen)) : () do
+    fn narrow() : () needs IO.NetListen do
       ()
     end
-    fn main(c : Cap(IO)) : () do
-      wants_io(c)
-      narrow(cap_narrow(c))
+    fn main() : () needs IO do
+      wants_io()
+      narrow()
     end
   end|} in
   Alcotest.(check bool) "no errors at all" false (has_errors ctx)
@@ -4971,7 +4975,7 @@ let test_same_named_actors_only_spawned_one_charged () =
   end|} in
   Alcotest.(check bool)
     "spawning Safe.Worker is not charged Danger.Worker's IO.FileWrite"
-    false (has_error_with ctx "granted `Cap(IO.Console)`");
+    false (has_error_with ctx "granted `needs IO.Console`");
   Alcotest.(check bool) "no diagnostic mentions the other actor's capability"
     false (has_error_with ctx "IO.FileWrite")
 
@@ -5010,7 +5014,7 @@ let test_same_named_actors_spawned_one_still_rejected () =
   end|} in
   Alcotest.(check bool)
     "the SPAWNED same-named actor's undeclared capability is still a grant error"
-    true (has_error_with ctx "granted `Cap(IO.Console)`");
+    true (has_error_with ctx "granted `needs IO.Console`");
   Alcotest.(check bool) "the escaping capability is named"
     true (has_error_with ctx "IO.FileWrite");
   (* Two actors named Worker: desugar renames the nested ones by module path
@@ -6801,7 +6805,7 @@ let test_endpoints_check_linear_in_protocols () =
   done;
   for i = 0 to n - 1 do
     Buffer.add_string b (Printf.sprintf
-      "  pfn run%d(c : Cap(IO)) : Int do\n\
+      "  pfn run%d() : Int do\n\
       \    let t = Session.in_process_with(fn _line -> ())\n\
       \    let s = Authority.must(Session.attach(t.ops))\n\
       \    let _ = P%d_C.chaos(s, P%d_C.register(s, 0), 1)\n\
@@ -6811,9 +6815,9 @@ let test_endpoints_check_linear_in_protocols () =
       \    t.returned(())\n\
       \  end\n" i i i i i i i)
   done;
-  Buffer.add_string b "  fn main(c : Cap(IO)) do\n";
+  Buffer.add_string b "  fn main() needs IO do\n";
   for i = 0 to n - 1 do
-    Buffer.add_string b (Printf.sprintf "    println(int_to_string(run%d(c)))\n" i)
+    Buffer.add_string b (Printf.sprintf "    println(int_to_string(run%d()))\n" i)
   done;
   Buffer.add_string b "    ()\n  end\nend\n";
   let (_project_root, main_exe, src, tmp) =
@@ -9464,10 +9468,11 @@ let test_tagged_realtime_excludes_io_error () =
     needs IO
     type DSP = DSP
     type Realtime = Realtime
-    fn process(cap : Tagged(DSP, Realtime), io : Cap(IO)) : () do () end
+    fn process(_cap : Tagged(DSP, Realtime)) : () needs IO do () end
   end|} in
   let ctx = typecheck src in
-  Alcotest.(check bool) "Tagged(_, Realtime) + Cap(IO): error" true (has_errors ctx)
+  Alcotest.(check bool) "Tagged(_, Realtime) + needs IO: error" true
+    (has_error_with ctx "takes `Tagged(_, Realtime)` but also asks for `needs IO`")
 
 let test_tagged_realtime_excludes_alloc_error () =
   let src = {|mod Test do
@@ -9494,10 +9499,10 @@ let test_tagged_standard_no_exclusion () =
     needs IO
     type DSP = DSP
     type Standard = Standard
-    fn process(cap : Tagged(DSP, Standard), io : Cap(IO)) : () do () end
+    fn process(_cap : Tagged(DSP, Standard)) : () needs IO do () end
   end|} in
   let ctx = typecheck src in
-  Alcotest.(check bool) "Tagged(_, Standard) + Cap(IO): no error" false (has_errors ctx)
+  Alcotest.(check bool) "Tagged(_, Standard) + needs IO: no error" false (has_errors ctx)
 
 (* ── Phase 3a: Explicit bounded type parameters ─────────────────────────── *)
 
@@ -10567,7 +10572,7 @@ let test_cap_narrow_cannot_mint_proof_cap () =
     end
   end|} in
   Alcotest.(check bool) "cap_narrow forging a proof cap (inline arg): error"
-    true (has_errors ctx)
+    true (has_error_with ctx "is a proof capability, not an IO capability")
 
 let test_cap_narrow_forge_let () =
   (* R7: let forged : Cap(Db.Migrated) = cap_narrow(cap) — let-binding position. *)
@@ -10586,7 +10591,7 @@ let test_cap_narrow_forge_let () =
     end
   end|} in
   Alcotest.(check bool) "cap_narrow forging a proof cap (let binding): error"
-    true (has_errors ctx)
+    true (has_error_with ctx "is a proof capability, not an IO capability")
 
 let test_cap_narrow_io_narrow_still_ok () =
   (* R4 regression guard: narrowing Cap(IO) -> Cap(IO.Network) is an IO-lattice
@@ -10598,8 +10603,10 @@ let test_cap_narrow_io_narrow_still_ok () =
       use_net(cap_narrow(cap))
     end
   end|} in
-  Alcotest.(check bool) "cap_narrow IO-lattice narrow: no error"
-    false (has_errors ctx)
+  Alcotest.(check bool) "cap_narrow IO-lattice narrow: not a proof-cap forge"
+    false (has_error_with ctx "is a proof capability, not an IO capability");
+  Alcotest.(check bool) "the retired narrow is still reported" true
+    (has_error_with ctx "`cap_narrow` was retired")
 
 let test_cap_narrow_forge_generalized_let () =
   (* Residual-forge witness (let-generalized launder): a cap_narrow result bound
@@ -10620,7 +10627,7 @@ let test_cap_narrow_forge_generalized_let () =
     end
   end|} in
   Alcotest.(check bool) "cap_narrow let-generalized launder to proof cap: error"
-    true (has_errors ctx)
+    true (has_error_with ctx "is a proof capability, not an IO capability")
 
 let test_cap_narrow_forge_through_generic_fn () =
   (* Residual-forge witness (laundered through a polymorphic user fn): a generic
@@ -10640,7 +10647,7 @@ let test_cap_narrow_forge_through_generic_fn () =
     end
   end|} in
   Alcotest.(check bool) "cap_narrow laundered through generic fn to proof cap: error"
-    true (has_errors ctx)
+    true (has_error_with ctx "is a proof capability, not an IO capability")
 
 let test_cap_narrow_launder_io_still_ok () =
   (* Regression guard for the taint machinery: laundering a cap_narrow result
@@ -10654,8 +10661,10 @@ let test_cap_narrow_launder_io_still_ok () =
       use_net(id(cap_narrow(cap)))
     end
   end|} in
-  Alcotest.(check bool) "cap_narrow laundered through generic fn to IO cap: no error"
-    false (has_errors ctx)
+  Alcotest.(check bool) "cap_narrow laundered through generic fn to IO cap: not a proof-cap forge"
+    false (has_error_with ctx "is a proof capability, not an IO capability");
+  Alcotest.(check bool) "the retired narrow is still reported" true
+    (has_error_with ctx "`cap_narrow` was retired")
 
 (* ── Proof-cap mint (Part 2: gated mint_cap primitive) ────────────────────
    mint_cap is the ONLY way to construct a proof cap; it typechecks iff used in
@@ -10666,8 +10675,8 @@ let test_mint_cap_public_declaring_ok () =
   let ctx = typecheck {|mod Db do
     proof cap Migrated
     needs IO
-    fn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
-      mint_cap(cap)
+    fn run_migrations() : Cap(Db.Migrated) do
+      mint_cap()
     end
   end|} in
   Alcotest.(check bool) "mint_cap in public declaring-module fn: no error"
@@ -10679,11 +10688,13 @@ let test_mint_cap_pfn_rejected () =
   let ctx = typecheck {|mod Db do
     proof cap Migrated
     needs IO
-    pfn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
-      mint_cap(cap)
+    pfn run_migrations() : Cap(Db.Migrated) do
+      mint_cap()
     end
+    fn migrated() : Cap(Db.Migrated) do run_migrations() end
   end|} in
-  Alcotest.(check bool) "mint_cap in pfn: error" true (has_errors ctx)
+  Alcotest.(check bool) "mint_cap in pfn: error" true
+    (has_error_with ctx "The private function `run_migrations` in `Db` cannot mint")
 
 let test_mint_cap_external_rejected () =
   (* mint_cap in a fn of a NON-declaring module is rejected (unforgeability). *)
@@ -10694,12 +10705,14 @@ let test_mint_cap_external_rejected () =
     mod App do
       needs IO
       needs Db.Migrated
-      fn forge(cap : Cap(IO)) : Cap(Db.Migrated) do
-        mint_cap(cap)
+      fn consume(_m : Cap(Db.Migrated)) : Int do 1 end
+      fn forge() : Int do
+        consume(mint_cap())
       end
     end
   end|} in
-  Alcotest.(check bool) "mint_cap in external module: error" true (has_errors ctx)
+  Alcotest.(check bool) "mint_cap in external module: error" true
+    (has_error_with ctx "only allowed inside a public function of its declaring module `Db`")
 
 let test_mint_cap_lambda_declaring_ok () =
   (* Lambda-inherit rule: a mint inside a lambda inside a public declaring-module
@@ -10708,8 +10721,8 @@ let test_mint_cap_lambda_declaring_ok () =
   let ctx = typecheck {|mod Db do
     proof cap Migrated
     needs IO
-    fn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
-      (fn _ -> mint_cap(cap))(0)
+    fn run_migrations() : Cap(Db.Migrated) do
+      (fn _ -> mint_cap())(0)
     end
   end|} in
   Alcotest.(check bool) "mint_cap in applied lambda in public declaring fn: no error"
@@ -10724,13 +10737,14 @@ let test_mint_cap_lambda_external_rejected () =
     mod App do
       needs IO
       needs Db.Migrated
-      fn forge(cap : Cap(IO)) : Cap(Db.Migrated) do
-        (fn _ -> mint_cap(cap))(0)
+      fn consume(_m : Cap(Db.Migrated)) : Int do 1 end
+      fn forge() : Int do
+        consume((fn _ -> mint_cap())(0))
       end
     end
   end|} in
   Alcotest.(check bool) "mint_cap in applied lambda in external module: error"
-    true (has_errors ctx)
+    true (has_error_with ctx "only allowed inside a public function of its declaring module `Db`")
 
 let test_mint_cap_io_target_rejected () =
   (* mint_cap is proof-cap-only: aiming it at an IO cap is rejected (that's
@@ -10738,11 +10752,12 @@ let test_mint_cap_io_target_rejected () =
   let ctx = typecheck {|mod App do
     needs IO
     fn use_net(_cap : Cap(IO.Network)) : Int do 1 end
-    fn boot(cap : Cap(IO)) : Int do
-      use_net(mint_cap(cap))
+    fn boot() : Int do
+      use_net(mint_cap())
     end
   end|} in
-  Alcotest.(check bool) "mint_cap at IO-cap target: error" true (has_errors ctx)
+  Alcotest.(check bool) "mint_cap at IO-cap target: error" true
+    (has_error_with ctx "mint_cap is only for proof capabilities")
 
 (* ── Container/factory cap_narrow-taint gap (todos.md finding, Batch-A
    follow-up) ──────────────────────────────────────────────────────────────
@@ -10795,7 +10810,7 @@ let test_container_launder_tuple_forge () =
     end
   end|} in
   Alcotest.(check bool) "cap_narrow forged via an unannotated tuple-wrapping factory: error"
-    true (has_errors ctx)
+    true (has_error_with ctx "is a proof capability, not an IO capability")
 
 let test_container_launder_option_forge () =
   let ctx = typecheck {|mod Top do
@@ -10814,7 +10829,7 @@ let test_container_launder_option_forge () =
     end
   end|} in
   Alcotest.(check bool) "cap_narrow forged via an Option-wrapping factory: error"
-    true (has_errors ctx)
+    true (has_error_with ctx "is a proof capability, not an IO capability")
 
 let test_container_launder_io_still_ok () =
   (* Regression guard: an ordinary IO-cap narrow, wrapped in a tuple by an
@@ -10828,8 +10843,10 @@ let test_container_launder_io_still_ok () =
       use_net(c)
     end
   end end|} in
-  Alcotest.(check bool) "IO-cap narrow wrapped in a tuple factory: no error"
-    false (has_errors ctx)
+  Alcotest.(check bool) "IO-cap narrow wrapped in a tuple factory: not a proof-cap forge"
+    false (has_error_with ctx "is a proof capability, not an IO capability");
+  Alcotest.(check bool) "the retired narrow is still reported" true
+    (has_error_with ctx "`cap_narrow` was retired")
 
 let test_container_combine_legit_proof_cap_still_ok () =
   (* Over-rejection guard: a generic factory tuples a tainted cap_narrow result
@@ -10853,8 +10870,10 @@ let test_container_combine_legit_proof_cap_still_ok () =
     end
   end|} in
   Alcotest.(check bool)
-    "tainted IO narrow tupled with an unrelated legit proof-cap passthrough: no error"
-    false (has_errors ctx)
+    "tainted IO narrow tupled with an unrelated legit proof-cap passthrough: not a forge"
+    false (has_error_with ctx "is a proof capability, not an IO capability");
+  Alcotest.(check bool) "the retired narrow is still reported" true
+    (has_error_with ctx "`cap_narrow` was retired")
 
 (* ── Nested-module qualified-prebind type-erasure hole ────────────────────
    ROOT CAUSE (confirmed): an UNANNOTATED public fn defined inside a NESTED
@@ -10921,7 +10940,7 @@ let test_nested_launder_proof_cap () =
   end|} in
   Alcotest.(check bool)
     "nested unannotated id launders Cap(IO) into Cap(Db.P): error"
-    true (has_errors ctx)
+    true (has_error_with ctx "expected `Cap(Db.P)` but got `Cap(IO)`")
 
 (* F2 — same launder, Cap(IO) -> Cap(IO.Network) (an IO-cap coercion, proving the
    erasure is any-Cap, not proof-cap-only). *)
@@ -10936,7 +10955,7 @@ let test_nested_launder_io_subcap () =
   end|} in
   Alcotest.(check bool)
     "nested unannotated id coerces Cap(IO) into Cap(IO.Network): error"
-    true (has_errors ctx)
+    true (has_error_with ctx "needs network access, but this is the full IO capability")
 
 (* F5 — three levels of nesting: the qualified prefix accumulates (Mid.App.id);
    the fix must reconcile at every depth. *)
@@ -10992,8 +11011,11 @@ let test_nested_cap_passthrough_ok () =
     end
   end|} in
   Alcotest.(check bool)
-    "nested id passes Cap(IO) through unchanged: no error"
-    false (has_errors ctx)
+    "nested id passes Cap(IO) through unchanged: no type error"
+    false (has_error_with ctx "but got" || has_error_with ctx "but this is the");
+  (* The `Cap(IO)` parameters themselves are retired since ocap phase 7b. *)
+  Alcotest.(check bool) "the retired parameters are still reported" true
+    (has_error_with ctx "capability values were retired")
 
 (* RED→GREEN (a second, independent witness of the SAME bug in the opposite
    direction): pre-fix, an unannotated nested `id` is NOT actually polymorphic —
@@ -11156,7 +11178,7 @@ let test_nested_fwdref_proof_cap () =
   end|} in
   Alcotest.(check bool)
     "forward-ref nested id launders Cap(IO) into Cap(Db.P): error"
-    true (has_errors ctx)
+    true (has_error_with ctx "expected `Cap(Db.P)` but got `Cap(IO)`")
 
 (* C2 distinct-tvar annotation, Int -> String. *)
 let test_nested_distinct_tvar_int_as_string () =
@@ -11202,7 +11224,7 @@ let test_nested_distinct_tvar_proof_cap () =
   end|} in
   Alcotest.(check bool)
     "distinct-tvar annotated launder erases Cap(IO) into Cap(Db.P): error"
-    true (has_errors ctx)
+    true (has_error_with ctx "expected `Cap(Db.P)` but got `Cap(IO)`")
 
 (* GREEN-STAYS-GREEN: forward-ref helper used legitimately (identity passthrough
    of the SAME type) must still accept — the dependency ordering + real-scheme
@@ -11281,7 +11303,7 @@ let test_entry_self_qualified_proof_cap () =
   end|} in
   Alcotest.(check bool)
     "entry-module Main.id launders Cap(IO) into Cap(Db.P): error"
-    true (has_errors ctx)
+    true (has_error_with ctx "expected `Cap(Db.P)` but got `Cap(IO)`")
 
 (* E2 — a nested sibling references the ENTRY module by name (`T.id`). *)
 let test_entry_qualified_from_nested_sibling () =
@@ -11349,23 +11371,20 @@ let test_cap_hierarchy_args_ok () =
     needs IO.Mut
     needs IO.Foreign
     needs IO.Telemetry
-    fn use_caps(
-      _r : Cap(IO.Random),
-      _m : Cap(IO.Mut),
-      _f : Cap(IO.Foreign),
-      _t : Cap(IO.Telemetry)
-    ) : Int do 0 end
+    fn use_caps() : Int needs IO.Random, IO.Mut, IO.Foreign, IO.Telemetry do 0 end
   end|} in
-  Alcotest.(check bool) "Cap(IO.Random/Mut/Foreign/Telemetry) args: no error"
+  (* A `needs` clause refuses an unregistered path, as the retired `Cap(P)`
+     parameter form did. *)
+  Alcotest.(check bool) "IO.Random/Mut/Foreign/Telemetry in a needs clause: no error"
     false (has_errors ctx)
 
 (* A previously-unregistered leaf path with a dot in its own name. *)
 let test_cap_hierarchy_tls_arg_ok () =
   let ctx = typecheck {|mod TlsApp do
     needs IO.NetConnect.TLS
-    fn connect(_c : Cap(IO.NetConnect.TLS)) : Int do 0 end
+    fn connect() : Int needs IO.NetConnect.TLS do 0 end
   end|} in
-  Alcotest.(check bool) "Cap(IO.NetConnect.TLS) arg: no error" false (has_errors ctx)
+  Alcotest.(check bool) "IO.NetConnect.TLS in a needs clause: no error" false (has_errors ctx)
 
 (* revoke_cap / is_cap_valid are now typecheck-registered builtins. A surface
    program obtaining a Cap via get_cap and calling both must typecheck. RED
@@ -11929,9 +11948,9 @@ let test_cap_body_ws_needs_now_unused () =
 let test_cap_ws_arg_ok () =
   let ctx = typecheck {|mod Ws do
     needs IO.WebSocket
-    fn f(_c : Cap(IO.WebSocket)) : Int do 0 end
+    fn f() : Int needs IO.WebSocket do 0 end
   end|} in
-  Alcotest.(check bool) "Cap(IO.WebSocket) arg with needs: no error" false (has_errors ctx)
+  Alcotest.(check bool) "IO.WebSocket in a needs clause: no error" false (has_errors ctx)
 
 (* ── IO.Telemetry: declaration-only cap; needs parses without error ──────── *)
 
@@ -13406,43 +13425,49 @@ let test_non_main_still_hinted_about_root_cap () =
       helper(c)
     end
   end|} in
-  Alcotest.(check bool) "a non-main function is still hinted"
-    true (has_hint_with ctx "root capability")
+  (* Since ocap phase 7b the parameter itself is refused (capability values
+     were retired), which replaces the old "narrow the root capability" hint. *)
+  Alcotest.(check bool) "a non-main function's root-cap parameter is refused"
+    true (has_error_with ctx "`helper` takes a `Cap(IO)` parameter");
+  Alcotest.(check bool) "the retired narrowing hint is gone"
+    false (has_hint_with ctx "root capability")
 
-(* A proof-cap factory must take the root cap: `mint_cap` is typed
-   `Cap(IO) -> Cap(a)` and amplifying a narrowed cap is a type error, so the
-   narrowing hint could not be acted on (D35: `ClusterNode.start`/`attach`,
-   whose module must `--check` with empty output). Only the module's OWN
-   proof cap counts: a function returning another module's cap is still
-   hinted. *)
+(* A proof-cap factory used to take the root cap, since `mint_cap` was typed
+   `Cap(IO) -> Cap(a)` (D35: `ClusterNode.start`/`attach`, whose module must
+   `--check` with empty output). Since ocap phase 7b `mint_cap()` takes no
+   argument, so the factory takes none either and is accepted with no
+   diagnostic at all, while a root-cap parameter elsewhere is refused. *)
 let test_proof_cap_factory_not_hinted_about_root_cap () =
   let ctx = typecheck {|mod Factory do
     needs IO
     proof cap Tok
-    fn mint(io : Cap(IO)) : Cap(Factory.Tok) do
-      mint_cap(io)
+    fn mint() : Cap(Factory.Tok) do
+      mint_cap()
     end
-    fn start(io : Cap(IO)) : Result(Cap(Factory.Tok), String) do
-      Ok(mint(io))
+    fn start() : Result(Cap(Factory.Tok), String) do
+      Ok(mint())
     end
   end|} in
   Alcotest.(check bool) "a factory of the module's own proof cap is not hinted"
     false (has_hint_with ctx "root capability");
+  Alcotest.(check bool) "nor refused" false (has_errors ctx);
   let ctx2 = typecheck {|mod Factory2 do
     needs IO
     proof cap Tok
-    fn mint(io : Cap(IO)) : Cap(Factory2.Tok) do
-      mint_cap(io)
+    fn mint() : Cap(Factory2.Tok) do
+      mint_cap()
     end
-    fn pass(io : Cap(IO), t : Cap(Factory2.Tok)) : Cap(Factory2.Tok) do
+    fn pass(t : Cap(Factory2.Tok)) : Cap(Factory2.Tok) do
       t
     end
     fn other(io : Cap(IO)) : Int do
       1
     end
   end|} in
-  Alcotest.(check bool) "a non-factory in the same module is still hinted"
-    true (has_hint_with ctx2 "root capability")
+  Alcotest.(check bool) "a root-cap parameter in the same module is refused"
+    true (has_error_with ctx2 "`other` takes a `Cap(IO)` parameter");
+  Alcotest.(check bool) "the proof-cap passthrough is not"
+    false (has_error_with ctx2 "`pass` takes")
 
 (* ── Fix round 1: the unused-param exemption must be the DIRECT `Cap(X)`
    form only, not "a capability appears anywhere in the type." A
@@ -13952,7 +13977,7 @@ let test_grant_narrow_rejects_filewrite () =
     end
   end|} in
   Alcotest.(check bool) "IO.FileWrite outside Cap(IO.Console) is an error"
-    true (has_error_with ctx "granted `Cap(IO.Console)`");
+    true (has_error_with ctx "granted `needs IO.Console`");
   Alcotest.(check bool) "the violating capability is named"
     true (has_error_with ctx "IO.FileWrite")
 
@@ -13975,7 +14000,7 @@ let test_grant_violation_through_helper () =
     end
   end|} in
   Alcotest.(check bool) "helper-reached IO.FileWrite is still a grant error"
-    true (has_error_with ctx "granted `Cap(IO.Console)`")
+    true (has_error_with ctx "granted `needs IO.Console`")
 
 let test_grant_violation_names_the_user_module () =
   (* A grant violation reached through the stdlib used to name only the
@@ -14107,7 +14132,7 @@ let test_grant_dead_code_is_not_charged () =
     end
   end|} in
   Alcotest.(check bool) "unreachable capability is not a grant violation"
-    false (has_error_with ctx "granted `Cap(IO.Console)`")
+    false (has_error_with ctx "granted `needs IO.Console`")
 
 let test_main_signature_accepts_narrow_cap () =
   (* Pre-R1, [Desugar.check_main_signature] accepted exactly Cap(IO); a
@@ -14142,7 +14167,7 @@ let test_main_signature_still_rejects_non_cap () =
 let test_fn_grant_narrow_covers_console () =
   let ctx = typecheck {|mod FnGrantOk do
     needs IO.Console
-    fn log(cap : Cap(IO.Console), msg : String) : () do
+    fn log(msg : String) : () needs IO.Console do
       println(msg)
       ()
     end
@@ -14150,19 +14175,17 @@ let test_fn_grant_narrow_covers_console () =
       ()
     end
   end|} in
-  Alcotest.(check bool) "a console-only helper under Cap(IO.Console) is fine"
+  Alcotest.(check bool) "a console-only helper bounded by needs IO.Console is fine"
     false (has_errors ctx)
 
 let test_fn_grant_multi_cap_params_union () =
-  (* Not deleted with the rest of stage C: this asserts NO error, not a
-     violation, so nothing about it pins removed behavior — it stays as a
-     source-shape regression pin that several concrete `Cap(P)` parameters on
-     one signature still typecheck together now that no per-function ceiling
-     reads them. *)
+  (* Since ocap phase 7b a function states its authority with a `needs`
+     clause, not `Cap(P)` parameters: several kinds in one clause bound the
+     function by their union. *)
   let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod FnGrantMulti do
     needs IO.Console
     needs IO.FileWrite
-    fn both(c : Cap(IO.Console), w : Cap(IO.FileWrite), msg : String) : () do
+    fn both(msg : String) : () needs IO.Console, IO.FileWrite do
       match file_write("/tmp/fn_grant_m", msg) do
         Ok(_) -> Authority.ignore(println("ok"))
         Err(_) -> Authority.ignore(println("e"))
@@ -14172,7 +14195,7 @@ let test_fn_grant_multi_cap_params_union () =
       ()
     end
   end|}) in
-  Alcotest.(check bool) "every parameter's capability counts toward the grant"
+  Alcotest.(check bool) "every kind in the clause counts toward the bound"
     false (has_errors ctx)
 
 let test_fn_grant_polymorphic_cap_param_is_no_gate () =
@@ -14185,7 +14208,7 @@ let test_fn_grant_polymorphic_cap_param_is_no_gate () =
     fn forward(c : Cap(a)) : Cap(a) do
       c
     end
-    fn noisy(c : Cap(IO)) : () do
+    fn noisy() : () needs IO do
       match file_write("/tmp/fn_grant_p", "d") do
         Ok(_) -> Authority.ignore(println("ok"))
         Err(_) -> Authority.ignore(println("e"))
@@ -14206,7 +14229,7 @@ let test_fn_grant_invoking_a_parameter_still_certifies () =
      is under its own discharge point. *)
   let ctx = typecheck {|mod FnGrantHof do
     needs IO.Console
-    fn run(cap : Cap(IO.Console), job : (() -> ())) : () do
+    fn run(job : (() -> ())) : () needs IO.Console do
       println("before")
       job()
     end
@@ -14218,13 +14241,13 @@ let test_fn_grant_invoking_a_parameter_still_certifies () =
     false (has_errors ctx)
 
 let test_fn_grant_full_io_accepts_untraceable_invocation () =
-  (* The refusal is specific to a NARROW grant, exactly like stage B's
-     `IO.Foreign` rule: `Cap(IO)` bounds nothing within the IO lattice, so
+  (* The refusal is specific to a NARROW bound, exactly like stage B's
+     `IO.Foreign` rule: `needs IO` bounds nothing within the IO lattice, so
      there is nothing to certify falsely. *)
   let ctx = typecheck {|mod FnGrantOpaqueFull do
     needs IO
     type Handler2 = { run : (() -> ()) }
-    fn dispatch(cap : Cap(IO), h : Handler2) : () do
+    fn dispatch(h : Handler2) : () needs IO do
       let f = h.run
       f()
     end
@@ -14232,7 +14255,7 @@ let test_fn_grant_full_io_accepts_untraceable_invocation () =
       ()
     end
   end|} in
-  Alcotest.(check bool) "Cap(IO) certifies nothing narrow, so nothing is refused"
+  Alcotest.(check bool) "needs IO certifies nothing narrow, so nothing is refused"
     false (has_errors ctx)
 
 let test_fn_grant_dead_code_is_not_charged () =
@@ -14245,7 +14268,7 @@ let test_fn_grant_dead_code_is_not_charged () =
         Err(_) -> ()
       end
     end
-    fn log(cap : Cap(IO.Console), msg : String) : () do
+    fn log(msg : String) : () needs IO.Console do
       println(msg)
       ()
     end
@@ -14376,31 +14399,29 @@ let test_module_scoped_caps_with_prelude_flattened () =
     true (has_error_with errors "granted `Cap(IO.Console)`")
 
 let test_cap_param_does_not_force_threading () =
-  (* A capability parameter marks authority at a module boundary. It does NOT
-     oblige the function to enumerate every capability it reaches: that is what
-     the module's `needs` and the program's grant are for. Requiring a second
-     parameter here is exactly the threading the module-scoped design rejects. *)
-  (* Check 1 requires `needs` for every `Cap(X)` in a signature, `main`'s
-     `Cap(IO)` included — hence `needs IO` alongside the narrower needs
-     `handle` uses; that requirement is unrelated to and unweakened by this
-     task, see the module ceiling assertion in the next test. *)
+  (* A function with no `needs` clause is not a bound point. It does NOT have
+     to enumerate every capability it reaches: that is what the module's
+     `needs` and the program's grant are for. Requiring a clause here is
+     exactly the threading the module-scoped design rejects. (Before ocap
+     phase 7b this was a `Cap(IO.FileWrite)` parameter, which imposed no
+     ceiling either; the parameter form is retired.) *)
   let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod NoThread do
     needs IO.Console
     needs IO.FileWrite
     needs IO
-    fn handle(c : Cap(IO.FileWrite), msg : String) : () do
+    fn handle(msg : String) : () do
       println("handling")
       match file_write("/tmp/no_thread", msg) do
         Ok(_) -> ()
         Err(_) -> ()
       end
     end
-    fn main(cap : Cap(IO)) : () do
-      handle(cap_narrow(cap), "x")
+    fn main() : () needs IO do
+      handle("x")
     end
   end|}) in
   Alcotest.(check bool)
-    "a Cap parameter does not impose a per-function ceiling"
+    "a function without a needs clause has no per-function ceiling"
     false (has_errors ctx)
 
 let test_main_grant_still_bounds_the_program () =
@@ -20604,7 +20625,7 @@ let compiler_suites =
           Alcotest.test_case "actor defined never spawned: free" `Quick test_actor_defined_never_spawned_is_free;
           Alcotest.test_case "actor init IO charged to grant" `Quick test_actor_init_io_is_charged_to_grant;
           Alcotest.test_case "narrowed cap cannot reach a Cap(IO) signature" `Quick test_narrowed_cap_cannot_reach_wide_signature;
-          Alcotest.test_case "Cap(IO) grant reaches a Cap(IO) signature" `Quick test_wide_grant_reaches_wide_signature;
+          Alcotest.test_case "needs IO grant reaches a needs IO bound" `Quick test_wide_grant_reaches_wide_signature;
           (* Same-named actors across modules (2026-08-17): distinct closures *)
           Alcotest.test_case "same-named actors: only spawned one charged" `Quick test_same_named_actors_only_spawned_one_charged;
           Alcotest.test_case "same-named actors: spawned one still rejected" `Quick test_same_named_actors_spawned_one_still_rejected;

@@ -1,7 +1,7 @@
 -- The app of scenario "hcr_role_policy": a topology app (no `main`; it is
 -- generated from the topology the scenario writes) with two pools. `back`
 -- serves Echo.Server, bound to the function Back.serve_one, whose own caps
--- hold the session it is handed (caps=...,Session.Live in the manifest);
+-- hold the session it is handed (caps=Session.Live in the manifest);
 -- `front` asks it for 4 every 150 ms and prints each new answer, until the
 -- stop file exists.
 --

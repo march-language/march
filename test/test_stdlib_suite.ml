@@ -1268,7 +1268,7 @@ let test_eval_pid_to_int_roundtrip () =
       (n, to_string(pa) == "Pid(" ++ int_to_string(n) ++ ")", is_alive(back))
     end
   end|} in
-  match call_fn env "main" [March_eval.Eval.VUnit] with
+  match call_fn env "main" [] with
   | March_eval.Eval.VTuple [March_eval.Eval.VInt _; March_eval.Eval.VBool disp; March_eval.Eval.VBool alive] ->
     Alcotest.(check bool) "pid_to_int is the Pid(N) display index" true disp;
     Alcotest.(check bool) "pid_of_int(pid_to_int(p)) is p" true alive

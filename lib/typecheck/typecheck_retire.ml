@@ -176,8 +176,14 @@ let param_start = function
   | Ast.FPNamed p | Ast.FPDefault (p, _) -> Some (start_of p.Ast.param_name.Ast.span)
   | Ast.FPPat _ -> None
 
-let check_module ~(iter_expr : (Ast.expr -> unit) -> Ast.expr -> unit) (errors : Err.ctx)
+(* [~wrapped]: the declarations are `march check`'s [LibCheck] wrapper, one
+   [DMod] per checked file, so each file's own `main` is one level down. *)
+let check_module ?(wrapped = false) ~(iter_expr : (Ast.expr -> unit) -> Ast.expr -> unit) (errors : Err.ctx)
     (decls : Ast.decl list) : unit =
+  (* The declarations a program's entry `main` sits among. *)
+  let entry_decls =
+    if wrapped then List.concat_map (function Ast.DMod (_, _, ds, _) -> ds | _ -> []) decls else decls
+  in
   let fns : fn_info list ref = ref [] in
   (* Every expression of a declaration, with its nested ones visited. *)
   let rec exprs_of_decl (f : Ast.expr -> unit) (d : Ast.decl) =
@@ -242,7 +248,8 @@ let check_module ~(iter_expr : (Ast.expr -> unit) -> Ast.expr -> unit) (errors :
       List.iter (fun (f : Ast.field) -> note f.Ast.fld_ty) a.Ast.actor_state;
       note_plain_params a.Ast.actor_init_params;
       List.iter (fun (h : Ast.actor_handler) -> note_plain_params h.Ast.ah_params) a.Ast.actor_handlers
-    | Ast.DMod (nm, _, ds, _) -> List.iter (types_of_decl ~prefix:(prefix ^ nm.Ast.txt ^ ".") ~top:false) ds
+    | Ast.DMod (nm, _, ds, _) ->
+      List.iter (types_of_decl ~prefix:(prefix ^ nm.Ast.txt ^ ".") ~top:(wrapped && top && prefix = "")) ds
     | Ast.DDescribe (_, ds, _) -> List.iter (types_of_decl ~prefix ~top:false) ds
     | Ast.DImpl (idef, _) ->
       List.iter
@@ -358,7 +365,7 @@ let check_module ~(iter_expr : (Ast.expr -> unit) -> Ast.expr -> unit) (errors :
           end
         | [] -> ())
       | _ -> ())
-    decls;
+    entry_decls;
   (* ── parameters of named functions ── *)
   let reported : (Ast.span, unit) Hashtbl.t = Hashtbl.create 16 in
   (* Arguments a fix deletes (a retired parameter's), so a `cap_narrow`

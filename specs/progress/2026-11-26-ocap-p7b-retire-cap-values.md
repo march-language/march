@@ -49,6 +49,15 @@ Follows phase 7a (`2026-11-24-ocap-p7a-mock.md`) and its gap fixes
 - **Stdlib**: `SessionNode.run*`, `run_party`, `serve_party` take no `Cap(IO)`;
   `SessionNode.drain_epochs(soft, hard)` is a checked operation under `IO.Cluster`
   returning `Result((), CapError)`; the stdlib mints with `mint_cap()`.
+- **Where `main` is**: a file's `main` under `march check` (which wraps each file in a
+  synthetic `LibCheck` module) is recognised as the entry, so its deprecated `Cap` form
+  warns there as under `--check` and its `needs` clause is not a bound point.
+- **`--cap-sandbox`**: the embedded profile counts `main`'s `needs` clause among the
+  program's own capabilities (`own_caps_of_this_module`, `bin/main.ml`), as `main`'s `Cap`
+  parameter types were; without it a `needs`-form server was denied network.
+- **Realtime exclusion** (`realtime_mixed`, Check 7 in `typecheck_caps.ml`) also reads a
+  function's `needs` clause (`IO`, `Alloc`, `Panic`), the form that replaced the excluded
+  `Cap` parameters.
 - **Corpus**: about 1,250 `.march` files (tests, examples, benches, demos, forge
   fixtures and templates, the type corpus, the error corpus, the error tour) migrated by a
   one-off driver applying the compiler's own fixes through `--check-json` (verified fixes

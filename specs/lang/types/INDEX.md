@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t463 accept, t01–t462 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (206 accept, 292 reject; see the Result line below) -->
+# Typing corpus index (t01–t463 accept, t01–t464 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (206 accept, 293 reject; see the Result line below) -->
 
 **Two-repo rule.** This corpus is also checked by
 [march-language/march-lean](https://github.com/march-language/march-lean), an
@@ -261,7 +261,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 498/498: 206 accept, 292
+Exit 0 iff every program behaves as declared (currently 499/499: 206 accept, 293
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -559,6 +559,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t39_transitive_use_missing_cap` | **Check 4 (§2.8.6, capabilities widening Task 2): transitive `use` coverage, REJECT side**; companion to `accept/t49` with the covering `needs IO.Mut` line removed: `Main` `use`s `Vault` (`needs IO.Mut`) **and references `Vault.new`**, but declares no `needs` of its own, so `declared_needs = []` covers no capability; Check 4 raises an ERROR (not a warning). The `Vault.new` reference is essential since Check 4 became demand-driven (2026-08-06): without it the import imposes no obligation and the fixture would silently stop testing Check 4 | `` Module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs` `` |
 | `t40_migrate_state_does_io` | **Check 8 (§2.8.9, capabilities widening Task 3): the REJECT side**; companion to `accept/t53` with the migrate fn's body changed to call `println` (`IO.Console` in `builtin_cap_table`); `counter_migrate_state`'s own capability closure is now non-empty, so Check 8 raises regardless of the module's `needs IO.Console` declaration | `` `migrate_state` must be IO-free `` |
 | `t41_realtime_excludes_cap_io` | **Check 7 (§2.8.9, capabilities widening Task 3): realtime exclusion**; a user-declared nullary `type Realtime = Realtime` (needed because `Realtime` is not itself pre-registered in `builtin_types`) makes `Tagged(Int, Realtime)` resolve as a surface type; `step`'s signature combines it with `Cap(IO)`, one of the three excluded roots (`Alloc`/`IO`/`Panic`); Check 7 (`is_realtime_tagged`/`is_excluded_cap`, `typecheck.ml:5760-5765`) matches on the type NAME, so a user-declared `Realtime` trips it exactly like a built-in one would | `` takes `Tagged(_, Realtime)` but also takes `Cap(IO)` `` |
+| `t464_realtime_excludes_needs_io` | **Check 7 in the `needs` form (ocap phase 7b)**: since `Cap(IO)` parameters were retired a function holds IO by its `needs` clause, so Check 7 reads it too; `step` takes `Tagged(Int, Realtime)` and asks for `needs IO`, as t41 takes `Cap(IO)` | `` takes `Tagged(_, Realtime)` but also asks for `needs IO` `` |
 | `t42_cap_no_panic_explicit_panic` | **`cap no_panic` (§2.8.11, capabilities widening Task 4): the most direct panic surface**; `fail`'s body calls `panic` directly; `panic` is a member of `panic_surface_direct` (`typecheck.ml:6408-6414`), matched with no fixpoint/transitive step needed | `` calls `panic`, which can panic `` |
 | `t43_cap_no_alloc_tuple` | **`cap no_alloc` (§2.8.11, capabilities widening Task 4): non-empty tuple construction**, `make_pair`'s `(a, b)` return is a heap 2-tuple escaping the call, so the allocation contract the cap imposes fails | `` `make_pair` is in `cap no_alloc` module `NoAllocPair` but allocates `` |
 | `t44_cap_no_extern_extern_block` | **`cap no_extern` (§2.8.11, capabilities widening Task 4): an `extern` block present**; `check_no_extern_module`'s `DExtern` arm (`typecheck.ml:6608-6612`) raises unconditionally on any extern block, regardless of whether its own Check 5/1c obligations are separately satisfied (they are, here; `needs IO.FileSystem` covers Check 5 cleanly; only a WARNING-level Check 1c diagnostic about the missing `needs IO.Foreign` fires alongside, not the pinned substring) | `` contains an `extern` block `` |
@@ -652,7 +653,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t178_letstar_no_flat_map` | **`let*` (generalized monadic bind, 2026-08-14, `specs/lang/let-star-generalized-bind.md`): no matching `flat_map`.** `let*` resolves `<Type>.flat_map` from the RHS's inferred type; a type with no `flat_map` in a same-named module (here a bare `Widget`) is a clear, actionable error naming exactly what to define, not a crash or a generic "unbound variable" | ``let*` needs `Widget.flat_map`, but it doesn't exist.` |
 | `t179_letstar_last_expr` | **`let*`: trailing binder rejected, mirrors `let?`'s `t67`/`r05`.** A `let*` with an empty continuation can never unify against `M(b)`, so it is caught with the same "cannot be the last expression in a block" shape `let?` already has, generalized to name the RHS's own type instead of hardcoding `Result` | ``let*` cannot be the last expression in a block.` |
 
-**Result: 498 / 498 (206 accept, 292 reject).** `accept/t296`–`t299` and
+**Result: 499 / 499 (206 accept, 293 reject).** `accept/t296`–`t299` and
 `reject/t300`–`t307` (2026-10-06, Part C, Phase C2 of
 `specs/plans/2026-09-25-send-data-race-freedom-plan.md`): `RingBuf` is
 `always_linear`. The eight rejects are the plan's holes H1–H8, each of which

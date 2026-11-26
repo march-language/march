@@ -715,7 +715,23 @@ let own_caps_of_this_module ~stdlib_files typecheck_env
   in
   walk "" m.March_ast.Ast.mod_decls;
   let belongs qname = Hashtbl.mem own_keys qname in
-  List.concat_map (fun (qname, cs) -> if belongs qname then cs else []) own
+  (* `main`'s `needs` clause is the program's grant, as its `Cap` parameters
+     were before ocap phase 7b (their types counted among `main`'s own caps):
+     what the program asked for is what the profile allows.  Only `main`'s:
+     another function's clause is a bound on it, not a use. *)
+  let main_request =
+    List.concat_map (function
+        | March_ast.Ast.DFn (fd, _) when fd.March_ast.Ast.fn_name.March_ast.Ast.txt = "main" -> (
+          match fd.March_ast.Ast.fn_needs with
+          | Some (paths, _) ->
+            List.map (fun (p, _) ->
+                String.concat "." (List.map (fun (n : March_ast.Ast.name) -> n.March_ast.Ast.txt) p))
+              paths
+          | None -> [])
+        | _ -> []) m.March_ast.Ast.mod_decls
+  in
+  main_request
+  @ List.concat_map (fun (qname, cs) -> if belongs qname then cs else []) own
   |> List.sort_uniq String.compare
   |> March_caps.Cap_lattice.normalize
   |> List.sort String.compare

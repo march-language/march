@@ -33,6 +33,11 @@ git log is authoritative for exact commits.
 - **`cap_narrow` and `root_cap` are gone.** Each is an error (`cap_narrow_retired`,
   `root_cap_reference`) everywhere, test blocks and the REPL included. To run code under
   less authority, use `restrict SCOPE do ... end`.
+- **`--cap-sandbox` grants what `main`'s `needs` clause asks for**, as it granted what
+  `main`'s `Cap` parameters named.
+- **A realtime function's `needs` clause is checked like its parameters were.** A function
+  taking `Tagged(_, Realtime)` cannot ask for `needs IO`, `needs Alloc` or `needs Panic`
+  (`realtime_mixed`), as it could not take `Cap(IO)`, `Cap(Alloc)` or `Cap(Panic)`.
 - **`mint_cap()` takes no argument.** A proof capability is minted with `mint_cap()`; the old
   `mint_cap(c)` is `mint_cap_invalid`, with a fix that drops the argument.
 - **Choreography runners take no capabilities.** A role body is always

@@ -1848,9 +1848,10 @@ let cli_granted_body_ok =
 let cli_granted_body_missing_caps =
   Alcotest.test_case "CLI: a body still taking the grant as Cap parameters is refused" `Quick (fun () ->
       let src = replace_all ~needle:"fn (s, st) -> cons(s, st)"
-          ~by:"fn (s, st) -> cons(s, st)" granted_cli_src in
+          ~by:"fn (s, con, st) -> cons(s, con, st)" granted_cli_src in
       let src = replace_all ~needle:"pfn cons(s : Cap(Session.Live), st"
-          ~by:"pfn cons(s : Cap(Session.Live), st" src in
+          ~by:"pfn cons(s : Cap(Session.Live), con : Cap(IO.Console), st" src in
+      Alcotest.(check bool) "the mutation applied" true (src <> granted_cli_src);
       let rc, out = check_cli src in
       Alcotest.(check int) "exit code" 1 rc;
       Alcotest.(check bool) ("the retired parameter and the arity (output: " ^ out ^ ")") true
@@ -1958,8 +1959,6 @@ let cli_role_grant_widened_ok =
       let src = replace_all ~needle:"role Cons needs IO.Console
 " ~by:"role Cons needs IO.Console, IO.FileWrite
 " violation_src in
-      let src = replace_all ~needle:"st" ~by:"st" src in
-      let src = replace_all ~needle:"fn (s, st) -> cons(s, st)" ~by:"fn (s, st) -> cons(s, st)" src in
       let rc, out = check_cli src in
       Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc)
 
@@ -2023,7 +2022,7 @@ let cli_role_grant_actor_kind_wider_than_main =
       Alcotest.(check int) "exit code" 1 rc;
       Alcotest.(check bool) ("names main's grant (output: " ^ out ^ ")") true
         (contains_text out "`role Cons needs Actor.Debug` is wider than `main`'s grant"
-         && contains_text out "`needs Actor.Debug`"))
+         && contains_text out "add `Actor.Debug` to `main`'s `needs` clause"))
 
 (* A hosted role: `start` is charged, and so is the actor behind `host`
    when it is spawned in the same function. *)
@@ -2074,15 +2073,13 @@ let cli_dump_role_authority =
       let src = replace_all ~needle:"role Cons needs IO.Console
 " ~by:"role Cons needs IO.Console, IO.FileWrite
 " violation_src in
-      let src = replace_all ~needle:"st" ~by:"st" src in
-      let src = replace_all ~needle:"fn (s, st) -> cons(s, st)" ~by:"fn (s, st) -> cons(s, st)" src in
       let rc, out = check_cli ~flags:"--dump-role-authority" src in
       Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc;
       List.iter
         (fun needle ->
            Alcotest.(check bool) (needle ^ " (output: " ^ out ^ ")") true (contains_text out needle))
         [ "role authority: Stream.Cons"; "grant: IO.Console, IO.FileWrite";
-          "root: the body passed to `Stream_Run.run_Cons`, in `main`"; "reaches: IO.Console, IO.FileWrite";
+          "root: the body passed to `Stream_Run.run_Cons`, in `main`"; "reaches: IO.FileWrite";
           "values: none"; "actors: none" ])
 
 (* ── the root is whatever VALUE flows into the body parameter ──────────

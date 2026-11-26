@@ -288,7 +288,6 @@ let fn_transitive_capability_closures_tbl (env : env)
 (** [check_module_needs env mod_name decls] validates capability declarations for a module:
     1. Every Cap(X) in any function signature must be covered by a [needs] declaration.
     2. Every [needs X] must be used by at least one function.
-    3. Hint when Cap(IO) (root) is used — narrower caps may be more appropriate.
 
     [cap_qname_prefix] is the fully-accumulated dotted path (from
     [env.cap_qual_prefix] extended by [mod_name.txt], or [mod_name.txt] alone
@@ -871,6 +870,14 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       true
     | None -> false
   in
+  (* The program's entry `main`: bare at the entry module, and one file
+     module down under `march check`, which wraps each checked file in a
+     synthetic [LibCheck] module ([bin/main.ml]'s [run_check_cmd]). *)
+  let is_entry_main (qname : string) =
+    qname = "main"
+    || (env.current_module = "LibCheck" && env.cap_qual_prefix = ""
+        && cap_qname_prefix = mod_name.Ast.txt && qname = mod_name.Ast.txt ^ ".main")
+  in
   let record_fn_bound ?(origin = Fn_decl) ~(qname : string) (def : Ast.fn_def) : unit =
     match def.Ast.fn_needs with
     | None -> ()
@@ -898,7 +905,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          ocap phase 7b every program asks this way, and a bound point makes
          [check_fn_bounds] solve rows over the whole environment, which grows
          without limit in a long-lived env (the LSP, the property suite). *)
-      if not (qname = "main" && origin = Fn_decl) then
+      if not (is_entry_main qname && origin = Fn_decl) then
         Hashtbl.replace env.fn_bound_points qname
           { fb_caps = List.sort_uniq String.compare bound; fb_span = nsp;
             fb_site = def.Ast.fn_name.Ast.span; fb_origin = origin }
@@ -2433,9 +2440,10 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     | _ -> ()
   ) decls;
   (* Check 7 — realtime exclusion.
-     A function with `Tagged(_, Realtime)` cannot also take `Cap(Alloc)`,
-     `Cap(IO)`, or `Cap(Panic)` as parameters — those capabilities are excluded
-     from realtime contexts by the narrowing rule in §3/§5. *)
+     A function with `Tagged(_, Realtime)` cannot also hold `Alloc`, `IO` or
+     `Panic` — those capabilities are excluded from realtime contexts by the
+     narrowing rule in §3/§5.  It holds one by a `Cap(K)` parameter or, since
+     ocap phase 7b retired those, by its `needs` clause. *)
   let is_realtime_tagged = function
     | Ast.TyCon ({txt="Tagged";_}, [_; Ast.TyCon ({txt="Realtime";_}, [])]) -> true
     | _ -> false
@@ -2454,25 +2462,37 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         ) c.Ast.fc_params
       ) def.fn_clauses in
       let has_realtime = List.exists is_realtime_tagged all_param_tys in
-      if has_realtime then
+      let realtime_mixed ~verb ~held ~sp =
+        Err.error ~code:Err.Code.realtime_mixed env.errors ~span:sp
+          (render_parts [
+            MPText "The function "; MPCode def.fn_name.txt;
+            MPText " takes "; MPCode "Tagged(_, Realtime)";
+            MPText (" but also " ^ verb ^ " "); MPCode held;
+            MPText ".";
+            MPBreak; MPText "Realtime functions cannot hold ";
+            MPCode held;
+            MPText " — allocation, IO, and panic are excluded from realtime contexts.";
+            MPBreak; MPText "hint: remove "; MPCode held
+          ])
+      in
+      if has_realtime then begin
         List.iter (fun t ->
           if is_excluded_cap t then begin
             let cap_name = match t with
               | Ast.TyCon (_, [Ast.TyCon ({txt;_}, [])]) -> txt
               | _ -> "?" in
-            Err.error ~code:Err.Code.realtime_mixed env.errors ~span:sp
-              (render_parts [
-                MPText "The function "; MPCode def.fn_name.txt;
-                MPText " takes "; MPCode "Tagged(_, Realtime)";
-                MPText " but also takes "; MPCode ("Cap(" ^ cap_name ^ ")");
-                MPText ".";
-                MPBreak; MPText "Realtime functions cannot hold ";
-                MPCode ("Cap(" ^ cap_name ^ ")");
-                MPText " — allocation, IO, and panic are excluded from realtime contexts.";
-                MPBreak; MPText "hint: remove "; MPCode ("Cap(" ^ cap_name ^ ")")
-              ])
+            realtime_mixed ~verb:"takes" ~held:("Cap(" ^ cap_name ^ ")") ~sp
           end
-        ) all_param_tys
+        ) all_param_tys;
+        match def.Ast.fn_needs with
+        | None -> ()
+        | Some (paths, nsp) ->
+          List.iter (fun (p, _) ->
+            match cap_path_of_names p with
+            | ("Alloc" | "IO" | "Panic") as c ->
+              realtime_mixed ~verb:"asks for" ~held:("needs " ^ c) ~sp:nsp
+            | _ -> ()) paths
+      end
     | _ -> ()
   ) decls;
   (* Check 8 - migrate_state must be IO-free, Phase5C-C.5.

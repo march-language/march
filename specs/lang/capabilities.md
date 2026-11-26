@@ -2182,7 +2182,7 @@ in favour of `mock` (ocap phase 7). `cap_impl` remains for a program's own
 
 ### Specialization tags: realtime exclusion
 
-`Tagged(X, T)` annotates a capability with a policy. The key narrowing rule: a function taking `Tagged(_, Realtime)` is in a realtime context and cannot also hold `Cap(Alloc)` or `Cap(Panic)`. The compiler rejects mixed signatures:
+`Tagged(X, T)` annotates a capability with a policy. The key narrowing rule: a function taking `Tagged(_, Realtime)` is in a realtime context and cannot also hold `Alloc`, `IO` or `Panic`, whether as a `Cap(Alloc)` parameter or by asking for it in a `needs` clause (`fn f(t : Tagged(DSP, Realtime)) : () needs IO` is refused too). The compiler rejects mixed signatures:
 
 ```march
 type DSP = DSP
