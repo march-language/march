@@ -1892,13 +1892,24 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
            accepted and crashed the native REPL, and a result of unknown type
            printed as its tagged word.  An unannotated or exotic signature
            keeps the placeholder, as [prebind_fn_scheme] documents. *)
+        (* Only for a lazily loaded stdlib module (Stdlib_manifest's
+           allowlist), the case that crashed.  Every other route into the
+           registry still gets the placeholder: a stdlib-less check (the
+           compiler's own test harness) reaches the whole stdlib this way,
+           where `println` is the bare builtin returning `()`, and typing
+           `Authority.ignore` there rejected nine programs that compile.
+           Widening it to dependencies and those checks is
+           todos/2026-11-26-registry-fn-exports-untyped-outside-lazy-stdlib.md. *)
+        let lazily_loaded =
+          List.mem (March_modules.Module_registry.module_name_to_filename mod_name)
+            March_modules.Stdlib_manifest.lazily_loaded_allowlist in
         let scheme =
           match entry.ex_fn with
-          | Some def ->
+          | Some def when lazily_loaded ->
             (match !registry_fn_scheme def with
              | Some sch -> sch
              | None -> Mono (fresh_var 0))
-          | None -> Mono (fresh_var 0) in
+          | _ -> Mono (fresh_var 0) in
         let env = { env with vars = StrMap.add qname scheme env.vars } in
         (match entry.ex_kind with
          | ExFn -> { env with qual_fn_names = StrMap.add qname () env.qual_fn_names }

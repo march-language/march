@@ -19,10 +19,13 @@ Found while fixing specs/progress/2026-11-11-repl-int-result-printed-tagged.md.
 ## Fixed (2026-11-25)
 
 A registry export of a function now carries its definition (`ex_fn` on
-`Module_registry.export_entry`), and `load_module_into_env` binds it at the scheme
-`prebind_fn_scheme` builds from its annotations (through `Typecheck_env.registry_fn_scheme`,
-since that function is defined later). An unannotated or exotic signature keeps the fresh
-variable.
+`Module_registry.export_entry`). For a module on `Stdlib_manifest.lazily_loaded_allowlist`,
+`load_module_into_env` binds it at the scheme `prebind_fn_scheme` builds from its
+annotations (through `Typecheck_env.registry_fn_scheme`, since that function is defined
+later). An unannotated or exotic signature keeps the fresh variable, and so does every
+other registry-loaded module: doing it for all of them broke nine stdlib-less compiler
+tests in CI, recorded with the follow-up in
+`todos/2026-11-26-registry-fn-exports-untyped-outside-lazy-stdlib.md`.
 
 After the fix: `march --check` refuses `LazyNicheProbe.first_or(true, "x")` with
 "expected `List(Int)` but got `Bool`" (it exited 0 before), the REPL prints the same

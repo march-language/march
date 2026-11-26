@@ -88,12 +88,12 @@ case $f1054 of
   $Tuple2($f1055, $f1056) -> dec_rc $f1054;
 let rest : '_ = $f1056 in
 let ms : '_ = $f1055 in
-let $t1051 : '_ = let $t1050 : '_ = let $rc_150 : '_ = string_join(ms, ",") in
+let $t1051 : '_ = let $t1050 : '_ = let $rc_152 : '_ = string_join(ms, ",") in
 dec_rc ms;
-$rc_150 in
-let $rc_149 : '_ = ++("methods=", $t1050) in
+$rc_152 in
+let $rc_151 : '_ = ++("methods=", $t1050) in
 dec_rc $t1050;
-$rc_149 in
+$rc_151 in
 let $t1052 : ('_, '_) = ($t1051, rest) in
 alloc Ok($t1052)
   _ -> dec_rc $f1054;
@@ -324,16 +324,20 @@ call_ptr go$dps($t6, $trmc4)
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t1965 : Int = let $t1964 : List(Int) = ascending(0, 5) in
-let $rc_148 : Int = List.sum_int($t1964) in
+  let $t1965 : String = let $t1964 : List(Int) = ascending(0, 5) in
+let $rc_150 : String = List.sum_int($t1964) in
 dec_rc $t1964;
-$rc_148 in
-println($t1965);
-let $t1967 : Int = let $t1966 : List(Int) = squares(5) in
-let $rc_147 : Int = List.sum_int($t1966) in
+$rc_150 in
+let $rc_149 : () = println($t1965) in
+dec_rc $t1965;
+$rc_149;
+let $t1967 : String = let $t1966 : List(Int) = squares(5) in
+let $rc_148 : String = List.sum_int($t1966) in
 dec_rc $t1966;
-$rc_147 in
-println($t1967)
+$rc_148 in
+let $rc_147 : () = println($t1967) in
+dec_rc $t1967;
+$rc_147
 
 ## squares
 fn squares(n : Int) : List(Int) =

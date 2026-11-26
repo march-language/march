@@ -27,6 +27,10 @@ type module_exports = {
   me_entries : export_entry list;
 }
 
+(** The stdlib file a module name maps to by convention ("HttpClient" ->
+    "http_client.march"). *)
+val module_name_to_filename : string -> string
+
 (** Register a module's exports in the global registry. *)
 val register : string -> module_exports -> unit
 

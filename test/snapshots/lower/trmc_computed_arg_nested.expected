@@ -668,10 +668,10 @@ alloc List.Cons(a, $t3)
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t1965 : Int = let $t1964 : List(Int) = ascending(0, 5) in
+  let $t1965 : String = let $t1964 : List(Int) = ascending(0, 5) in
 List.sum_int($t1964) in
 println($t1965);
-let $t1967 : Int = let $t1966 : List(Int) = squares(5) in
+let $t1967 : String = let $t1966 : List(Int) = squares(5) in
 List.sum_int($t1966) in
 println($t1967)
 

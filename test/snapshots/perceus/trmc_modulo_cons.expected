@@ -86,12 +86,12 @@ case $f1055 of
   $Tuple2($f1056, $f1057) -> dec_rc $f1055;
 let rest : '_ = $f1057 in
 let ms : '_ = $f1056 in
-let $t1052 : '_ = let $t1051 : '_ = let $rc_149 : '_ = string_join(ms, ",") in
+let $t1052 : '_ = let $t1051 : '_ = let $rc_150 : '_ = string_join(ms, ",") in
 dec_rc ms;
-$rc_149 in
-let $rc_148 : '_ = ++("methods=", $t1051) in
+$rc_150 in
+let $rc_149 : '_ = ++("methods=", $t1051) in
 dec_rc $t1051;
-$rc_148 in
+$rc_149 in
 let $t1053 : ('_, '_) = ($t1052, rest) in
 alloc Ok($t1053)
   _ -> dec_rc $f1055;
@@ -299,10 +299,12 @@ call_ptr go($t15, $t16)
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t1967 : Int = let $t1966 : List(Int) = let $t1965 : List(Int) = List.range(1, 5) in
+  let $t1967 : String = let $t1966 : List(Int) = let $t1965 : List(Int) = List.range(1, 5) in
 bump($t1965) in
-let $rc_147 : Int = List.sum_int($t1966) in
+let $rc_148 : String = List.sum_int($t1966) in
 dec_rc $t1966;
-$rc_147 in
-println($t1967)
+$rc_148 in
+let $rc_147 : () = println($t1967) in
+dec_rc $t1967;
+$rc_147
 
