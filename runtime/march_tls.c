@@ -364,6 +364,55 @@ int64_t march_tls_pq_available(void) {
 
 /* ── Handshake ────────────────────────────────────────────────────────── */
 
+/* Bind [ssl] to [fd].  OpenSSL's own socket BIO writes with write(), so a
+ * TLS write to a peer that has reset the connection raises SIGPIPE, whose
+ * default action kills the process.  macOS/BSD turn that off per socket
+ * (SO_NOSIGPIPE, tls_fd_nosigpipe).  Linux has no such option, so there the
+ * session gets the socket BIO with its write replaced by
+ * send(MSG_NOSIGNAL): every write OpenSSL makes on the connection
+ * (SSL_write, and the tickets, alerts and key updates SSL_read or
+ * SSL_shutdown can send) then fails with EPIPE and never signals.  The BIO
+ * keeps the socket type, so SSL_get_fd still answers the fd.  Returns 1,
+ * or 0 with an OpenSSL error queued. */
+#if !defined(SO_NOSIGPIPE) && defined(MSG_NOSIGNAL)
+static int tls_bio_write_nosignal(BIO *b, const char *in, int inl) {
+    int fd = -1;
+    BIO_get_fd(b, &fd);
+    errno = 0;
+    int ret = (int)send(fd, in, (size_t)inl, MSG_NOSIGNAL);
+    BIO_clear_retry_flags(b);
+    if (ret <= 0 && BIO_sock_should_retry(ret)) BIO_set_retry_write(b);
+    return ret;
+}
+
+static BIO_METHOD *g_tls_bio_method;
+static pthread_once_t g_tls_bio_once = PTHREAD_ONCE_INIT;
+static void tls_bio_method_init(void) {
+    const BIO_METHOD *sock = BIO_s_socket();
+    BIO_METHOD *m = BIO_meth_new(BIO_TYPE_SOCKET, "socket (MSG_NOSIGNAL)");
+    if (!m) return;
+    BIO_meth_set_write(m, tls_bio_write_nosignal);
+    BIO_meth_set_read(m, BIO_meth_get_read(sock));
+    BIO_meth_set_puts(m, BIO_meth_get_puts(sock));
+    BIO_meth_set_ctrl(m, BIO_meth_get_ctrl(sock));
+    BIO_meth_set_create(m, BIO_meth_get_create(sock));
+    BIO_meth_set_destroy(m, BIO_meth_get_destroy(sock));
+    g_tls_bio_method = m;
+}
+
+static int tls_set_fd(SSL *ssl, int fd) {
+    pthread_once(&g_tls_bio_once, tls_bio_method_init);
+    if (!g_tls_bio_method) return SSL_set_fd(ssl, fd);
+    BIO *b = BIO_new(g_tls_bio_method);
+    if (!b) return 0;
+    BIO_set_fd(b, fd, BIO_NOCLOSE);
+    SSL_set_bio(ssl, b, b);
+    return 1;
+}
+#else
+static int tls_set_fd(SSL *ssl, int fd) { return SSL_set_fd(ssl, fd); }
+#endif
+
 /* ── Driving OpenSSL without holding the thread ───────────────────────────
  * Every SSL_* call below runs on a NON-BLOCKING fd, and WANT_READ /
  * WANT_WRITE sends this green thread to march_sched_wait_fd for the
@@ -453,7 +502,7 @@ void *march_tls_connect(int64_t fd, int64_t ctx_handle, void *hostname) {
         SSL_set1_host(ssl, host);
     }
 
-    if (SSL_set_fd(ssl, (int)fd) != 1) {
+    if (tls_set_fd(ssl, (int)fd) != 1) {
         const char *e = ossl_error();
         SSL_free(ssl);
         return make_err(e);
@@ -478,7 +527,7 @@ void *march_tls_accept(int64_t fd, int64_t ctx_handle) {
     SSL *ssl = SSL_new(ctx);
     if (!ssl) return make_err(ossl_error());
 
-    if (SSL_set_fd(ssl, (int)fd) != 1) {
+    if (tls_set_fd(ssl, (int)fd) != 1) {
         const char *e = ossl_error();
         SSL_free(ssl);
         return make_err(e);
@@ -627,8 +676,10 @@ void *march_tls_write(int64_t ssl_handle, void *data) {
  * (tls_fd_nosigpipe from march_tls_connect / march_tls_accept). It must be
  * set while the socket is healthy: on a socket the peer has already reset,
  * setsockopt fails with EINVAL, and the write that follows still signals.
- * Linux has no per-socket option, so there the close blocks SIGPIPE on this
- * thread around SSL_shutdown and consumes a SIGPIPE it raised. */
+ * Linux has no per-socket option; there the session's BIO sends with
+ * MSG_NOSIGNAL (tls_set_fd), which covers every write on the connection.
+ * The block-and-consume around SSL_shutdown below predates that and stays
+ * for a build without MSG_NOSIGNAL. */
 static void tls_fd_nosigpipe(int fd) {
 #if defined(SO_NOSIGPIPE)
     if (fd >= 0) { int one = 1; (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one); }
