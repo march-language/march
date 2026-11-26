@@ -36,6 +36,11 @@ git log is authoritative for exact commits.
   `needs IO` no longer covers inspecting other actors) and `IO.Cluster`; `main` requests
   them with a parameter such as `Cap(Actor.Introspect)`. Write `Authority.must(Actor.introspect())` where you wrote
   `Actor.introspect(io)`.
+- **Compiles are about another 0.2 s faster.** Four lookups in the front end that rescanned
+  a whole list or file per item (a module's names per variable when lowering, a source file
+  per function when hashing its text, the z3 lookup per proof obligation, the call graph per
+  `@[lemma]`) now use a table built once (hello world: 1.32 s to 1.13 s before code
+  generation). Diagnostics and generated code are unchanged.
 - **Compiles are about another 0.27 s faster.** Functions the program cannot reach are now
   dropped before monomorphization instead of after closure conversion, so those passes see a
   few dozen functions on a small program instead of the whole standard library (hello world:
