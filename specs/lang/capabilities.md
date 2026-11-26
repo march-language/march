@@ -1104,10 +1104,12 @@ There is no revocation: a value made inside a block cannot be widened again or c
 cannot limit how many tasks it starts (`specs/todos/2026-11-17-ocap-env-and-spawn-scopes.md`).
 A literal target outside a scoped literal restrict (`File.read("/etc/passwd")` under
 `restrict IO.FileRead("/srv/")`) is reported when it runs, not at compile time
-(`specs/todos/2026-11-17-ocap-scoped-fn-needs-literal-check.md`). A call in tail position inside
-a framed block is not a tail call: the stack grows by one frame per call through the block
-(the layer list does not), so a very deep recursion through a kept restrict can overflow the
-stack (`specs/todos/2026-11-19-ocap-restrict-tail-calls.md`).
+(`specs/todos/2026-11-17-ocap-scoped-fn-needs-literal-check.md`). When a literal restrict is a
+function's whole body, the function's self call inside it is a tail call, so such a recursion
+runs as a loop. Otherwise a call in tail position inside a framed block is not a tail call: the
+stack grows by one frame per call through the block (the layer list does not), so a very deep
+recursion through a kept restrict, such as two functions whose restricts call each other, can
+overflow the stack.
 
 <a id="scope-values"></a>
 ### Scope values: `Scope` and `+`
@@ -1321,9 +1323,11 @@ compiler proved everything the function reaches lies within the grant's kinds, a
 function reaches no actor spawn, no call of a function value and no interface method left
 generic (such as the `show(x)` inside the polymorphic `println`). A package function that
 calls `Authority.check` itself is never proved this way. The interpreter always enters the
-frame. A call in tail position inside a kept frame is not a tail call, so a very deep
+frame. A call into a granted package's kept frame is not a tail call, so a very deep
 recursion that crosses into a granted package on every step can overflow the stack
-(`specs/todos/2026-11-17-ocap-framed-mutual-tail-recursion.md`).
+(`specs/todos/2026-11-26-grant-frame-tail-calls.md`). Tail calls between functions with
+scoped `needs` clauses are tail calls: when the callee's frame is already in force the call
+goes straight to its body.
 
 **Auditing grants.** `forge audit` prints each dependency's grant beside its capabilities
 (`reader — IO.FileRead — grant: IO.FileRead("/srv/data")`, or `— no grant`), and

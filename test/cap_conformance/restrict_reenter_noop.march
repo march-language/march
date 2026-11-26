@@ -1,11 +1,11 @@
 -- Re-entering a restrict whose layer is already on top pushes nothing (ocap
--- p5 decision 8): a 1,000-deep recursion through the same scoped restrict
+-- p5 decision 8): a 100,000-deep recursion through the same scoped restrict
 -- completes in every runtime, its innermost check is still refused outside
 -- the scope by that one restrict, and main's authority is unchanged after
--- it returns. A framed restrict body is not a tail position (a deferred
--- todo), so the stack grows one frame per call, though the layer list does
--- not: 10,000 deep overflows the stack compiled (--opt 0) and under node,
--- as a plain 10,000-deep non-tail recursion with no restrict also does.
+-- it returns. The restrict is countdown's whole body, so the body is
+-- outlined and the self call loops instead of re-entering the frame
+-- (Auth_rt.outline_restrict_body); before that the frame's restore made it
+-- a non-tail call, and 30,000 deep died with SIGBUS compiled.
 mod RestrictReenterNoop do
   needs IO.Console
   needs IO.FileRead
@@ -25,8 +25,8 @@ mod RestrictReenterNoop do
   end
 
   fn main() do
-    println(countdown(1000, "/srv/x"))
-    println(countdown(1000, "/etc/hosts"))
+    println(countdown(100000, "/srv/x"))
+    println(countdown(100000, "/etc/hosts"))
     println(probe("/etc/hosts"))
   end
 end

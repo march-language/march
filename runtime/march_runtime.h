@@ -446,8 +446,12 @@ int64_t march_handle_close(void *h);
  * is woken first (shutdown + fd-wait cancel; the cancel is forgotten before
  * this returns, so a reused number does not inherit it).  1 when nothing is
  * in flight on return, 0 on timeout (a use is stranded, e.g. by a panic
- * between enter and leave). */
+ * between enter and leave; the cancel then stays until accept hands the
+ * number to a new descriptor, march_handle_fd_accepted). */
 int64_t march_handle_close_drain(void *h, int64_t timeout_ms);
+/* Call on every descriptor accept() returns: forgets a sticky fd-wait cancel
+ * a timed-out drain left on the number (march_handle.c). */
+void    march_handle_fd_accepted(int64_t fd);
 /* Close WITHOUT releasing: ownership of raw moves to the caller (TCP -> TLS,
  * server conn -> WebSocket).  raw, or -1 if already closed. */
 int64_t march_handle_detach(void *h);

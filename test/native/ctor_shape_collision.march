@@ -1,0 +1,37 @@
+-- Two modules declare a type with the same short name and the same
+-- constructor name but different field types.  Each module's own code must
+-- build and match its own layout.  Compiled, both were keyed "Safe.Safe" and
+-- codegen resolved that key to ONE of the declarations for every module, so
+-- the other module's field was stored at the wrong type (here: a Float into
+-- an Int field, which clang rejected).  Each is now keyed by its module.
+mod CtorShapeCollision do
+  needs IO.Console
+
+  mod Aaa do
+    type Safe = Safe(Int)
+    fn mk(i : Int) : Safe do Safe(i) end
+    fn get(s : Safe) : Int do
+      match s do
+      Safe(n) -> n
+      end
+    end
+  end
+
+  mod Zzz do
+    type Safe = Safe(Float)
+    fn mk(f : Float) : Safe do Safe(f) end
+    fn get(s : Safe) : Float do
+      match s do
+      Safe(x) -> x
+      end
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let a = Aaa.mk(41)
+    let z = Zzz.mk(1.5)
+    println("a=" ++ int_to_string(Aaa.get(a) + 1))
+    println("z=" ++ float_to_string(Zzz.get(z) +. 1.0))
+    ()
+  end
+end
