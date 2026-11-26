@@ -1381,6 +1381,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`File.close` reports a write that fails when the file is flushed.** Writes through a
+  `File.Handle` are buffered, so a full disk or a quota often shows up only when the
+  handle is closed. `File.close` returned `Ok(())` anyway and the data was lost silently.
+  It now returns `Err(IoError(msg))` (the handle is still closed), and
+  `File.with_open_write` returns `Ok(Err(IoError(msg)))`.
 - **Closing a socket, listener or file after a caught panic inside an operation on it now
   releases it.** A panic between the start and end of one use (caught by `try_finally`,
   `Result.try_call`, a supervisor or a test runner) left the handle counted as in use for

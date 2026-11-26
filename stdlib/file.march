@@ -321,12 +321,22 @@ mod File do
 
   doc """
   Close `h`. Returns `Ok(())`, or `Err(Closed)` if it was already closed.
+  A handle opened for writing is flushed first: if writing the buffered
+  bytes out fails (a full disk, a quota), the result is `Err(IoError(msg))`
+  and `h` is closed all the same.
   Every later use of `h` returns `Err(Closed)`. A read or write still in
   progress on another task finishes first; the descriptor is released
   when it does.
   """
   fn close(h : File.Handle) : Result((), FileError) do
-    if handle_close(h) do Ok(()) else Err(Closed) end
+    -- Flush inside a use, before the close: a write that only fails when
+    -- the buffer is written out is reported here, not lost in the release.
+    let fd = handle_enter(h, 1)
+    if fd == -1 do Err(Closed) else
+      let flushed = file_flush(fd)
+      handle_leave(h)
+      if handle_close(h) do flushed else Err(Closed) end
+    end
   end
 
   doc """
@@ -355,7 +365,9 @@ mod File do
 
   doc """
   Like `with_open`, for writing: opens `path` with `open_write(path, mode)`,
-  passes the handle to `f`, and closes it when `f` returns or panics.
+  passes the handle to `f`, and closes it when `f` returns or panics. If
+  writing the buffered bytes out at that close fails, the result is
+  `Ok(Err(IoError(msg)))` instead of `f`'s result.
 
   ## Examples
 
@@ -367,11 +379,17 @@ mod File do
     let performed = match open_write_raw(path, mode) do
     Err(e) -> Err(e)
     Ok(h) ->
-      let result = try_finally(
-        fn _ -> f(h),
+      -- The close after `f` is the one whose flush error is reported; the
+      -- cleanup's close is for a panic in `f` and is Err(Closed) otherwise.
+      try_finally(
+        fn _ ->
+          let v = f(h)
+          match close(h) do
+          Err(IoError(msg)) -> Err(IoError(msg))
+          _ -> Ok(v)
+          end,
         fn _ -> close(h)
       )
-      Ok(result)
     end
     Ok(performed)
   end

@@ -1185,6 +1185,7 @@ void   *march_file_read_chunk(void *handle, int64_t size);
 void   *march_file_open_write(void *path, int64_t mode);
 void   *march_file_write_handle(int64_t handle, void *data);
 void   *march_file_seek(int64_t handle, int64_t offset);
+void   *march_file_flush(int64_t handle);
 /* File.Dir (runtime/march_file_beneath.c): opens beneath a directory fd. */
 void   *march_dir_open(void *path);
 void   *march_dir_open_write(void *path);
