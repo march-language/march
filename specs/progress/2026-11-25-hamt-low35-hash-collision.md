@@ -36,20 +36,26 @@ Found by the 2026-10-18 doc sweep; re-verified 2026-11-11 on a7110f95f.
 
 ## Fixed (2026-11-25)
 
-`Hamt.get`, `Hamt.insert` and `Hamt.remove` keep only the low 35 bits of what `hash_fn`
-returns (`path_hash`, one `int_and`), so every hash inside the trie and every collision
-bucket's tag is below 2^35. Two keys that agree on those bits now have equal hashes and
-share a bucket as ordinary collisions. A negative hash works too. The module header no
-longer asks callers to mask.
+A collision bucket is now matched by path, not by full hash: `same_path(a, b)` is true
+when two hashes agree on the low 35 bits, and `hamt_get`, `hamt_insert` and `hamt_remove`
+use it where they compared a bucket's tag with the key's hash. Two keys that agree on
+those bits are then ordinary collisions, told apart by `eq_fn`. A negative hash works too.
+The module header no longer asks callers to mask.
+
+The first version masked the hash to 35 bits in the public functions, as this file
+suggests. CI's `browser-repl` job refused it: the in-browser March has a 32-bit Int, so
+the literal 2^35 - 1 does not load and a product that makes it overflows. `same_path`
+compares 30 bits and 5 bits separately and needs neither.
 
 Tests: `test/stdlib/test_hamt.march`, group "hashes that agree on the low 35 bits" (five
 cases: both keys found, the second removed, the second re-inserted, a third key, negative
 hashes). On main the file never finished interpreted (killed after 60 s); it passes
-interpreted and compiled (`--compile --test`: 49 tests).
+interpreted and compiled (`--compile --test`: 49 tests). The browser build's smoke test
+(58 cases) and doc sweep (3054 examples, no new failure) pass on a local build.
 
-Cost: `bench/hash_map_bench.march` at `--opt 2`, six runs each against main's stdlib:
-9.92 to 9.97 billion instructions before and 9.92 to 9.98 after, the same within the run
-to run spread.
+Cost: not re-measured for this version. The masked version showed no difference on
+`bench/hash_map_bench.march`; this one adds work only when a lookup reaches a collision
+bucket.
 
 Not done: the plan also asks for a law in the stdlib laws pass. `Hamt` is untyped and
 takes its hash and equality as closures, which that pass (refinement contracts) cannot

@@ -26,10 +26,9 @@
 --   hash_fn : k -> Int     (must be deterministic; any Int, negative included)
 --   eq_fn   : (k, k) -> Bool, called with two arguments as eq_fn(a, b)
 -- The same hash_fn and eq_fn must be passed to every call on one trie.
--- Only the low 35 bits of the hash pick a path (7 levels of 5 bits), so
--- `get`, `insert` and `remove` keep just those bits of what hash_fn returns.
--- Keys that agree on them share a collision bucket and are told apart by
--- eq_fn.
+-- Only the low 35 bits of the hash pick a path (7 levels of 5 bits). Keys
+-- whose hashes agree on them share a collision bucket and are told apart by
+-- eq_fn, whatever the higher bits are.
 --
 -- doc: try
 
@@ -53,15 +52,17 @@ mod Hamt do
 
   -- Extract the 5-bit slot index at the given trie level from a hash.
   -- level 0 uses bits [4:0], level 1 uses bits [9:5], …
-  -- The part of a hash the trie uses: its low 35 bits (7 levels of 5 bits).
-  -- Applied once, at the public entry points. Every hash below them, and
-  -- every collision bucket's tag, is then below 2^35, so two keys that agree
-  -- on those bits have equal hashes and meet in one bucket whatever their
-  -- higher bits were. Without it the bucket carried the first key's full
-  -- hash: the second key was never found, and inserting it again rebuilt
-  -- the same bucket for ever.
-  pfn path_hash(h) do
-    int_and(h, 34359738367)
+  -- Do two hashes take the same path, that is, agree on the low 35 bits (7
+  -- levels of 5 bits)? A collision bucket is tagged with the hash of the
+  -- first key put in it, and holds every key on that path, so a bucket is
+  -- matched with this and not with `==`: comparing full hashes missed a key
+  -- whose hash differed only above bit 35, and inserting such a key again
+  -- rebuilt the same bucket for ever. Two 30-bit-and-5-bit comparisons, not
+  -- one 35-bit mask, because the in-browser March has a 32-bit Int and
+  -- cannot hold that mask.
+  pfn same_path(a, b) do
+    int_and(a, 1073741823) == int_and(b, 1073741823)
+      && int_and(int_shr(a, 30), 31) == int_and(int_shr(b, 30), 31)
   end
 
   pfn hash_slot(h, level) do
@@ -214,7 +215,7 @@ mod Hamt do
       else None end
     end
     HCollision(ch, pairs) -> do
-      if ch == h do collision_find(pairs, key, eq)
+      if same_path(ch, h) do collision_find(pairs, key, eq)
       else None end
     end
     HBranch(bitmap, children) -> do
@@ -282,7 +283,7 @@ mod Hamt do
       end
     end
     HCollision(ch, pairs) -> do
-      if ch == h do
+      if same_path(ch, h) do
         HCollision(ch, collision_insert(pairs, key, val, eq))
       else do
         -- Hash different from this collision's hash: represent the whole
@@ -329,7 +330,7 @@ mod Hamt do
       else node end
     end
     HCollision(ch, pairs) -> do
-      if ch != h do node
+      if !same_path(ch, h) do node
       else do
         let new_pairs = collision_remove(pairs, key, eq)
         match new_pairs do
@@ -458,7 +459,7 @@ mod Hamt do
       None
   """
   fn get(node, key, hash_fn, eq_fn) do
-    let h = path_hash(hash_fn(key))
+    let h = hash_fn(key)
     hamt_get(node, key, h, eq_fn, 0)
   end
 
@@ -479,7 +480,7 @@ mod Hamt do
       Some(2)
   """
   fn insert(node, key, val, hash_fn, eq_fn) do
-    let h = path_hash(hash_fn(key))
+    let h = hash_fn(key)
     hamt_insert(node, key, val, h, eq_fn, 0)
   end
 
@@ -498,7 +499,7 @@ mod Hamt do
       2
   """
   fn remove(node, key, hash_fn, eq_fn) do
-    let h = path_hash(hash_fn(key))
+    let h = hash_fn(key)
     hamt_remove(node, key, h, eq_fn, 0)
   end
 
