@@ -313,6 +313,38 @@ let test_reach_beyond_written_caps () =
   expect_error (run ~src ~digest_text:(digest ~caps:{|["IO.Clock"]|} ()) ())
     "pool \"back\": its hook App.Back.start reaches `IO.Console`, beyond the pool's written caps [IO.Clock]"
 
+(* The top-level actor kinds (ocap phase 7) in a topology app: a role may be
+   granted `Actor.Introspect`, the generated `main` requests it, a pool's
+   written caps bound it, and a pool whose code reaches it beyond them is
+   refused, as with the IO kinds. *)
+let introspect_body = {|
+    fn serve_one(env : Env, s : Cap(Session.Live), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
+      let _ = Actor.introspect()
+      Checkout_Ledger.recv_Order(s, st, fn (n, st1) ->
+        Checkout_Ledger.close(s, Checkout_Ledger.send_Receipt(s, st1, n * env.factor)))
+    end
+|}
+
+let introspect_src () =
+  entry_src ~back:("    needs Actor.Introspect\n" ^ hook ^ introspect_body) ()
+  |> Str.global_replace (Str.regexp_string "role Ledger needs IO.Console") "role Ledger needs IO.Console, Actor.Introspect"
+  |> fun s -> Str.replace_first (Str.regexp_string "  needs ClusterNode.Live\n") "  needs ClusterNode.Live\n  needs Actor.Introspect\n" s
+
+let test_actor_kind_role_grant_ok () =
+  expect_ok (run ~src:(introspect_src ()) ~digest_text:(digest ()) ())
+
+let test_actor_kind_grant_beyond_written_caps () =
+  expect_error (run ~src:(introspect_src ()) ~digest_text:(digest ~caps:{|["IO.Console"]|} ()) ())
+    "role \"Checkout.Ledger\" is granted `Actor.Introspect` (`role Ledger needs ...` in protocol Checkout), beyond pool \"back\"'s written caps [IO.Console]"
+
+let test_actor_kind_reach_beyond_written_caps () =
+  let src =
+    Str.global_replace (Str.regexp_string "role Ledger needs IO.Console, Actor.Introspect") "role Ledger needs IO.Console"
+      (introspect_src ())
+  in
+  expect_error (run ~src ~digest_text:(digest ~caps:{|["IO.Console"]|} ()) ())
+    "pool \"back\": its body App.Back.serve_one reaches `Actor.Introspect`, beyond the pool's written caps [IO.Console]"
+
 let test_foreign_needs_isolation () =
   let src = Str.global_replace (Str.regexp_string "role Ledger needs IO.Console") "role Ledger needs IO.Foreign" ok_src in
   let d = digest () in
@@ -469,6 +501,9 @@ let tests = [
   Alcotest.test_case "a hook that still takes a Cap(P) is refused" `Quick test_hook_cap_beyond_written_caps;
   Alcotest.test_case "a hook that reaches beyond the written caps" `Quick test_reach_beyond_written_caps;
   Alcotest.test_case "IO.Foreign in a non-isolated pool, when opted in" `Quick test_foreign_needs_isolation;
+  Alcotest.test_case "a role granted Actor.Introspect: main requests it" `Quick test_actor_kind_role_grant_ok;
+  Alcotest.test_case "an Actor.Introspect grant beyond the pool's written caps" `Quick test_actor_kind_grant_beyond_written_caps;
+  Alcotest.test_case "a role that reaches Actor.Introspect beyond the written caps" `Quick test_actor_kind_reach_beyond_written_caps;
   Alcotest.test_case "--topology-pools names a pool that exists" `Quick test_unknown_pool_flag;
   Alcotest.test_case "the control plane's generated wiring typechecks" `Quick test_control_wiring_typechecks;
   Alcotest.test_case "a branch labelled none/some/ok/err/nil/cons leaves the wiring well-typed" `Quick test_control_wiring_survives_prelude_labels;

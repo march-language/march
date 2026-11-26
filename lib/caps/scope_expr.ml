@@ -9,8 +9,11 @@ type form =
   | Computed of { kind : string; strings : A.expr list; options : string list }
   | Not_scope
 
+(* A capability kind: [IO] or a path under it (an unknown one is still
+   classified, so the checker can name it), or a top-level kind outside IO
+   ([Actor.Introspect], [Actor.Debug]; ocap phase 7). *)
 let is_cap_path (name : string) : bool =
-  name = "IO" || String.starts_with ~prefix:"IO." name
+  name = "IO" || String.starts_with ~prefix:"IO." name || Cap_lattice.is_authority name
 
 (* The options the `needs` grammar writes as a call ([methods(get)],
    [prefix("w.")]) and bare ([no_redirects]).  Anything else in an argument

@@ -477,6 +477,35 @@ static void test_close_cancels_listener_wait(void) {
     march_decrc(h);
 }
 
+/* ── a timed-out drain's cancel does not reach the number's next owner ── */
+static void test_drain_timeout_cancel_forgotten_on_accept(void) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { perror("socketpair"); exit(2); }
+    int num = sv[0];
+    void *h = march_handle_new(MARCH_HANDLE_TCP_BORROWED, num, 1);
+    CHECK(march_handle_enter(h, MARCH_HANDLE_TCP) == num, "enter a use that will strand");
+    CHECK(march_handle_close_drain(h, 50) == 0, "the drain times out on it");
+    march_handle_leave(h);
+    march_decrc(h);
+    /* The server closes the descriptor; the next one gets the same number. */
+    close(sv[0]);
+    close(sv[1]);
+    int nv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, nv) != 0) { perror("socketpair"); exit(2); }
+    if (nv[0] != num) {
+        fprintf(stderr, "  (skipped: the number %d was not reused, got %d)\n", num, nv[0]);
+    } else {
+        /* Without the accept hook the stale cancel is still on the number. */
+        CHECK(march_sched_wait_fd(nv[0], 0, mono_ms() + 30) == MARCH_FDWAIT_ERROR,
+              "before accept sees the number, the stale cancel still applies");
+        march_handle_fd_accepted(nv[0]);
+        CHECK(march_sched_wait_fd(nv[0], 0, mono_ms() + 30) == MARCH_FDWAIT_TIMEOUT,
+              "after accept, a wait on the new descriptor is not cancelled");
+    }
+    close(nv[0]);
+    close(nv[1]);
+}
+
 /* ── message copy shares the box ───────────────────────────────────────── */
 static void test_msg_copy_shares(void) {
     remove_counter();
@@ -608,6 +637,7 @@ int main(void) {
     test_msg_copy_shares();
     test_to_string();
     test_unwind_leaves_abandoned_uses();
+    test_drain_timeout_cancel_forgotten_on_accept();
     if (g_failed) {
         fprintf(stderr, "test_handle: %d of %d checks FAILED\n", g_failed, g_checks);
         return 1;

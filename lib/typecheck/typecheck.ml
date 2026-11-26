@@ -7965,21 +7965,23 @@ let check_role_needs env ~proto (pdef : Ast.protocol_def) : unit =
         (fun (c : Ast.name) ->
            match March_caps.Cap_lattice.suggest_cap c.txt with
            | None ->
-             (* A grant names IO capabilities only: the runner narrows each
-                path from the `Cap(IO)` it holds with `cap_narrow`, and a
-                proof capability (`Session.Live`, `ClusterNode.Live`) or a
-                foreign one (`LibC`) is not under `IO`, so the generated
-                narrowing cannot produce it.  Refused HERE, at the grant line,
-                and the generator leaves the path out ([Desugar_endpoints.
-                grants_of]), so the only diagnostic is this one, not a
-                handful inside generated code with no excerpt. *)
-             if not (March_caps.Cap_lattice.cap_subsumes "IO" c.txt) then begin
+             (* A grant names capability kinds only: the IO kinds, which the
+                runner narrows from the `Cap(IO)` it holds with `cap_narrow`,
+                and the actor kinds (`Actor.Introspect`, `Actor.Debug`), which
+                the body's own checked call uses and the walk bounds.  A proof
+                capability (`Session.Live`, `ClusterNode.Live`) or a foreign
+                one (`LibC`) is no kind.  Refused HERE, at the grant line,
+                and the generator leaves every non-IO path out of the body's
+                parameters ([Desugar_endpoints.grants_of]), so the only
+                diagnostic is this one, not a handful inside generated code
+                with no excerpt. *)
+             if not (March_caps.Cap_lattice.is_authority c.txt) then begin
                ok := false;
                err ~span:c.span
                  (Printf.sprintf
-                    "`role %s needs %s` names a capability that is not under `IO`. A role's grant is \
-                     narrowed by the runner from `main`'s `Cap(IO)`, so it can name IO capabilities \
-                     only; `%s` is a proof or foreign capability that no narrowing produces.\n\
+                    "`role %s needs %s` names a capability that is not a capability kind. A role's \
+                     grant names the kinds its code may use: those under `IO`, and `Actor.Introspect` \
+                     and `Actor.Debug`; `%s` is a proof or foreign capability.\n\
                      help: take `%s` out of the grant. The session capability is passed to every body \
                      already; a body that needs another proof capability takes it from whoever minted it."
                     r.Ast.txt c.txt c.txt c.txt)
@@ -12490,7 +12492,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
          (fun (proto, role) (caps, sp) ->
             List.iter
               (fun c ->
-                 if not (cap_subsumes "IO" c) then ()
+                 if not (March_caps.Cap_lattice.is_authority c) then ()
                  else if List.exists (fun g -> cap_subsumes g c) main_grants then ()
                  else
                    let show_main =
@@ -12538,7 +12540,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
            let show_grant = String.concat ", " (List.map (fun g -> Printf.sprintf "`%s`" g) r.rr_grant) in
            List.iter
              (fun c ->
-                if not (cap_subsumes "IO" c) || covered c || Hashtbl.mem type_mismatch k then ()
+                if not (March_caps.Cap_lattice.is_authority c) || covered c || Hashtbl.mem type_mismatch k then ()
                 else
                   let raw_chain = cap_reach_chain ~own_caps:own ~fn_refs:refs env ~from:k ~cap:c in
                   (* As a trace (plan §X7): the use is the primary span, the
@@ -12700,10 +12702,10 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
              Printf.printf "  grant: %s\n" (show_caps r.rr_grant);
              Printf.printf "  root: %s, in `%s` (%s:%d)\n" (label r) r.rr_owner r.rr_span.Ast.file
                r.rr_span.Ast.start_line;
-             (* the IO lattice only, as the check itself judges: proof caps
+             (* the lattice only (IO and the actor kinds), as the check itself judges: proof caps
                 such as `Session.Live` are not authority the grant bounds *)
              Printf.printf "  reaches: %s\n"
-               (show_caps (List.filter (cap_subsumes "IO") (List.sort_uniq String.compare (caps_of k))));
+               (show_caps (List.filter March_caps.Cap_lattice.is_authority (List.sort_uniq String.compare (caps_of k))));
              Printf.printf "  values: %s\n"
                (match sorted !values with
                 | [] -> "none"
@@ -12719,7 +12721,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                        (fun (lk, v, (sp : Ast.span)) ->
                           let owner = match Hashtbl.find_opt synthetic lk with Some (o, _, _) -> o | None -> "?" in
                           Printf.sprintf "%s (closure in `%s`, line %d) -> %s" v owner sp.Ast.start_line
-                            (show_caps (List.filter (cap_subsumes "IO") (caps_of lk))))
+                            (show_caps (List.filter March_caps.Cap_lattice.is_authority (caps_of lk))))
                        cs));
              (* the pids it holds without having spawned them (delegated) *)
              Printf.printf "  holds: %s\n"

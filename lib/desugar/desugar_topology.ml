@@ -135,15 +135,17 @@ let rec proto_roles_of acc (steps : protocol_step list) =
       | ProtoMayCrash _ | ProtoStop _ | ProtoRoleNeeds _ -> acc)
     acc steps
 
-(* IO paths only: a non-IO path is refused
-   by the typechecker at the grant line, and dropping it here keeps that the
-   only diagnostic in a topology app too. *)
+(* Capability kinds only (the IO kinds and the actor kinds): any other path
+   is refused by the typechecker at the grant line, and dropping it here
+   keeps that the only diagnostic in a topology app too.  Every kind is
+   checked against a pool's written caps; none is a body parameter (ocap
+   phase 7b). *)
 let grants_of (steps : protocol_step list) =
   List.filter_map (function
       | ProtoRoleNeeds (r, caps, _) ->
         Some (r.txt,
               List.filter_map
-                (fun (c : name) -> if March_caps.Cap_lattice.cap_subsumes "IO" c.txt then Some c.txt else None)
+                (fun (c : name) -> if March_caps.Cap_lattice.is_authority c.txt then Some c.txt else None)
                 caps)
       | _ -> None)
     steps
@@ -260,6 +262,12 @@ let grants_for f (r : role) =
   | Some pi -> Option.value ~default:[] (List.assoc_opt r.r_role pi.pi_grants)
   | None -> []
 
+(* The grants a body takes as `Cap(P)` parameters: the IO kinds.  An actor
+   kind is used through the body's own checked call. *)
+let param_grants_for f (r : role) =
+  List.filter (March_caps.Cap_lattice.cap_subsumes "IO") (grants_for f r)
+
+
 let hook_info f (p : pool) = match p.p_start with Some s -> Hashtbl.find_opt f.fns s | None -> None
 
 
@@ -279,6 +287,20 @@ let selected_pools ?pools (t : t) =
   | Some names -> List.filter (fun p -> List.mem p.p_name names) t.pools
 
 let role_by_name (t : t) n = List.find_opt (fun r -> r.r_name = n) t.roles
+
+(* The actor kinds (any non-IO kind) the selected pools' roles are granted
+   or written: the generated [main] requests them, since `Cap(IO)` does not
+   cover them. *)
+let actor_kinds_of f (t : t) (pools : pool list) : string list =
+  List.concat_map (fun (p : pool) ->
+      Option.value ~default:[] p.p_caps
+      @ List.concat_map (fun rn ->
+          match role_by_name t rn with Some r -> grants_for f r | None -> [])
+        p.p_serves)
+    pools
+  |> List.filter (fun c ->
+      March_caps.Cap_lattice.is_authority c && not (March_caps.Cap_lattice.cap_subsumes "IO" c))
+  |> List.sort_uniq String.compare
 
 (* ── Checks the annotations can decide ─────────────────────────────────── *)
 
@@ -448,8 +470,11 @@ let main_source ?pools (f : facts) (t : t) : string =
     name ^ "_open" in
   let pools = selected_pools ?pools t in
   (* The request: full IO, which the root `Cap(IO)` parameter asked for
-     before capability values were retired (ocap phase 7b). *)
-  add "fn main() : () needs IO do\n";
+     before capability values were retired (ocap phase 7b), and the actor
+     kinds its pools' roles are granted or written. *)
+  (match actor_kinds_of f t pools with
+   | [] -> add "fn main() : () needs IO do\n"
+   | ks -> add "fn main() : () needs IO, %s do\n" (String.concat ", " ks));
   (* Only ClusterNode may hand out a Cap(ClusterNode.Live) (D35), so the
      node is started here, not by a Topology helper. *)
   add "  let topology_node = match ClusterNode.start(Topology.config_from_env()) do\n";

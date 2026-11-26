@@ -1010,11 +1010,19 @@ function, to have it checked.
 
 A role's grant must also fit within `main`'s: everything the role's code reaches is part
 of the program, so `role Cons needs IO.FileWrite` under `fn main() needs IO.Console` is
-an error at the grant line. And a grant names IO
-capabilities only: `role Cons needs Session.Live` (or `ClusterNode.Live`, or `LibC`) is
-one error at the grant line, because each path is narrowed from an IO capability and no
-narrowing produces a proof or foreign capability. The session capability is passed to
-every body already.
+an error at the grant line. And a grant names capability kinds only: the IO kinds and the
+two actor kinds, `Actor.Introspect` and `Actor.Debug`. `role Cons needs Session.Live` (or
+`ClusterNode.Live`, or `LibC`) is one error at the grant line, because a proof or foreign
+capability is no kind a grant can bound. The session capability is passed to every body
+already.
+
+An actor kind in a grant bounds the body's own checked calls (`Actor.introspect()`,
+`Actor.pid_from_int(n)`, `Actor.debug()`) like an IO one: a body that reaches
+`Actor.Introspect` under `role Cons needs IO.Console` is refused, and
+`role Cons needs IO.Console, Actor.Introspect` accepts it. `main` requests the kind in its
+`needs` clause (`fn main() needs IO, Actor.Introspect do`). In a topology app the
+generated `main` requests every actor kind its pools' roles are granted or written, and a
+pool's written caps bound the actor kinds as they bound the IO ones.
 
 The grant bounds the role's *code*, not its *authority*. A body handed a pid to an actor
 with wider capabilities can message it, and a closure it receives can do whatever its

@@ -272,6 +272,7 @@ static int64_t tcp_accept_raw_until(int64_t listen_fd, int64_t deadline_ms) {
             aerr = fd < 0 ? march_errno_now() : 0;
         } while (fd < 0 && aerr == EINTR);
         if (fd < 0 && (aerr == EAGAIN || aerr == EWOULDBLOCK)) continue;
+        if (fd >= 0) march_handle_fd_accepted(fd);
         return (int64_t)fd;
     }
 }

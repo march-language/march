@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: `Actor.debug` needs `Actor.Debug`, which the restrict
+-- `restrict` names the top-level actor kinds too (ocap phase 7): a block
+-- limited to `Actor.Introspect` may mint the introspection capability, and
+-- a direct call that needs `Actor.Debug` inside it is refused at compile
+-- time. Run-time twin: test/cap_conformance/restrict_actor_kinds.
+mod Main do
+  needs Actor.Introspect
+  needs Actor.Debug
+
+  fn main() do
+    restrict Actor.Introspect do
+      let _ = Actor.introspect()
+      let _ = Actor.debug()
+      ()
+    end
+  end
+end

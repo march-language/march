@@ -82,7 +82,7 @@ mod Main do
     end
   end
 
-  fn child(intro, sup, field) do
+  fn child(sup, field) do
     match get_actor_field(sup, field) do
       None    -> Authority.must(Actor.pid_from_int(-1))
       Some(n) -> Authority.must(Actor.pid_from_int(n))
@@ -90,22 +90,21 @@ mod Main do
   end
 
   fn main() needs IO, Actor.Introspect do
-    let intro = Authority.must(Actor.introspect())
     let log = spawn(Log)
     let sup = spawn(Sup)
     send(sup, SupLog(log))
-    send(child(intro, sup, "a"), WLog(log))
-    send(child(intro, sup, "a"), Name("a"))
-    send(child(intro, sup, "b"), WLog(log))
-    send(child(intro, sup, "b"), Name("b"))
-    send(child(intro, sup, "c"), WLog(log))
-    send(child(intro, sup, "c"), Name("c"))
-    send(child(intro, sup, "d"), WLog(log))
-    send(child(intro, sup, "d"), Name("d"))
-    send(child(intro, sup, "a"), Work(1))
-    send(child(intro, sup, "b"), Work(2))
-    send(child(intro, sup, "c"), Work(3))
-    send(child(intro, sup, "d"), Work(4))
+    send(child(sup, "a"), WLog(log))
+    send(child(sup, "a"), Name("a"))
+    send(child(sup, "b"), WLog(log))
+    send(child(sup, "b"), Name("b"))
+    send(child(sup, "c"), WLog(log))
+    send(child(sup, "c"), Name("c"))
+    send(child(sup, "d"), WLog(log))
+    send(child(sup, "d"), Name("d"))
+    send(child(sup, "a"), Work(1))
+    send(child(sup, "b"), Work(2))
+    send(child(sup, "c"), Work(3))
+    send(child(sup, "d"), Work(4))
 
     println("stop: " ++ bool_to_string(Actor.stop(sup, 5000)))
     println("supervisor dead: " ++ bool_to_string(is_alive(sup) == false))

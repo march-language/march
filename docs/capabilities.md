@@ -1059,7 +1059,10 @@ force before it is back, also when a panic unwinds out of it and is caught.
 
 The scope list is one or more entries separated by commas, each a
 [scope value](#scope-values) or `()` (the empty scope: `restrict () do ... end` admits no
-capability operation at all).
+capability operation at all). An entry may name any capability kind, the actor kinds
+included: inside `restrict Actor.Introspect do ... end` the block may mint the
+introspection capability (`Actor.introspect()`) and call `Actor.pid_from_int`, and nothing
+else, so a direct `Actor.debug()` there is `cap_restrict` at compile time.
 
 **The compile-time check.** When every entry is written out (a literal scope expression such as
 `IO.Console` or `IO.FileRead("/srv/")`, or `()`), the block is a *literal* restrict, and the

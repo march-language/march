@@ -37,3 +37,25 @@ removes the usual cause of a drain timing out. Still open, both in
 `march_handle_close_drain`'s timeout branch: (a) the sticky fd-wait cancel that outlives the
 descriptor, and (b) the 2 s stall of the event-loop thread. A use that is merely slow (not
 abandoned) can still reach both.
+
+## 2026-11-26: (a) fixed; (b) left, now hard to reach
+
+(a) Every `accept()` result now goes through `march_handle_fd_accepted`
+(runtime/march_handle.c), which forgets a sticky fd-wait cancel on the number: the blocking
+accept in `tcp_accept_raw_until` (runtime/march_http.c, behind `Socket.accept` and the
+blocking HTTP server) and the event loop's `accept_connections`
+(runtime/march_http_evloop.c). The timed-out drain still keeps the cancel until then, so a
+use still in flight stays protected while the number is unused. Test:
+`test/test_handle.c`, `test_drain_timeout_cancel_forgotten_on_accept` (a wait on the reused
+number fails with the stale cancel before the hook, and times out normally after it).
+Progress note: `progress/2026-11-26-handle-drain-cancel-forgotten-on-accept.md`.
+
+(b) is not fixed. Since 2026-11-25 a use a panic or a dead task abandoned is left by the
+runtime, and a parked use is woken by the drain (shutdown plus the fd-wait cancel) and
+leaves at once. So the drain on the event-loop thread now times out only when a woken use
+is not scheduled for 2 s. A fix that does not sleep the loop thread would defer the close:
+delete the connection's kqueue/epoll registration explicitly (kqueue keeps filters while
+the fd stays open, and their udata would point at a freed `conn_state_t`), park the fd and
+box on a list, and close once the box's in-flight count reaches zero or a deadline passes.
+Not done: it touches the event loop's ownership of descriptors for a case no test can
+produce today.
