@@ -86,12 +86,12 @@ case $f923 of
   $Tuple2($f924, $f925) -> dec_rc $f923;
 let rest : '_ = $f925 in
 let ms : '_ = $f924 in
-let $t920 : '_ = let $t919 : '_ = let $rc_148 : '_ = string_join(ms, ",") in
+let $t920 : '_ = let $t919 : '_ = let $rc_149 : '_ = string_join(ms, ",") in
 dec_rc ms;
-$rc_148 in
-let $rc_147 : '_ = ++("methods=", $t919) in
+$rc_149 in
+let $rc_148 : '_ = ++("methods=", $t919) in
 dec_rc $t919;
-$rc_147 in
+$rc_148 in
 let $t921 : ('_, '_) = ($t920, rest) in
 alloc Ok($t921)
   _ -> dec_rc $f923;
@@ -119,12 +119,12 @@ fn check_read(p : String) : Result((), CapError) =
 ## main
 fn main() : () =
   quiet();
-let probe : (String) -> Result((), CapError) = let $t1444 : Layer = main$restrict0$auth_layer() in
-let $t1445 : CapAuthRef = Authority.enter_fn($t1444) in
+let probe : (String) -> Result((), CapError) = let $t1475 : Layer = main$restrict0$auth_layer() in
+let $t1476 : CapAuthRef = Authority.enter_fn($t1475) in
 let $auth_cap1 : CapAuthRef = cap_save() in
-let $t1446 : (String) -> Result((), CapError) = alloc $Clo_$lam0_main$0_main($lam0_main$apply$0_main, $auth_cap1) in
-let $t1447 : Unit = cap_restore($t1445) in
-$t1446 in
+let $t1477 : (String) -> Result((), CapError) = alloc $Clo_$lam0_main$0_main($lam0_main$apply$0_main, $auth_cap1) in
+let $t1478 : Unit = cap_restore($t1476) in
+$t1477 in
 let _a : Result((), CapError) = call_ptr probe("/srv/a") in
 dec_rc _a;
 ()

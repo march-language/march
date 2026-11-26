@@ -31,9 +31,9 @@
     thread), and the JS emitter memoises it; the inliners leave it alone so
     that call reaches codegen.  [Authority.enter_fn] pushes the layer unless
     the same frame is already on top (decision 6), which is two string
-    compares.  Retargeting self calls keeps a self tail call a loop; mutual
-    tail recursion between framed fns grows the stack by one wrapper per hop
-    (deferred, decision 7).
+    compares.  Retargeting self calls keeps a self tail call a loop, and a
+    tail call to another framed fn goes to its body when its frame is in
+    force ([hop_tail_calls]), so a mutual recursion loops too.
 
     No frame for the program entry (its clause is the launch request).  With
     nothing to frame the module is returned physically unchanged, so a
@@ -238,6 +238,76 @@ let frame_fn ~layer_ty ~auth_ty (f : Tir.fn_def) (n : Lower_state.fn_needs) : Ti
     ~pass:"auth_rt" ();
   [ wrapper; body_fn; layer_fn ]
 
+(* Mutual tail calls between framed fns (ocap A1.3; specs/progress/
+   2026-11-26-ocap-scoped-tail-calls.md).  A call of framed [g] goes through
+   [g]'s wrapper, whose restore follows the call, so a tail call from the
+   body of framed [f] to [g] was not a tail call and f/g/f/g grew the stack
+   one wrapper per hop.  In [f$auth], each such call in tail position
+   becomes
+
+   {v
+     let l = g$auth_layer() in
+     case Authority.frame_in_force(l) of
+       True -> g$auth(args)        (a tail call: g's frame is in force)
+       _    -> g(args)             (the wrapper enters it, as before)
+   v}
+
+   so only the first hop into each frame enters it and the recursion then
+   loops.  Skipping the entry changes nothing: the authority is the
+   intersection of its layers, and [g]'s is already one of them.  A granted
+   package's fn is left alone: its wrapper also enters the grant, which
+   this test does not look at. *)
+let hop_tail_calls ~layer_ty ~(framed_names : (string, unit) Hashtbl.t) (fns : Tir.fn_def list)
+  : Tir.fn_def list =
+  let granted n = Hashtbl.mem Lower_state.fn_grant_tbl n in
+  let counter = ref 0 in
+  let hop (g : Tir.var) args =
+    let gn = g.Tir.v_name in
+    incr counter;
+    let l = var (Printf.sprintf "$hop_l%d" !counter) layer_ty in
+    let inf = var (Printf.sprintf "$hop_in%d" !counter) Tir.TBool in
+    Tir.ELet
+      ( l, Tir.EApp (var (gn ^ Tir_names.auth_layer_suffix) (Tir.TFn ([], layer_ty)), []),
+        Tir.ELet
+          ( inf,
+            Tir.EApp (var Tir_names.frame_in_force_name (Tir.TFn ([ layer_ty ], Tir.TBool)),
+                      [ Tir.AVar l ]),
+            Tir.ECase
+              ( Tir.AVar inf,
+                [ { Tir.br_tag = Tir_names.synthetic_true_tag; br_vars = [];
+                    br_body = Tir.EApp ({ g with Tir.v_name = gn ^ Tir_names.auth_body_suffix }, args) } ],
+                Some (Tir.EApp (g, args)) ) ) )
+  in
+  (* [e] in tail position of [self]'s body: rewrite its tail calls. *)
+  let rec tail ~self (e : Tir.expr) : Tir.expr =
+    match e with
+    | Tir.EApp (g, args)
+      when Hashtbl.mem framed_names g.Tir.v_name && g.Tir.v_name <> self
+           && not (granted g.Tir.v_name) ->
+      hop g args
+    | Tir.ELet (v, a, b) when v.Tir.v_name <> self -> Tir.ELet (v, a, tail ~self b)
+    | Tir.ESeq (a, b) -> Tir.ESeq (a, tail ~self b)
+    | Tir.ELetRec (lfns, b) -> Tir.ELetRec (lfns, tail ~self b)
+    | Tir.ECase (sc, brs, d) ->
+      Tir.ECase
+        (sc, List.map (fun (br : Tir.branch) -> { br with Tir.br_body = tail ~self br.Tir.br_body }) brs,
+         Option.map (tail ~self) d)
+    | other -> other
+  in
+  List.map
+    (fun (f : Tir.fn_def) ->
+       let n = f.Tir.fn_name in
+       let suffix = Tir_names.auth_body_suffix in
+       let ls = String.length n and lx = String.length suffix in
+       if ls > lx && String.sub n (ls - lx) lx = suffix
+          && Hashtbl.mem framed_names (String.sub n 0 (ls - lx))
+          && not (granted (String.sub n 0 (ls - lx))) then
+         let owner = String.sub n 0 (ls - lx) in
+         let body' = tail ~self:owner f.Tir.fn_body in
+         if body' = f.Tir.fn_body then f else { f with Tir.fn_body = body' }
+       else f)
+    fns
+
 let frames (m : Tir.tir_module) ~(needs : (string, Lower_state.fn_needs) Hashtbl.t)
   : Tir.tir_module * bool =
   if Hashtbl.length needs = 0 then (m, false)
@@ -277,6 +347,7 @@ let frames (m : Tir.tir_module) ~(needs : (string, Lower_state.fn_needs) Hashtbl
                else [ f ])
             m.Tir.tm_fns
         in
+        let fns = hop_tail_calls ~layer_ty ~framed_names fns in
         ({ m with Tir.tm_fns = fns }, true)
       end
     end
@@ -317,7 +388,7 @@ let restrict_frame_body (rest : Tir.expr) : (Tir.expr * (Tir.expr -> Tir.expr)) 
 
 let restrict_layer_fn_name = "Authority.restrict_layer"
 
-let restricts (m : Tir.tir_module) ~(sites : (string, Lower_state.restrict_site) Hashtbl.t)
+let drop_restricts (m : Tir.tir_module) ~(sites : (string, Lower_state.restrict_site) Hashtbl.t)
   : Tir.tir_module * bool =
   if Hashtbl.length sites = 0 then (m, false)
   else begin
@@ -420,6 +491,81 @@ let restricts (m : Tir.tir_module) ~(sites : (string, Lower_state.restrict_site)
           any_kept )
     end
   end
+
+(* [retarget] for a restrict body: [f]'s own self calls go to [to_], except
+   under a frame the body enters itself (a nested restrict or any other
+   [Authority.enter_fn]), where the frame on top is not [f]'s restrict and a
+   call of [f] would push it again. *)
+let rec retarget_unframed ~from ~to_ (e : Tir.expr) : Tir.expr =
+  let go = retarget_unframed ~from ~to_ in
+  match e with
+  | Tir.EApp (f, args) when f.Tir.v_name = from -> Tir.EApp ({ f with Tir.v_name = to_ }, args)
+  | Tir.ELet (_, Tir.EApp (ef, _), _) when ef.Tir.v_name = Tir_names.enter_fn_name -> e
+  | Tir.ELet (v, a, b) ->
+    Tir.ELet (v, go a, if v.Tir.v_name = from then b else go b)
+  | Tir.ESeq (a, b) -> Tir.ESeq (go a, go b)
+  | Tir.ELetRec (fns, b) ->
+    if List.exists (fun (fd : Tir.fn_def) -> fd.Tir.fn_name = from) fns then e
+    else Tir.ELetRec (fns, go b)
+  | Tir.ECase (sc, brs, d) ->
+    Tir.ECase
+      (sc,
+       List.map
+         (fun (br : Tir.branch) ->
+            if List.exists (fun (v : Tir.var) -> v.Tir.v_name = from) br.Tir.br_vars then br
+            else { br with Tir.br_body = go br.Tir.br_body })
+         brs,
+       Option.map go d)
+  | other -> other
+
+(* A fn whose whole body is a kept frame of a literal restrict, as its
+   wrapper and its outlined body (ocap A1.3; specs/progress/
+   2026-11-26-ocap-scoped-tail-calls.md).  The frame's restore follows the
+   body, so a call in the body's tail position was not a tail call, and a
+   self recursion through the block grew the native stack one frame per call
+   (SIGBUS between 20,000 and 30,000 deep) although re-entering the block
+   pushes nothing.  The body now lives in [f$restrict_body], whose self calls
+   go there directly: that skips only a re-entry of the frame already on top
+   (decision 8 says it pushes nothing), so the authority is the same and the
+   recursion is a loop.  A computed restrict builds a different layer per
+   entry and keeps its shape. *)
+let outline_restrict_body ~(sites : (string, Lower_state.restrict_site) Hashtbl.t)
+    (f : Tir.fn_def) : Tir.fn_def list =
+  match f.Tir.fn_body with
+  | Tir.ELet (l, (Tir.EApp (lf, []) as layer_call), rest)
+    when (match Hashtbl.find_opt sites lf.Tir.v_name with
+          | Some rs -> rs.Lower_state.rs_text <> None
+          | None -> false) ->
+    (match restrict_frame_body rest with
+     | None -> [ f ]
+     | Some (body, rebuild) ->
+       let name = f.Tir.fn_name in
+       let body_name = name ^ Tir_names.restrict_body_suffix in
+       let body' = retarget_unframed ~from:name ~to_:body_name body in
+       if body' = body then [ f ]
+       else begin
+         let call =
+           Tir.EApp
+             ( var body_name
+                 (Tir.TFn (List.map (fun (p : Tir.var) -> p.Tir.v_ty) f.Tir.fn_params,
+                           f.Tir.fn_ret_ty)),
+               List.map (fun p -> Tir.AVar p) f.Tir.fn_params )
+         in
+         Provenance.record body_name ~from:name
+           ~derived:(Provenance.Clone_of (name, "restrict frame body")) ~pass:"auth_rt" ();
+         [ { f with Tir.fn_body = Tir.ELet (l, layer_call, rebuild call) };
+           { f with Tir.fn_name = body_name; fn_body = body' } ]
+       end)
+  | _ -> [ f ]
+
+let restricts (m : Tir.tir_module) ~(sites : (string, Lower_state.restrict_site) Hashtbl.t)
+  : Tir.tir_module * bool =
+  let m, kept = drop_restricts m ~sites in
+  if not kept then (m, kept)
+  else
+    let fns = List.concat_map (outline_restrict_body ~sites) m.Tir.tm_fns in
+    if List.length fns = List.length m.Tir.tm_fns then (m, kept)
+    else ({ m with Tir.tm_fns = fns }, kept)
 
 let authority_check = "Authority.check"
 

@@ -1418,6 +1418,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Recursion through scoped functions no longer overflows the stack.** A function whose
+  whole body is a `restrict` block, calling itself, and two functions with scoped `needs`
+  clauses that tail-call each other, used one stack frame per call in a compiled program,
+  and 100,000 calls died with SIGBUS. Both now loop like an unscoped tail call, with the
+  same authority in force.
 - **Two modules that each declare a type of the same name, with a constructor of the same
   name but different fields, now compile correctly.** Compiled code laid both out as one of
   them, so the other module's field was stored at the wrong type (`Safe(Int)` beside

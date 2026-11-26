@@ -87,12 +87,12 @@ case $f1064 of
   $Tuple2($f1065, $f1066) -> dec_rc $f1064;
 let rest : '_ = $f1066 in
 let ms : '_ = $f1065 in
-let $t1061 : '_ = let $t1060 : '_ = let $rc_155 : '_ = string_join(ms, ",") in
+let $t1061 : '_ = let $t1060 : '_ = let $rc_156 : '_ = string_join(ms, ",") in
 dec_rc ms;
-$rc_155 in
-let $rc_154 : '_ = ++("methods=", $t1060) in
+$rc_156 in
+let $rc_155 : '_ = ++("methods=", $t1060) in
 dec_rc $t1060;
-$rc_154 in
+$rc_155 in
 let $t1062 : ('_, '_) = ($t1061, rest) in
 alloc Ok($t1062)
   _ -> dec_rc $f1064;
@@ -122,14 +122,14 @@ List.length_onto$List_String$Int(t, $t82)
 fn List.max_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f1950, $f1951) -> let r : '_ = $f1951 in
-let x : '_ = $f1950 in
-let $t1949 : '_ = >(x, m) in
-case $t1949 of
-  True() -> dec_rc $t1949;
+  Cons($f1981, $f1982) -> let r : '_ = $f1982 in
+let x : '_ = $f1981 in
+let $t1980 : '_ = >(x, m) in
+case $t1980 of
+  True() -> dec_rc $t1980;
 inc_rc x;
 List.max_onto(r, x)
-  _ -> dec_rc $t1949;
+  _ -> dec_rc $t1980;
 List.max_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
 
@@ -138,8 +138,8 @@ fn List.maximum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1209, 18, 55);
 panic("List.maximum_int: empty list")
-  Cons($f1943, $f1944) -> let t : '_ = $f1944 in
-let h : '_ = $f1943 in
+  Cons($f1974, $f1975) -> let t : '_ = $f1975 in
+let h : '_ = $f1974 in
 inc_rc h;
 List.max_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
@@ -148,14 +148,14 @@ List.max_onto(t, h)
 fn List.min_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f1937, $f1938) -> let r : '_ = $f1938 in
-let x : '_ = $f1937 in
-let $t1936 : '_ = <(x, m) in
-case $t1936 of
-  True() -> dec_rc $t1936;
+  Cons($f1968, $f1969) -> let r : '_ = $f1969 in
+let x : '_ = $f1968 in
+let $t1967 : '_ = <(x, m) in
+case $t1967 of
+  True() -> dec_rc $t1967;
 inc_rc x;
 List.min_onto(r, x)
-  _ -> dec_rc $t1936;
+  _ -> dec_rc $t1967;
 List.min_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
 
@@ -164,8 +164,8 @@ fn List.minimum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1186, 18, 55);
 panic("List.minimum_int: empty list")
-  Cons($f1930, $f1931) -> let t : '_ = $f1931 in
-let h : '_ = $f1930 in
+  Cons($f1961, $f1962) -> let t : '_ = $f1962 in
+let h : '_ = $f1961 in
 inc_rc h;
 List.min_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
@@ -178,11 +178,11 @@ fn List.product_int(xs : List(Int)) : Int =
 fn List.product_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f1924, $f1925) -> let t : '_ = $f1925 in
-let x : '_ = $f1924 in
-let $t1923 : '_ = inc_rc x;
+  Cons($f1955, $f1956) -> let t : '_ = $f1956 in
+let x : '_ = $f1955 in
+let $t1954 : '_ = inc_rc x;
 *(acc, x) in
-List.product_onto(t, $t1923)
+List.product_onto(t, $t1954)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.range
@@ -239,15 +239,15 @@ List.range_step_go$dps(next, stop, step, $trmc1)
 
 ## List.spawn_allowed
 fn List.spawn_allowed() : Bool =
-  let $t1581 : '_ = Authority.check("IO.Spawn", "") in
-case $t1581 of
-  Ok($f1582) -> dec_rc $t1581;
-dec_rc $f1582;
+  let $t1612 : '_ = Authority.check("IO.Spawn", "") in
+case $t1612 of
+  Ok($f1613) -> dec_rc $t1612;
+dec_rc $f1613;
 true
-  Err($f1583) -> dec_rc $t1581;
-dec_rc $f1583;
+  Err($f1614) -> dec_rc $t1612;
+dec_rc $f1614;
 false
-  _ -> dec_rc $t1581;
+  _ -> dec_rc $t1612;
 panic("non-exhaustive pattern match")
 
 ## List.sum_int
@@ -258,11 +258,11 @@ fn List.sum_int(xs : List(Int)) : Int =
 fn List.sum_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f1917, $f1918) -> let t : '_ = $f1918 in
-let x : '_ = $f1917 in
-let $t1916 : '_ = inc_rc x;
+  Cons($f1948, $f1949) -> let t : '_ = $f1949 in
+let x : '_ = $f1948 in
+let $t1947 : '_ = inc_rc x;
 +(acc, x) in
-List.sum_onto(t, $t1916)
+List.sum_onto(t, $t1947)
   _ -> panic("non-exhaustive pattern match")
 
 ## closed
@@ -323,22 +323,22 @@ alloc List.Cons(s, $t9)
 ## main
 fn main() : () =
   let ms : List({ addr : String, node_id : String }) = let $t16 : { addr : String, node_id : String } = let $t13 : String = let $t12 : String = int_to_string(0) in
-let $rc_153 : '_ = ++("n", $t12) in
+let $rc_154 : '_ = ++("n", $t12) in
 dec_rc $t12;
-$rc_153 in
+$rc_154 in
 let $t15 : String = let $t14 : String = int_to_string(0) in
-let $rc_152 : '_ = ++("a", $t14) in
+let $rc_153 : '_ = ++("a", $t14) in
 dec_rc $t14;
-$rc_152 in
+$rc_153 in
 { node_id = $t13, addr = $t15 } in
 let $t17 : List({ addr : String, node_id : String }) = alloc List.Nil({ addr : String, node_id : String })() in
 alloc List.Cons($t16, $t17) in
-let $t1976 : String = let $t1975 : Int = let $t1974 : List(String) = closed(ms, "n0") in
-let $rc_151 : Int = List.length$List_String($t1974) in
-dec_rc $t1974;
-$rc_151 in
-int_to_string($t1975) in
-let $rc_150 : () = println($t1976) in
-dec_rc $t1976;
-$rc_150
+let $t2007 : String = let $t2006 : Int = let $t2005 : List(String) = closed(ms, "n0") in
+let $rc_152 : Int = List.length$List_String($t2005) in
+dec_rc $t2005;
+$rc_152 in
+int_to_string($t2006) in
+let $rc_151 : () = println($t2007) in
+dec_rc $t2007;
+$rc_151
 

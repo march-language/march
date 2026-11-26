@@ -1453,4 +1453,26 @@ mod Authority do
     end
   end
 
+  doc """
+  Whether a frame with the limit and scope text of `layer` is anywhere in
+  the authority in force, not only on top. Entering such a frame again
+  would add nothing (the authority is the intersection of its layers), so
+  a tail call between two framed functions goes straight to the callee's
+  body when its frame is in force, and a mutual recursion through framed
+  functions loops instead of growing the stack (Auth_rt.frames).
+  """
+  @[stdlib_internal]
+  fn frame_in_force(layer : Layer) : Bool do
+    match layer do
+    Layer(limit, text, _) -> layer_in(cap_layers(), limit, text)
+    end
+  end
+
+  pfn layer_in(layers : List(Layer), limit : CapLimit, text : String) : Bool do
+    match layers do
+    Nil -> false
+    Cons(Layer(l, t, _), rest) -> if l == limit && t == text do true else layer_in(rest, limit, text) end
+    end
+  end
+
 end
