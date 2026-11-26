@@ -871,6 +871,41 @@ let test_jit_file_no_main () =
       [ "Fatal error"; "Raised at"; "no `main`" ]
   end
 
+(* An interpreter-only builtin under --jit.  Lowering refuses `App.stop` with
+   a positioned diagnostic (compiled_unsupported), which `--compile` renders
+   and exits 1 on.  The --jit driver had no arm for it, so the same exception
+   reached the catch-all: "march: internal compiler error: ..." plus an OCaml
+   backtrace and exit 3, which told the user to file a compiler bug for a
+   program the compiler had correctly refused. *)
+let jit_file_unlowerable_src = {|mod Main do
+  needs IO.Console
+  fn main(c : Cap(IO.Console)) do
+    println("before")
+    App.stop()
+    println("after")
+  end
+end
+|}
+
+let test_jit_file_unlowerable_is_a_diagnostic () =
+  if not (clang_available ()) then ()
+  else begin
+    let (out, code) = run_jit_file ~env_prefix:"" jit_file_unlowerable_src in
+    if contains ~needle:"libLLVM not found" out then ()
+    else begin
+      Alcotest.(check int)
+        (Printf.sprintf "--jit unlowerable: exit code (output: %s)" out) 1 code;
+      List.iter (fun needle ->
+          if not (contains ~needle out) then
+            Alcotest.failf "--jit unlowerable: expected %S in output, got:\n%s" needle out)
+        [ "`App.stop`"; "App.stop()" ];
+      List.iter (fun needle ->
+          if contains ~needle out then
+            Alcotest.failf "--jit unlowerable: output must not contain %S, got:\n%s" needle out)
+        [ "internal compiler error"; "Raised at"; "compiler bug"; "before" ]
+    end
+  end
+
 (* Finding 3: --jit fed [get_stdlib_tc_env]'s seed env into run_program's
    typecheck unconditionally, bypassing the `no_shadowing` guard — and here
    the resulting type_map feeds LOWERING, so an unsound seed is worse than
@@ -1257,6 +1292,54 @@ let test_repl_stdlib_int_result_jit () =
         "val k = 0", "the let binding";
         "= 40", "k read back from its slot" ]
   end
+
+(* ── A registry-loaded module's function has its annotated type ────────
+   specs/progress/2026-11-25-registry-loaded-module-fn-untyped.md.
+   A function of a lazily loaded module (LazyNicheProbe, the only one) was
+   bound as a fresh type variable, so any call typechecked: the ill-typed
+   call below was accepted and crashed the REPL (exit 139), and the well-typed
+   one printed its Int result as the tagged word (15 for 7). *)
+let test_repl_registry_fn_is_typed () =
+  if not (clang_available ()) then ()
+  else begin
+    let (out, code) = run_repl_session ~env_prefix:""
+        [ "LazyNicheProbe.first_or([7, 8], 3)";
+          {|LazyNicheProbe.first_or(true, "x")|};
+          "1 + 1" ] in
+    Alcotest.(check int)
+      (Printf.sprintf "REPL exit code (output: %s)" out) 0 code;
+    List.iter (fun (needle, what) ->
+      if not (contains ~needle out) then
+        Alcotest.failf "expected %s (%s) in session output, got:\n%s" needle what out)
+      [ "= 7\n", "first_or's Int result, untagged";
+        "expected `List(Int)` but got `Bool`", "the ill-typed call is a type error";
+        "= 2\n", "the session goes on after the type error" ]
+  end
+
+(* The same in a batch check: `march --check` refuses the ill-typed call. *)
+let test_check_registry_fn_is_typed () =
+  let f = Filename.temp_file "march_registry_fn" ".march" in
+  let out_path = Filename.temp_file "march_registry_fn" ".out" in
+  let oc = open_out f in
+  output_string oc {|mod Main do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) do
+    println(to_string(LazyNicheProbe.first_or(true, "x")))
+  end
+end
+|};
+  close_out oc;
+  let code = Sys.command (Printf.sprintf "HOME=%s %s --check %s > %s 2>&1"
+      (Filename.quote (Lazy.force session_home)) (Filename.quote main_exe)
+      (Filename.quote f) (Filename.quote out_path)) in
+  let ic = open_in_bin out_path in
+  let out = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  (try Sys.remove f with _ -> ());
+  (try Sys.remove out_path with _ -> ());
+  Alcotest.(check int) (Printf.sprintf "--check exit code (output: %s)" out) 1 code;
+  if not (contains ~needle:"expected `List(Int)` but got `Bool`" out) then
+    Alcotest.failf "--check: expected the argument's type error, got:\n%s" out
 
 (* ── Local REPL fragment leaks (2026-10-11) ───────────────────────────
    specs/progress/2026-10-08-repl-jit-fragment-leaks.md.  The local REPL's
@@ -1757,6 +1840,10 @@ let () =
         test_repl_floats_jit;
       Alcotest.test_case "stdlib Int result prints untagged and binds (JIT)" `Slow
         test_repl_stdlib_int_result_jit;
+      Alcotest.test_case "REPL: a registry-loaded module's function has its annotated type" `Slow
+        test_repl_registry_fn_is_typed;
+      Alcotest.test_case "--check: an ill-typed call into a registry-loaded module is refused" `Quick
+        test_check_registry_fn_is_typed;
       Alcotest.test_case "REPL fragments leak nothing per input (JIT)" `Slow
         test_repl_fragment_leaks_jit;
       Alcotest.test_case "Floats print and survive the v slot (interpreter)"
@@ -1822,6 +1909,9 @@ let () =
         test_orc_named_comparator;
       Alcotest.test_case "march --jit on a file with no main is silent, exit 0"
         `Slow test_jit_file_no_main;
+      Alcotest.test_case
+        "march --jit renders a refused interpreter-only builtin, exit 1"
+        `Slow test_jit_file_unlowerable_is_a_diagnostic;
       Alcotest.test_case
         "march --jit falls back to the interpreter when stdlib is shadowed"
         `Slow test_jit_file_shadowing_falls_back;

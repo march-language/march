@@ -36,6 +36,11 @@ git log is authoritative for exact commits.
   `needs IO` no longer covers inspecting other actors) and `IO.Cluster`; `main` requests
   them with a parameter such as `Cap(Actor.Introspect)`. Write `Authority.must(Actor.introspect())` where you wrote
   `Actor.introspect(io)`.
+- **Compiles are about another 0.2 s faster.** Four lookups in the front end that rescanned
+  a whole list or file per item (a module's names per variable when lowering, a source file
+  per function when hashing its text, the z3 lookup per proof obligation, the call graph per
+  `@[lemma]`) now use a table built once (hello world: 1.32 s to 1.13 s before code
+  generation). Diagnostics and generated code are unchanged.
 - **Compiles are about another 0.27 s faster.** Functions the program cannot reach are now
   dropped before monomorphization instead of after closure conversion, so those passes see a
   few dozen functions on a small program instead of the whole standard library (hello world:
@@ -1390,6 +1395,20 @@ git log is authoritative for exact commits.
   clauses that tail-call each other, used one stack frame per call in a compiled program,
   and 100,000 calls died with SIGBUS. Both now loop like an unscoped tail call, with the
   same authority in force.
+- **Two modules that each declare a type of the same name, with a constructor of the same
+  name but different fields, now compile correctly.** Compiled code laid both out as one of
+  them, so the other module's field was stored at the wrong type (`Safe(Int)` beside
+  `Safe(Float)` failed in clang; `Safe(Int)` beside the standard library's `Html.Safe`
+  could pick either layout depending on program size). Each module's own code now uses its
+  own layout.
+- **`march --jit` reports an interpreter-only builtin as an error in your program.** A
+  program calling one (such as `App.stop`) is refused by `--compile` with a diagnostic at
+  the call; `--jit` printed "internal compiler error", a backtrace and a request to file a
+  compiler bug, and exited 3. It now prints the same diagnostic and exits 1.
+- **A call into a lazily loaded standard-library module is type-checked.** Its functions
+  were bound with no type, so any argument was accepted; an ill-typed call could crash the
+  REPL and an `Int` result printed as a wrong number. Only the internal `LazyNicheProbe`
+  module is loaded this way today.
 - **`Logger.with_scope(fields, fn -> ...)` runs in the interpreter.** A thunk written with
   no parameter matched the declared type and ran compiled, but the interpreter stopped
   with "arity mismatch: expected 0 args, got 1". `Logger.with_span` and a direct

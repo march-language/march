@@ -106,7 +106,12 @@ let parse_version (out : string) : string option =
 
 let probe_memo : (string, (string, string) Stdlib.result) Hashtbl.t = Hashtbl.create 4
 
-let clear_probe_memo () = Hashtbl.reset probe_memo
+(* Cleared with the probe memo ([identity], below). *)
+let identity_memo_reset : (unit -> unit) ref = ref (fun () -> ())
+
+let clear_probe_memo () =
+  Hashtbl.reset probe_memo;
+  !identity_memo_reset ()
 
 let probe_cache_dir () : string option =
   let base =
@@ -262,11 +267,76 @@ let platform : string Lazy.t =
 
 let limits_tag () = Printf.sprintf "rl-%d-%d" !default_rlimit !stage2_rlimit
 
+(* [identity] is asked once per VC key, and every call looked z3 up again (a
+   realpath of the exe, a PATH scan, a stat).  The last answer is kept with
+   all it was computed from and served only while each still reads the same:
+   MARCH_Z3 and PATH (which z3 [find_z3] picks), both rlimit refs
+   ([limits_tag]), the chosen binary's size, mtime and mode (size and mtime
+   are what [probe_version] keys its own memo on), and [id_passed], the
+   candidates [find_z3] passed over on the way to it, none of which may have
+   become executable.  So a test that swaps z3, edits the binary in place or
+   moves a limit gets a fresh answer.  "No usable z3" is never kept. *)
+type identity_memo = {
+  id_env_z3 : string option;
+  id_env_path : string option;
+  id_limits : int * int;
+  id_bin : string;
+  id_stat : int * float * int;
+  id_passed : string list;
+  id_answer : string;
+}
+
+let identity_memo : identity_memo option ref = ref None
+
+let () = identity_memo_reset := fun () -> identity_memo := None
+
 let identity () : string option =
-  match health () with
-  | Healthy { version; _ } | Mismatch { version; _ } ->
-      Some (Printf.sprintf "z3-%s/%s/%s" version (limits_tag ()) (Lazy.force platform))
-  | Missing _ | Broken _ -> None
+  let env_z3 = Sys.getenv_opt "MARCH_Z3" and env_path = Sys.getenv_opt "PATH" in
+  let limits = (!default_rlimit, !stage2_rlimit) in
+  let stat_of bin =
+    match Unix.stat bin with
+    | st -> Some (st.Unix.st_size, st.Unix.st_mtime, st.Unix.st_perm)
+    | exception Unix.Unix_error _ -> None
+  in
+  let unchanged (m : identity_memo) =
+    m.id_env_z3 = env_z3 && m.id_env_path = env_path && m.id_limits = limits
+    && (not (List.exists is_executable m.id_passed))
+    && stat_of m.id_bin = Some m.id_stat
+  in
+  match !identity_memo with
+  | Some m when unchanged m -> Some m.id_answer
+  | _ -> (
+      identity_memo := None;
+      (* [health]'s Healthy and Mismatch are exactly "found, and the probe
+         gave a version"; the stat is taken before the probe, so a binary
+         replaced in between fails the next comparison. *)
+      match find_z3 () with
+      | Error _ -> None
+      | Ok (id_bin, source) -> (
+          let before = stat_of id_bin in
+          match probe_version id_bin with
+          | Error _ -> None
+          | Ok version ->
+              let id_answer = Printf.sprintf "z3-%s/%s/%s" version (limits_tag ()) (Lazy.force platform) in
+              let id_passed =
+                match source with
+                | Env | Bundled -> []
+                | Path ->
+                    let rec earlier = function
+                      | [] -> []
+                      | dir :: rest ->
+                          let p = Filename.concat (if dir = "" then "." else dir) "z3" in
+                          if p = id_bin then [] else p :: earlier rest
+                    in
+                    bundled_path () :: earlier (String.split_on_char ':' (Option.value env_path ~default:""))
+              in
+              Option.iter
+                (fun id_stat ->
+                  identity_memo :=
+                    Some { id_env_z3 = env_z3; id_env_path = env_path; id_limits = limits; id_bin; id_stat;
+                           id_passed; id_answer })
+                before;
+              Some id_answer))
 
 (* The build (CAS) cache's z3 fragment: the version (probed, so at most one
    `z3 --version` per z3 binary, cached on disk), the limits and the platform.

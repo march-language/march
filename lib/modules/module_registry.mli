@@ -16,6 +16,9 @@ type export_entry = {
   ex_name : string;            (** Short name (e.g. "get") *)
   ex_kind : export_kind;
   ex_public : bool;
+  ex_fn : March_ast.Ast.fn_def option;
+  (** For an [ExFn] read from source: its definition, so the typechecker can
+      give a call the function's annotated signature.  [None] otherwise. *)
 }
 
 (** All exports from a single module. *)
@@ -23,6 +26,10 @@ type module_exports = {
   me_name : string;            (** Module name (e.g. "Map") *)
   me_entries : export_entry list;
 }
+
+(** The stdlib file a module name maps to by convention ("HttpClient" ->
+    "http_client.march"). *)
+val module_name_to_filename : string -> string
 
 (** Register a module's exports in the global registry. *)
 val register : string -> module_exports -> unit

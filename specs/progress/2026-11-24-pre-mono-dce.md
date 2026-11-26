@@ -64,7 +64,7 @@ ways, and nothing else:
    For `HEntry` the layouts are identical and only the label moves. For `Safe` they are not
    (`Html.Safe(String)` against a fixture's `Other.Safe(Int)`): the pick was the wrong layout
    before, is the right one now for small programs, and can flip back as the program grows.
-   This is not fixed here: `specs/todos/2026-11-25-ctor-entry-suffix-fallback-hashtbl-order.md`.
+   This is not fixed here: `specs/progress/2026-11-25-ctor-entry-suffix-fallback-hashtbl-order.md`.
 2. **A dead prelude `tail` is no longer emitted** (8 programs). Before, a stdlib function the
    program never reached made Mono keep `tail`, and DCE then kept it because a lifted closure
    has a parameter named `tail`. Nothing called it.

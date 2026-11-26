@@ -16,6 +16,10 @@ type export_entry = {
   ex_name : string;
   ex_kind : export_kind;
   ex_public : bool;
+  ex_fn : fn_def option;
+  (** For an [ExFn] read from source: its definition, so the typechecker can
+      give a call the function's annotated signature
+      ([Typecheck_env.load_module_into_env]).  [None] for every other kind. *)
 }
 
 type module_exports = {
@@ -196,13 +200,13 @@ let extract_exports (mod_name : string) (decls : decl list) : module_exports =
       let vis = fdef.fn_vis in
       [{ ex_name = fdef.fn_name.txt;
          ex_kind = ExFn;
-         ex_public = vis = Public }]
+         ex_public = vis = Public; ex_fn = Some fdef }]
     | DLet (vis, bind, _) ->
       let name = match bind.bind_pat with
         | PatVar n -> n.txt
         | _ -> "_"
       in
-      [{ ex_name = name; ex_kind = ExValue; ex_public = vis = Public }]
+      [{ ex_name = name; ex_kind = ExValue; ex_public = vis = Public; ex_fn = None }]
     | DTransitions _ -> []
     | DType (vis, tname, tparams, tdef, _)
     | DAlwaysLinearType (vis, tname, tparams, tdef, _) ->
@@ -211,9 +215,9 @@ let extract_exports (mod_name : string) (decls : decl list) : module_exports =
         | TDRecord fields ->
           let field_pairs = List.map (fun (f : field) -> (f.fld_name.txt, f.fld_ty)) fields in
           { ex_name = tname.txt; ex_kind = ExRecord (arity, field_pairs);
-            ex_public = vis = Public }
+            ex_public = vis = Public; ex_fn = None }
         | _ ->
-          { ex_name = tname.txt; ex_kind = ExType arity; ex_public = vis = Public }
+          { ex_name = tname.txt; ex_kind = ExType arity; ex_public = vis = Public; ex_fn = None }
       in
       (* An `opaque type`'s constructors (the parser marks each variant
          Private while the type stays Public) never cross the module
@@ -229,7 +233,7 @@ let extract_exports (mod_name : string) (decls : decl list) : module_exports =
             if v.var_vis <> Public then None
             else Some { ex_name = v.var_name.txt;
                         ex_kind = ExCtor (tname.txt, List.length v.var_args);
-                        ex_public = vis = Public }
+                        ex_public = vis = Public; ex_fn = None }
           ) ctors
         | _ -> []
       in
@@ -237,7 +241,7 @@ let extract_exports (mod_name : string) (decls : decl list) : module_exports =
     | DInterface (idef, _) ->
       [{ ex_name = idef.iface_name.txt;
          ex_kind = ExInterface idef;
-         ex_public = true }]
+         ex_public = true; ex_fn = None }]
     | _ -> []
   ) decls in
   { me_name = mod_name; me_entries = entries }
