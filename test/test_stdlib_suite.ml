@@ -11765,6 +11765,9 @@ let role_manifest_src ?(serve = false) ~uses_save () =
   end
 
   pfn cons(s : Cap(Session.Live), st : Stream_Cons.Entry) : Stream_Cons.Yield do
+    -- The console, which the role's closure reaches (it held a
+    -- `Cap(IO.Console)` parameter before ocap phase 7b).
+    Authority.ignore(println("cons"))
     Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
       %s
       Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
