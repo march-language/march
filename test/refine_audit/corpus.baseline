@@ -158,6 +158,8 @@ native_csv_niche_row: coverage audit (user + stdlib): 391 enforced, 0 inert (war
 native_csv_niche_row: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ctor_pattern_multi_param: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
 native_ctor_pattern_multi_param: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ctor_shape_collision: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
+native_ctor_shape_collision: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_dataframe_groupby_count: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
 native_dataframe_groupby_count: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_deep_drop_shared_child: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced

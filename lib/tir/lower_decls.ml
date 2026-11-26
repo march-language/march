@@ -27,8 +27,12 @@ module Ast = March_ast.Ast
     zero-arg module-constant call ([call ptr @Mod.fields()]). *)
 let rename_tir_vars (prefix : string) (names : string list) (fn : Tir.fn_def) : Tir.fn_def =
   let module SSet = Set.Make (String) in
+  (* [names] as a table: it is consulted once per variable occurrence, and a
+     stdlib module has hundreds of names. *)
+  let name_tbl : (string, unit) Hashtbl.t = Hashtbl.create (2 * List.length names + 1) in
+  List.iter (fun n -> Hashtbl.replace name_tbl n ()) names;
   let rename_var bound (v : Tir.var) : Tir.var =
-    if List.mem v.Tir.v_name names && not (SSet.mem v.Tir.v_name bound)
+    if Hashtbl.mem name_tbl v.Tir.v_name && not (SSet.mem v.Tir.v_name bound)
     then
       (* The qualified name may be one an entry-module fn is defined under
          distinctly ([Lower_state._entry_builtin_shadows]: `List.sum_int` ->

@@ -54,3 +54,46 @@ What to do: make lowering emit the module-qualified key for a constructor of a c
 them; then make the fallback fail, or at least pick deterministically (sorted key), when more
 than one same-arity candidate remains. Check with `scripts/ir-oracle.sh` and
 `scripts/ir-canon-diff.sh`.
+
+## Fixed 2026-11-25
+
+A probe on the fallback over the 528-program IR corpus found five ambiguous keys:
+
+| key | candidates | fields |
+|---|---|---|
+| `HEntry.HLeaf`, `.HBranch`, `.HCollision`, `.HEmpty` | `Hamt`, `HashMap`, `Map` | same |
+| `Seq.Seq` | `File.Seq`, `Seq.Seq` | same |
+| `Safe.Safe` (`test/native/h_sigil_safe_collision.march`) | `Html.Safe`, `Other.Safe` | different |
+| `Row.Row`, bare `Row` (`test/native/niche_ctor_ambiguity.march`) | `DataFrame.Row`, `Inner.Row`, `Csv.CsvRow` | different |
+
+Qualifying every key by module, as the "What to do" above proposed, is not safe:
+`File.Seq`/`Seq.Seq` are handed across modules by shape on purpose (see
+`Lower_state.shared_ctor_collision_tbl`), and qualifying them splits construction from
+matching. So the fix has two parts.
+
+- **Same fields: a sorted pick.** `Llvm_data.ctor_entry` sorts the candidates by key before
+  choosing, so the answer no longer depends on `Hashtbl` order or on how many types the
+  program declares. A `HashMap` cell is still stamped as `Hamt.HEntry`, now always; the
+  layouts are the same.
+- **Different fields: keyed by the declaring module.** `Lower_state.ctor_shape_conflict_tbl`
+  records, per module and constructor, a type whose same-named twin gives that constructor
+  other fields. `own_module_ctor_key` keys such a module's own constructions and matches as
+  `Mod.Type.Ctor`, and a pattern with no recorded type inside that module resolves the same
+  way. Two declarations with different fields cannot be a by-shape hand-off, so this cannot
+  split one.
+- **What still reaches the fallback with different fields gets the sorted pick.** That is a
+  use carrying no type at all: a test harness that lowers without a type map (`tco_codegen`'s
+  `type L = Nil | Cons(Int, L)` beside the builtin `List`), or a bare constructor outside
+  every declaring module. Failing the compile there was tried and broke that harness, so it
+  is deterministic but still a guess. No program in the IR corpus reaches it.
+- **The match side sorts too.** `llvm_case.ml`'s `qualified_br_key` resolves a pattern's tag
+  on its own, and it took the first key a `Hashtbl.fold` produced. With construction sorted
+  and matching not, `cross_module_ctor_resolution` case 5 (`DcA`/`DcB`, both `Thing.Shared`)
+  built one type's cell and matched the other's tag. It now takes the first key in sorted
+  order, the same pick as `ctor_entry`.
+
+A program that showed it: `test/native/ctor_shape_collision.march` (two nested modules, `Safe(Int)`
+and `Safe(Float)`). Before, both were laid out as one of them and clang rejected the module
+(`floating point constant invalid for type`); it now prints `a=42`, `z=2.5`, as interpreted.
+
+Not changed: the header type id of a `HashMap`/`Map` cell still names `Hamt.HEntry`.
