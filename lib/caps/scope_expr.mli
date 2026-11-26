@@ -23,9 +23,10 @@ type form =
           argument (literal or not) in order, and the encoded options *)
   | Not_scope
 
-(** [is_cap_path name]: [name] is rooted at [IO] ([IO], [IO.Console], ...),
-    so an [ECon] of it is a scope expression rather than a constructor.  No
-    stdlib module declares a constructor under those paths. *)
+(** [is_cap_path name]: [name] is a capability kind: rooted at [IO] ([IO],
+    [IO.Console], ...) or a top-level kind outside it ([Actor.Introspect],
+    [Actor.Debug]), so an [ECon] of it is a scope expression rather than a
+    constructor.  No stdlib module declares a constructor under those paths. *)
 val is_cap_path : string -> bool
 
 (** [classify e]: an [ECon] of a capability path with arguments in the

@@ -311,10 +311,13 @@ let crash_ctors_of (steps : astep list) (role : string) : string list =
 let grants_of (steps : protocol_step list) : (string * string list) list =
   (* Only paths under `IO` become parameters: the fronts narrow each one from
      `io` with `cap_narrow`, which cannot produce a proof or foreign
-     capability.  A non-IO path is refused by the typechecker at the grant
-     line ([Typecheck.check_role_needs]); leaving it out here is what keeps
-     that the ONLY diagnostic, instead of one per generated narrowing site
-     with no excerpt to show (review finding
+     capability.  An actor kind (`Actor.Introspect`, `Actor.Debug`) is a
+     legal grant but no parameter: the body mints or uses it through its own
+     checked call, and [Typecheck.check_role_grants] bounds that use.  Any
+     other non-IO path is refused by the typechecker at the grant line
+     ([Typecheck.check_role_needs]); leaving it out here is what keeps that
+     the ONLY diagnostic, instead of one per generated narrowing site with no
+     excerpt to show (review finding
      2026-09-24-dd-review-non-io-role-grant-diagnostics). *)
   List.concat_map
     (function

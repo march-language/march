@@ -76,7 +76,7 @@ mod Main do
     end
   end
 
-  fn child(intro, sup, field) do
+  fn child(sup, field) do
     match get_actor_field(sup, field) do
       None    -> Authority.must(Actor.pid_from_int(-1))
       Some(n) -> Authority.must(Actor.pid_from_int(n))
@@ -91,7 +91,6 @@ mod Main do
   end
 
   fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
-    let intro = Authority.must(Actor.introspect())
     let log = spawn(Log)
 
     println("-- Actor.stop(pid, 200): the blocked on_stop is killed at the deadline")
@@ -111,7 +110,7 @@ mod Main do
     println("-- a child spec's `shutdown 200` bounds the child's on_stop the same way")
     let sup = spawn(Sup)
     send(sup, SupLog(log))
-    send(child(intro, sup, "s"), StuckLog(log))
+    send(child(sup, "s"), StuckLog(log))
     println("stop: " ++ bool_to_string(Actor.stop(sup, 5000)))
     println("supervisor dead: " ++ bool_to_string(is_alive(sup) == false))
     dump(log)

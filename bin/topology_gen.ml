@@ -107,7 +107,7 @@ let prepare ~path ~(entry : Ast.module_) ~(imports : Ast.decl list) ~pools ~fore
 
 (* ── After typechecking ────────────────────────────────────────────────── *)
 
-let is_io c = c = "IO" || (String.length c > 3 && String.sub c 0 3 = "IO.")
+let is_kind = March_caps.Cap_lattice.is_authority
 
 (** A reference [r] made from the row key [from], resolved the way the row
     solver does: under each enclosing module of [from] first, then as written. *)
@@ -120,7 +120,7 @@ let resolve (tbl : (string, 'a) Hashtbl.t) ~from (r : string) : string option =
   let cands = List.rev_map (fun p -> p ^ "." ^ r) (prefixes [] parts) @ [ r ] in
   List.find_opt (Hashtbl.mem tbl) cands
 
-(** Each pool's derived capabilities (IO caps its hook and roles reach) and
+(** Each pool's derived capabilities (the capability kinds, IO and actor, its hook and roles reach) and
     initiated roles (the [<P>_Run.initiate_<R>] its code reaches), with the
     root each cap is first reached from. *)
 let derive (s : session) (env : March_typecheck.Typecheck.env)
@@ -157,7 +157,7 @@ let derive (s : session) (env : March_typecheck.Typecheck.env)
       let roots = DT.pool_roots s.facts s.topo p in
       let caps =
         List.concat_map (fun (label, q) ->
-            List.filter_map (fun c -> if is_io c then Some (c, label) else None)
+            List.filter_map (fun c -> if is_kind c then Some (c, label) else None)
               (Option.value ~default:[] (Hashtbl.find_opt closures (key q))))
           roots
       in

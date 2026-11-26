@@ -2014,6 +2014,41 @@ end
       Alcotest.(check bool) ("names main's grant (output: " ^ out ^ ")") true
         (contains_text out "`role Cons needs IO.FileWrite` is wider than `main`'s grant, which is `Cap(IO.Console)`"))
 
+(* The top-level actor kinds (ocap phase 7): a role's grant bounds
+   `Actor.Introspect` and `Actor.Debug` as it bounds the IO kinds.  `save`
+   mints the introspection capability instead of writing a file. *)
+let introspect_src =
+  let s = replace_all ~needle:"    let _ = File.write(\"/tmp/n\", int_to_string(n))\n"
+      ~by:"    let _ = Actor.introspect()\n    let _ = n\n" violation_src in
+  let s = replace_all ~needle:"  needs IO.FileWrite\n" ~by:"  needs Actor.Introspect\n" s in
+  replace_all ~needle:"  fn main(c : Cap(IO)) do\n" ~by:"  fn main(c : Cap(IO)) : () needs IO, Actor.Introspect do\n" s
+
+let cli_role_grant_actor_kind_reached =
+  Alcotest.test_case "CLI: a body reaching `Actor.Introspect` outside its role's grant is refused" `Quick (fun () ->
+      let rc, out = check_cli introspect_src in
+      Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 1 rc;
+      Alcotest.(check bool) ("names the role and the kind (output: " ^ out ^ ")") true
+        (contains_text out "Role `Stream.Cons` is granted `Cap(IO.Console)`"
+         && contains_text out "reaches `Actor.Introspect`"
+         && contains_text out "role Cons needs IO.Console, Actor.Introspect`. Or remove the use."))
+
+let cli_role_grant_actor_kind_granted =
+  Alcotest.test_case "CLI: `role R needs Actor.Introspect` is accepted and covers the body" `Quick (fun () ->
+      let src = replace_all ~needle:"role Cons needs IO.Console\n" ~by:"role Cons needs IO.Console, Actor.Introspect\n"
+          introspect_src in
+      let rc, out = check_cli src in
+      Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc)
+
+let cli_role_grant_actor_kind_wider_than_main =
+  Alcotest.test_case "CLI: a role granted `Actor.Debug` that `main` does not request is refused" `Quick (fun () ->
+      let src = replace_all ~needle:"role Cons needs IO.Console\n" ~by:"role Cons needs IO.Console, Actor.Debug\n"
+          violation_src in
+      let rc, out = check_cli src in
+      Alcotest.(check int) "exit code" 1 rc;
+      Alcotest.(check bool) ("names main's grant (output: " ^ out ^ ")") true
+        (contains_text out "`role Cons needs Actor.Debug` is wider than `main`'s grant"
+         && contains_text out "`needs Actor.Debug`"))
+
 (* A hosted role: `start` is charged, and so is the actor behind `host`
    when it is spawned in the same function. *)
 let cli_role_grant_hosted_actor =
@@ -2327,7 +2362,7 @@ end
            let rc, out = check_cli (replace_all ~needle:"CAP" ~by:cap src) in
            Alcotest.(check int) (cap ^ ": exit code (output: " ^ out ^ ")") 1 rc;
            Alcotest.(check bool) (cap ^ ": names the grant (output: " ^ out ^ ")") true
-             (contains_text out ("`role Cons needs " ^ cap ^ "` names a capability that is not under `IO`")
+             (contains_text out ("`role Cons needs " ^ cap ^ "` names a capability that is not a capability kind")
               && contains_text out ("role Cons needs " ^ cap));
            let errors = List.length (List.filter (fun l -> March_errors.Errors.header_severity l = Some March_errors.Errors.Error) (String.split_on_char '\n' out)) in
            Alcotest.(check int) (cap ^ ": exactly one error (output: " ^ out ^ ")") 1 errors;
@@ -3022,6 +3057,7 @@ let tests =
     peers_shape; granted_peers_take_the_caps; chaos_user_payload_generator; peers_typecheck;
     cli_script_mismatch_panics; cli_script_runs_out_panics;
     cli_role_grant_violation; cli_role_grant_cluster_fronts; cli_role_grant_named_body; cli_role_grant_widened_ok; cli_role_grant_wider_than_main;
+    cli_role_grant_actor_kind_reached; cli_role_grant_actor_kind_granted; cli_role_grant_actor_kind_wider_than_main;
     cli_role_grant_hosted_actor; cli_dump_role_authority;
     cli_role_grant_let_bound_body; cli_role_grant_parameter_body; cli_role_grant_aliased_fn;
     cli_role_grant_local_closure; cli_role_grant_call_built_body; cli_role_grant_direct_builtin;
