@@ -36,6 +36,10 @@ git log is authoritative for exact commits.
   `needs IO` no longer covers inspecting other actors) and `IO.Cluster`; `main` requests
   them with a parameter such as `Cap(Actor.Introspect)`. Write `Authority.must(Actor.introspect())` where you wrote
   `Actor.introspect(io)`.
+- **Compiles are about another 0.27 s faster.** Functions the program cannot reach are now
+  dropped before monomorphization instead of after closure conversion, so those passes see a
+  few dozen functions on a small program instead of the whole standard library (hello world:
+  1.38 s to 1.12 s before code generation). `--disable-pass dce-pre-mono` turns it off.
 - **Compiles are about 0.3 s faster.** Lemma erasure collected the names the program
   mentions once per `@[lemma]` declaration, walking the whole program (stdlib included)
   each time; it now walks it once. What gets erased is unchanged.
@@ -103,6 +107,17 @@ git log is authoritative for exact commits.
   in the interpreter, `--jit`, compiled code and JS; `with_cap` mocked only compiled test
   builds. New
   diagnostics `mock_outside_test`, `mock_scope_invalid` and `mock_handler_field`.
+- **Capture sets (object capabilities, phase 8a).** The compiler now infers, for every
+  function value and every value that holds one, what it can reach when called, and shows it:
+  hover and `march-lsp query type` print `say : String -> () needs IO.Console` and
+  `weather : Client needs IO.NetConnect("api.weather.com/v1/")`, and the new
+  `march --dump-captures FILE` lists every function value in a file with its set and the reason
+  for each element. A literal target gives a scoped element, a higher-order function is
+  polymorphic in what its argument carries (`needs c1`), and a closure created inside a literal
+  `restrict` or under a function's `needs` clause is narrowed by it. Nothing is written in
+  source and nothing is rejected yet: this step is inference and display only, and it changes
+  no generated code. See "Capture sets" in the capabilities chapter.
+
 - **Dependency grants (object capabilities, phase 6).** A `grant` on a dependency in
   `forge.toml` limits what its code may do, as a scope list in `needs` syntax:
   `reader = { path = "deps/reader", grant = ['IO.FileRead("/srv/data")'] }`. Every function
@@ -1374,6 +1389,11 @@ git log is authoritative for exact commits.
   `Tls.write` (and a `Tls.read` or `Tls.close` that had to send) on a connection the peer
   had reset raised SIGPIPE, and the program exited with status 141. It now returns
   `Err(TlsError)`. macOS was not affected.
+- **`File.close` reports a write that fails when the file is flushed.** Writes through a
+  `File.Handle` are buffered, so a full disk or a quota often shows up only when the
+  handle is closed. `File.close` returned `Ok(())` anyway and the data was lost silently.
+  It now returns `Err(IoError(msg))` (the handle is still closed), and
+  `File.with_open_write` returns `Ok(Err(IoError(msg)))`.
 - **Closing a socket, listener or file after a caught panic inside an operation on it now
   releases it.** A panic between the start and end of one use (caught by `try_finally`,
   `Result.try_call`, a supervisor or a test runner) left the handle counted as in use for

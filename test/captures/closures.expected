@@ -1,0 +1,24 @@
+10:14  lambda in `main`  needs IO.Console
+         IO.Console  calls `println` (10:22)
+11:19  lambda in `main`  needs IO.Console
+         IO.Console  captures `say` (11:27)
+12:19  lambda in `main`  needs IO.Console
+         IO.Console  captures `say` (12:28)
+13:20  lambda in `main`  needs IO.Console
+         IO.Console  calls `println` (13:37)
+13:29  lambda in `main`  needs IO.Console
+         IO.Console  calls `println` (13:37)
+14:16  lambda in `main`  needs IO.Console
+         IO.Console  calls `greet` (14:27)
+15:37  `File.read` as a value in `main`  needs IO.FileRead
+         IO.FileRead  is `File.read` (15:37)
+16:7   local fn `go` in `main`  needs IO.Console
+         IO.Console  calls `say` (17:19)
+10:8   let say : a -> Result((), CapError) needs IO.Console
+11:8   let calls_it : a -> Result((), CapError) needs IO.Console
+12:8   let holds_it : () -> (a -> Result((), CapError) needs IO.Console) needs IO.Console
+13:8   let makes_one : () -> (a -> Result((), CapError) needs IO.Console) needs IO.Console
+14:8   let hello : String -> Result((), CapError) needs IO.Console
+fn greet : (String, String) -> Result((), CapError) needs IO.Console
+fn main : () -> ((a -> Result((), CapError) needs IO.Console), (() -> (b -> Result((), CapError) needs IO.Console) needs IO.Console), (() -> (c -> Result((), CapError) needs IO.Console) needs IO.Console), (String -> Result((), CapError) needs IO.Console), List(Result(Result(String, FileError), CapError)), (Int -> Result((), CapError) needs IO.Console)) needs IO.FileRead
+8 function values, 0 not tracked

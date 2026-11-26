@@ -560,18 +560,75 @@ let rec find_first_call (fn_name : string) (expr : Tir.expr)
      | Some _ as r -> r
      | None -> find_first_call fn_name e2)
 
+(** Names [Dce_pre_mono] removed before this run, and the function whose body
+    is being rewritten.  Set by [monomorphize]; empty when no prune ran. *)
+let pruned_names : (string, unit) Hashtbl.t ref = ref (Hashtbl.create 0)
+let tripwire_caller : string ref = ref "<seed>"
+
+(** The pruned-name tripwire.  A pruned function is absent from [fn_table],
+    so a lookup of one would quietly take the "builtin or external" path (for
+    an ord helper: the comparison that returns 0, issue #1172).  A lookup can
+    only name a pruned function if [implicit_callees] is missing the rule
+    that mints the call, so fail loudly at the site instead. *)
+let pruned_lookup (name : string) : unit =
+  if Hashtbl.mem !pruned_names name then
+    failwith (Printf.sprintf
+      "internal error: Mono resolved %s (from %s), which the pre-mono prune \
+       removed; rerun with --disable-pass dce-pre-mono and report it"
+      name !tripwire_caller)
+
+(** [Hashtbl.find_opt fn_table] / [Hashtbl.mem fn_table], through the tripwire.
+    Every resolution in this file goes through one of these two. *)
+let fn_find (fn_table : (string, Tir.fn_def) Hashtbl.t) (name : string)
+  : Tir.fn_def option =
+  match Hashtbl.find_opt fn_table name with
+  | Some _ as r -> r
+  | None -> pruned_lookup name; None
+
+let fn_mem (fn_table : (string, Tir.fn_def) Hashtbl.t) (name : string) : bool =
+  Hashtbl.mem fn_table name || (pruned_lookup name; false)
+
 (** Ensure any function referenced as a value (atom) is enqueued for emission. *)
 let ensure_atom_fns fn_table done_set worklist atoms =
   List.iter (function
     | Tir.AVar v ->
       let name = v.Tir.v_name in
-      (match Hashtbl.find_opt fn_table name with
+      (match fn_find fn_table name with
        | Some orig_fn when not (Hashtbl.mem done_set name) ->
          Queue.add (name, orig_fn, []) worklist
        | _ -> ())
     | Tir.ADefRef _ -> ()  (* global def ref — not in fn_table, skip *)
     | _ -> ()
   ) atoms
+
+(** The prelude helper an ordering operator is routed through when its
+    operands are not primitives (see the ord rewrite in [rewrite_calls]). *)
+let ord_helper_of_op (op : string) : string option =
+  match op with
+  | "<" -> Some "__ord_lt" | "<=" -> Some "__ord_le"
+  | ">" -> Some "__ord_gt" | ">=" -> Some "__ord_ge"
+  | _ -> None
+
+(** Functions a reference to [name] can make [rewrite_calls] call although the
+    TIR does not name them: the ord helper of an ordering operator, and every
+    impl of an interface method (under any type; the [to_string] alias and
+    module-prefix stripping included).  Deliberately a superset over types.
+    [Dce_pre_mono] follows these edges, so a rule added to [rewrite_calls]
+    that mints a call by name must be added here too; the pruned-name
+    tripwire in [monomorphize] fails loudly when one is missed.  See
+    specs/2026-11-24-stdlib-compile-floor-design.md. *)
+let implicit_callees
+    ~(iface_methods : (string, (string * string) list) Hashtbl.t)
+    (name : string) : string list =
+  let impls = match Tir_names.find_iface_impls iface_methods name with
+    | None -> []
+    | Some impls ->
+      List.rev (List.fold_left (fun acc (_, m) ->
+          if List.mem m acc then acc else m :: acc) [] impls)
+  in
+  match ord_helper_of_op name with
+  | Some h -> h :: impls
+  | None -> impls
 
 (** [shadowed] extended with a function's own parameters, for rewriting that
     function's body.  A parameter is a lexical binding exactly like a [let] or
@@ -656,7 +713,7 @@ let rec rewrite_calls
      name has been enqueued/emitted, subsequent calls just reuse it. *)
   let enqueue_specialized_impl
       (mangled_name : string) (args : Tir.atom list) : string =
-    match Hashtbl.find_opt fn_table mangled_name with
+    match fn_find fn_table mangled_name with
     | None -> mangled_name  (* not in fn_table (e.g. a builtin-backed impl) *)
     | Some orig_impl ->
       let arg_tys = List.map atom_ty args in
@@ -815,7 +872,7 @@ let rec rewrite_calls
     in
     match uniq_syms with
     | [m] ->
-      (match Hashtbl.find_opt fn_table m with
+      (match fn_find fn_table m with
        | Some impl_fn ->
          (match impl_fn.Tir.fn_params with
           | p :: _ when mangle_ty p.Tir.v_ty = mangle_ty arg_ty -> Some m
@@ -832,7 +889,7 @@ let rec rewrite_calls
   let resolve_iface_value (a : Tir.atom) : Tir.atom =
     match a with
     | Tir.AVar v when not (SSet.mem v.Tir.v_name shadowed)
-                   && not (Hashtbl.mem fn_table v.Tir.v_name) ->
+                   && not (fn_mem fn_table v.Tir.v_name) ->
       (match v.Tir.v_ty with
        | Tir.TFn ((_ :: _) as ps, _) ->
          let args = List.mapi (fun i t ->
@@ -901,10 +958,9 @@ let rec rewrite_calls
         | _ -> false
       in
       if routed && List.length args = 2 then
-        let h = match orig_name with
-          | "<" -> "__ord_lt" | "<=" -> "__ord_le"
-          | ">" -> "__ord_gt" | _ -> "__ord_ge" in
-        if Hashtbl.mem fn_table h then Some h else None
+        match ord_helper_of_op orig_name with
+        | Some h when fn_mem fn_table h -> Some h
+        | _ -> None
       else None
     in
     (match ord_helper with
@@ -912,7 +968,7 @@ let rec rewrite_calls
       rewrite_calls fn_table done_set worklist iface_methods record_to_typename
         shadowed (Tir.EApp ({ f_var with Tir.v_name = h }, args))
     | None ->
-    (match Hashtbl.find_opt fn_table orig_name with
+    (match fn_find fn_table orig_name with
      | None ->
        (* Not in fn_table (builtin or external).  Before giving up, check if
           this is an unresolved interface method call that can now be resolved
@@ -1167,7 +1223,7 @@ let rec rewrite_calls
           nested-fn-bound name is a local closure call, not a top-level fn. *)
        if SSet.mem orig_name shadowed then expr
        else
-       (match Hashtbl.find_opt fn_table orig_name with
+       (match fn_find fn_table orig_name with
         | None ->
           (* Not a user function.  Try to resolve as an interface method call
              (same logic as EApp above).  This handles the common case where
@@ -1469,7 +1525,10 @@ let refine_field_types (body : Tir.expr) : Tir.expr =
 
     [iface_methods] is the dispatch table saved by [Lower.get_iface_methods ()].
     When absent (empty table), interface dispatch post-mono is skipped. *)
-let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.tir_module =
+let monomorphize ?(iface_methods = Hashtbl.create 0) ?(pruned = Hashtbl.create 0)
+    (m : Tir.tir_module) : Tir.tir_module =
+  pruned_names := pruned;
+  tripwire_caller := "<seed>";
   (* Fresh collision-dispatch state per compilation (REPL / test driver reuse
      the process); populated by [try_collision_dispatch] during rewrite. *)
   Dispatch_registry.reset ();
@@ -1626,6 +1685,7 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
         let refined_body = refine_field_types fn'.Tir.fn_body in
         (* Rewrite calls in the body, enqueuing new specializations *)
         current_spec := Some (orig_name, target_name, subst);
+        tripwire_caller := orig_name;
         let body' = rewrite_calls fn_table done_set worklist
                       iface_methods record_to_typename
                       (shadow_params SSet.empty fn'.Tir.fn_params) refined_body in

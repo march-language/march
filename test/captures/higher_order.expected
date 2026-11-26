@@ -1,0 +1,19 @@
+6:21   lambda in `chain`  needs c1, c2
+         c1  calls `g` (6:31)
+         c2  calls `f` (6:29)
+10:14  lambda in `main`  needs IO.Console
+         IO.Console  calls `println` (10:22)
+11:16  lambda in `main`  needs IO.Console
+         IO.Console  captures `say` (11:30)
+12:16  lambda in `main`  captures nothing
+12:30  lambda in `main`  captures nothing
+13:26  lambda in `main`  captures nothing
+10:8   let say : a -> Result((), CapError) needs IO.Console
+11:8   let noisy : a -> Result((), CapError) needs IO.Console
+13:8   let both : String -> Result((), CapError) needs IO.Console
+14:8   let same : a -> Result((), CapError) needs IO.Console
+fn apply : (a -> b needs c1, a) -> b needs c1
+fn chain : (a -> b needs c1, c -> a needs c2) -> (c -> b needs c1, c2)
+fn id : (a) -> a
+fn main : () -> ((a -> Result((), CapError) needs IO.Console), Int -> Int, (String -> Result((), CapError) needs IO.Console), (b -> Result((), CapError) needs IO.Console))
+6 function values, 0 not tracked

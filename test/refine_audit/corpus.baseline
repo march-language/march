@@ -236,6 +236,8 @@ native_ffi_variant: coverage audit (user + stdlib): 391 enforced, 0 inert (warne
 native_ffi_variant: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_field_use_after_parent_release: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
 native_field_use_after_parent_release: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_file_close_flush_error: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
+native_file_close_flush_error: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_file_error_ctor_match: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
 native_file_error_ctor_match: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_file_handle_box_leak_probe: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
@@ -584,6 +586,8 @@ native_pmap_shared_closure_capture: coverage audit (user + stdlib): 391 enforced
 native_pmap_shared_closure_capture: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_pooled_actor_http: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
 native_pooled_actor_http: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_pre_mono_prune_ord_show: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
+native_pre_mono_prune_ord_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_prelude_scope_user_shadow: coverage audit (user + stdlib): 391 enforced, 0 inert (warned), 0 unenforced

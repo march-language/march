@@ -1,0 +1,17 @@
+-- Found in review: an or-pattern's alternatives can bind one name from
+-- different parts of the value.
+mod ReviewOrPattern do
+  needs IO.Console
+  fn pick(t : (Int -> Int, Int -> Int), k : Int) do
+    match (t, k) do
+      ((f, _), 0) | ((_, f), 1) -> f(1)
+      _ -> 0
+    end
+  end
+  fn mkpair() do (fn x -> x, fn x -> match println("x") do _ -> 1 end) end
+  fn main() do
+    let r = fn () -> pick(mkpair(), 1)
+    let _ = r()
+    ()
+  end
+end

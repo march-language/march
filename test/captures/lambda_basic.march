@@ -1,0 +1,14 @@
+-- Lambdas: a pure one, one with its own operation, literal and computed
+-- targets, one that calls its parameter.
+mod LambdaBasic do
+  needs IO.Console, IO.FileRead
+
+  fn main() do
+    let pure = fn x -> x + 1
+    let say = fn s -> println(s)
+    let literal = fn () -> File.read("/srv/data/a.txt")
+    let computed = fn p -> File.read(p)
+    let caller = fn f -> f()
+    (pure, say, literal, computed, caller)
+  end
+end

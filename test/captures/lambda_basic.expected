@@ -1,0 +1,15 @@
+7:15   lambda in `main`  captures nothing
+8:14   lambda in `main`  needs IO.Console
+         IO.Console  calls `println` (8:22)
+9:18   lambda in `main`  needs IO.FileRead("/srv/data/a.txt")
+         IO.FileRead("/srv/data/a.txt")  calls `File.read` (9:27)
+10:19  lambda in `main`  needs IO.FileRead
+         IO.FileRead  calls `File.read` (10:27)
+11:17  lambda in `main`  needs c1
+         c1  calls `f` (11:25)
+8:8    let say : a -> Result((), CapError) needs IO.Console
+9:8    let literal : () -> Result(Result(String, FileError), CapError) needs IO.FileRead("/srv/data/a.txt")
+10:8   let computed : String -> Result(Result(String, FileError), CapError) needs IO.FileRead
+11:8   let caller : (() -> a needs c1) -> a needs c1
+fn main : () -> (Int -> Int, (a -> Result((), CapError) needs IO.Console), (() -> Result(Result(String, FileError), CapError) needs IO.FileRead("/srv/data/a.txt")), (String -> Result(Result(String, FileError), CapError) needs IO.FileRead), (() -> b) -> b)
+5 function values, 0 not tracked

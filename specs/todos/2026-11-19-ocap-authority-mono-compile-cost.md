@@ -51,3 +51,14 @@ world that is about 1.1 s of the 2.2 s. A smaller cost: `typecheck` alone is ~1.
 world at `bad07beec^`, against a ~0.39 s front end for the small corpus in baseline 2
 (2026-10-07). Part of that is load, but the growth predates `bad07beec`. Both are bigger targets
 than this item.
+
+## 2026-11-25: the pre-mono prune removes the policy before mono
+
+`Dce_pre_mono` (`specs/progress/2026-11-24-pre-mono-dce.md`) drops every function the roots
+cannot reach before Mono, so Mono, Fusion and Defun no longer see the unreachable part of
+`stdlib/authority.march` (hello world: 66 functions into Mono, was 6,340). What is left of this
+item is the part a native program does reach: `Authority.check` and what it calls are still
+lowered, monomorphized and emitted, and `launch_init`'s March body stays reachable although
+the C policy runs instead. Typechecking and lowering `authority.march` are unchanged (the
+"typecheck delta" column above). Making the March policy unreachable on native when
+`Auth_native.applicable` holds is still open; the remaining payoff has not been re-measured.

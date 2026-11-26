@@ -637,6 +637,34 @@ let test_mono_two_instantiations () =
     ) fn.March_tir.Tir.fn_params
   ) m.March_tir.Tir.tm_fns
 
+let implicit_tbl () =
+  let tbl : (string, (string * string) list) Hashtbl.t = Hashtbl.create 4 in
+  Hashtbl.replace tbl "show" [("Int", "Show$Int.show"); ("Foo", "Show$Foo.show")];
+  tbl
+
+let test_mono_implicit_callees_ord () =
+  let empty : (string, (string * string) list) Hashtbl.t = Hashtbl.create 1 in
+  List.iter (fun (op, h) ->
+      Alcotest.(check (list string)) op [h]
+        (March_tir.Mono.implicit_callees ~iface_methods:empty op))
+    ["<", "__ord_lt"; "<=", "__ord_le"; ">", "__ord_gt"; ">=", "__ord_ge"];
+  Alcotest.(check (option string)) "== has no helper" None
+    (March_tir.Mono.ord_helper_of_op "==")
+
+let test_mono_implicit_callees_iface () =
+  let tbl = implicit_tbl () in
+  let both = ["Show$Int.show"; "Show$Foo.show"] in
+  Alcotest.(check (list string)) "show" both
+    (March_tir.Mono.implicit_callees ~iface_methods:tbl "show");
+  Alcotest.(check (list string)) "to_string aliases show" both
+    (March_tir.Mono.implicit_callees ~iface_methods:tbl "to_string");
+  Alcotest.(check (list string)) "module-qualified method" both
+    (March_tir.Mono.implicit_callees ~iface_methods:tbl "Lib.show")
+
+let test_mono_implicit_callees_plain () =
+  Alcotest.(check (list string)) "List.map" []
+    (March_tir.Mono.implicit_callees ~iface_methods:(implicit_tbl ()) "List.map")
+
 let test_mono_pipeline_no_tvar () =
   (* Full pipeline: lower with type_map + monomorphize.
      Verify no TVar remains in a simple typed program. *)
@@ -6167,6 +6195,9 @@ let eval_suites =
           Alcotest.test_case "mono has_tvar"        `Quick test_mono_has_tvar;
           Alcotest.test_case "mono match_ty"        `Quick test_mono_match_ty;
           Alcotest.test_case "mono pipeline"        `Quick test_mono_pipeline_no_tvar;
+          Alcotest.test_case "mono implicit_callees ord"   `Quick test_mono_implicit_callees_ord;
+          Alcotest.test_case "mono implicit_callees iface" `Quick test_mono_implicit_callees_iface;
+          Alcotest.test_case "mono implicit_callees plain" `Quick test_mono_implicit_callees_plain;
           Alcotest.test_case "mono nested generic pattern vars"
             `Quick test_mono_nested_generic_pattern_vars_are_concrete;
           Alcotest.test_case "mono variant parameter order"

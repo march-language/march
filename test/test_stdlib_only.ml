@@ -396,7 +396,7 @@ let test_shipped_table () =
       "reload_request";
       "handle_new"; "handle_enter"; "handle_leave"; "handle_close"; "handle_detach";
       "handle_is_closed"; "handle_aux";
-      "file_open_write"; "file_write_handle"; "file_seek";
+      "file_open_write"; "file_write_handle"; "file_seek"; "file_flush";
       "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at" ] @ task10_raw_builtins
      @ task9_raw_builtins @ task8_raw_builtins)
     gated;
@@ -407,7 +407,7 @@ let test_shipped_table () =
                              && name <> "delivery_origin_set" && name <> "delivery_origin_clear"
                              && name <> "delivery_failed_watch"
                              && not (String.length name > 7 && String.sub name 0 7 = "handle_")
-                             && not (List.mem name [ "file_open_write"; "file_write_handle"; "file_seek";
+                             && not (List.mem name [ "file_open_write"; "file_write_handle"; "file_seek"; "file_flush";
                                                      "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at";
                                                      "cap_check_raw";
                                                      "cap_layers"; "cap_set_launch"; "cap_save"; "cap_restore"; "cap_push"; "cap_enter"; "cap_grant_text";
@@ -561,6 +561,7 @@ end|} call) in
     [ ({|file_open_write("/tmp/x", 0)|}, "file_open_write");
       ({|file_write_handle(-2, "x")|}, "file_write_handle");
       ({|file_seek(-2, 0)|}, "file_seek");
+      ({|file_flush(-2)|}, "file_flush");
       (* Task 7: the File.Dir builtins. *)
       ({|dir_open("/etc")|}, "dir_open");
       ({|dir_open_write("/tmp")|}, "dir_open_write");
@@ -605,7 +606,7 @@ end|} call) in
              [ "File"; "Csv"; "Socket"; "Udp"; "Tls"; "WebSocket"; "HttpServer"; "HttpTransport";
                "Process" ]))
     [ "file_open"; "file_open_write"; "file_read_line"; "file_read_chunk";
-      "file_write_handle"; "file_seek"; "file_close"; "dir_open"; "file_open_at";
+      "file_write_handle"; "file_seek"; "file_flush"; "file_close"; "dir_open"; "file_open_at";
       "dir_list_at"; "csv_open"; "csv_next_row"; "csv_close";
       "tcp_connect"; "tcp_connect_timeout"; "tcp_send_all"; "tcp_recv_all";
       "tcp_recv_exact"; "tcp_recv_http"; "tcp_recv_http_headers"; "tcp_recv_chunk";

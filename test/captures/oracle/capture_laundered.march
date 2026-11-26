@@ -1,0 +1,42 @@
+-- A closure passed through polymorphic code, stored and read back, then
+-- called: the set of whatever calls it must cover what it does.
+mod CaptureLaundered do
+  needs IO.Console, IO.FileRead
+
+  pfn id(x) do x end
+  pfn apply(f, x) do f(x) end
+  pfn twice(f, x) do
+    f(x)
+    f(x)
+  end
+
+  fn main() do
+    let say = fn s -> Authority.ignore(println(s))
+    let read = fn p -> Authority.ignore(File.read(p))
+    let a = fn () ->
+      let f = id(say)
+      f("through id")
+    let b = fn () -> apply(say, "through apply")
+    let c = fn () ->
+      match Option.map(Some(say), fn f -> f) do
+        Some(f) -> f("through Option.map")
+        None -> ()
+      end
+    let d = fn () ->
+      match [say, read] do
+        Cons(f, _) -> f("through a list")
+        Nil -> ()
+      end
+    let e = fn () ->
+      match (read, 1) do
+        (f, _) -> twice(f, "/nonexistent/capture_laundered")
+      end
+    let runner = fn f -> f()
+    runner(a)
+    runner(b)
+    runner(c)
+    runner(d)
+    runner(e)
+    List.each([a, b], fn f -> f())
+  end
+end

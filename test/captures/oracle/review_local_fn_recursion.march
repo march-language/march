@@ -1,0 +1,21 @@
+-- Found in review: a local fn that calls itself must send its recursive
+-- calls' arguments to its real parameters.
+mod ReviewLocalFnRecursion do
+  needs IO.Console
+
+  fn mk() do fn x -> println("hi") end
+
+  fn run(n : Int) do
+    fn go(f, k : Int) do
+      if k == 0 do f(1) else go(mk(), k - 1) end
+    end
+    let quiet = fn x -> Ok(())
+    let r = fn () -> go(quiet, 3)
+    r
+  end
+
+  fn main() do
+    let r = run(1)
+    Authority.ignore(r())
+  end
+end

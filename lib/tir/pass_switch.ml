@@ -17,6 +17,7 @@ let known : (string * string) list = [
   "fusion",          "Fusion.run: list map/filter/fold chain fusion (pre-defun)";
   "nativearr-fusion","Fusion.run_nativearr: NativeArray map chain fusion";
   "dce-early",       "Dce.prune_unreachable right after Defun (compile time only)";
+  "dce-pre-mono",    "prune functions unreachable from the roots before Mono (compile time only)";
   "hof-spec",        "Hof_spec: higher-order specialisation and its unboxed redirect";
   "known-call-pre",  "Known_call before Perceus";
   "beta-adt-pre",    "Beta_adt: case-of-known-constructor before Perceus";

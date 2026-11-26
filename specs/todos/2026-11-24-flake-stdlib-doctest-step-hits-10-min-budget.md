@@ -21,3 +21,22 @@ budget. Either cut the work (the cold prelude precompile is about 60 s and the
 86 REPL sessions run one after another), or raise the budget with the measured
 numbers. Closing rule for a flake (pre-1.0 decision D-n): 10 clean CI runs on
 the leg.
+
+## 2026-11-25: budget raised to 15 minutes
+
+Two more PR runs timed out the same way (1331 run 45721885025 and 1333 run 45731876068),
+each after printing `2081 run ... 0 failed`. Per-session lines, as the comment asks:
+
+| run | sessions | sum | actor.march | control.march |
+|---|---|---|---|---|
+| main 45711459643 (passed, 8 min 02 s) | 87 | 473 s | 51.0 s | 57.5 s |
+| PR 1333 (killed) | 87 | 598 s | 68.2 s | 73.9 s |
+| PR 1331 (killed) | 87 | 597 s | 63.4 s | 73.7 s |
+
+Every session on the killed runs is 24 to 34% slower than on main and none is out of
+line, so it is the runner, not a session. The budget is now 15 minutes (`ci.yml`).
+
+Still open: the step's own cost. 473 s on a normal runner is up from about 285 s on
+2026-11-10 with the same shape, so the growth is per-session start-up, which is where to
+cut next (one process for all sessions, or the sessions in parallel). The closing rule
+stands: 10 clean runs on the leg.

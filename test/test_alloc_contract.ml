@@ -799,7 +799,23 @@ let test_policy_still_rejects_plain_alloc () =
   rejects "policy alloc" policy_alloc_src
     "`bump` is specialized to a NoAlloc policy but allocates"
 
+(* A policy-tagged function is never called, so the pre-mono prune
+   (lib/tir/dce_pre_mono.ml) must pin it or the audit never sees it. *)
+let policy_unreached_src body = Printf.sprintf {|mod Pol do
+needs IO.Console
+type NoPanic = NoPanic
+%s
+fn main(_cap : Cap(IO.Console)) : Unit do Authority.ignore(println("ok")) end
+end|} body
+
+let test_policy_rejects_unreached_nopanic () =
+  rejects "unreached NoPanic"
+    (policy_unreached_src
+       "fn risky(_t : Tagged(Int, NoPanic), a : Int, b : Int) : Int do a / b end")
+    "`risky` (specialized to a NoPanic policy)"
+
 let policy_tests = [
+  Alcotest.test_case "NoPanic policy audits an unreached fn" `Quick test_policy_rejects_unreached_nopanic;
   Alcotest.test_case "NoAlloc policy accepts a reused ctor"  `Quick test_policy_accepts_reused_ctor;
   Alcotest.test_case "NoAlloc policy rejects a real alloc"   `Quick test_policy_still_rejects_plain_alloc;
 ]
