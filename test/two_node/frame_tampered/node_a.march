@@ -30,7 +30,7 @@ mod FrameTamperedA do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let proxy = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_C")))
     let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", [proxy], "tamper-secret", 1)
     match ClusterNode.start(cfg) do

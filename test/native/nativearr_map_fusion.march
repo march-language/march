@@ -52,7 +52,7 @@ mod Main do
       y + 1)
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let ia = NativeArray.from_list_int(Cons(1, Cons(-2, Cons(3, Cons(40, Nil)))))
     let ib = NativeArray.from_list_int(Cons(10, Cons(20, Cons(-30, Cons(5, Nil)))))
     let fa = NativeArray.from_list_float(Cons(1.5, Cons(-2.25, Cons(3.0, Cons(0.125, Nil)))))

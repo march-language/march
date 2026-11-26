@@ -14,7 +14,7 @@ mod ProcessRefused do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+  fn main() needs IO.Console, IO.Process do
     println(verdict(Process.env("HOME")))
     println(verdict(Process.set_env("MARCH_CONF_X", "1")))
     println(verdict(Process.cwd()))

@@ -4,7 +4,7 @@ mod JsArgv do
   needs IO.Console
   needs IO.Process
 
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Process do
     println(String.join(Authority.must(Process.argv()), ","))
     ()
   end

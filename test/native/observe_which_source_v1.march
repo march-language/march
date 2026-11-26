@@ -36,7 +36,7 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO), _cap_debug : Cap(Actor.Debug), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Debug, Actor.Introspect do
     let intro = Authority.must(Actor.introspect())
     let dcap = Authority.must(Actor.debug())
     println(Billing.label(3) ++ " costs " ++ int_to_string(Billing.price(3)))

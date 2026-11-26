@@ -55,7 +55,7 @@ mod SimdMutualTco do
     else even_step(a, i + 4, n, Simd.add_f32x4(acc, Simd.load_f32x4(a, i))) end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let a = NativeArray.make_f32(16, 2.0)
     println(Simd.sum_f32x4(even_step(a, 0, 16, Simd.splat_f32x4(0.0))))
     ()

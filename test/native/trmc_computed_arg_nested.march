@@ -49,7 +49,7 @@ mod TrmcComputedArgNested do
 
   pfn sum(xs : List(Int)) : Int do List.fold_left(xs, 0, fn (a, b) -> a + b) end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = 1000000
     let a = ascending(0, n)
     println("ascending " ++ int_to_string(List.length(a)) ++ " " ++ int_to_string(sum(a)))

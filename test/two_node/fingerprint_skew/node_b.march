@@ -18,8 +18,8 @@ mod FingerprintSkewB do
     B -> A : Int
   end
 
-  fn main(c : Cap(IO)) do
-    match Q_Run.run_B(c, "node-b", "skew-secret", Q_Run.addrs_from_env(), fn (s, st) ->
+  fn main() needs IO do
+    match Q_Run.run_B("node-b", "skew-secret", Q_Run.addrs_from_env(), fn (s, st) ->
       println("B: RAN THE BODY")
       Q_B.recv_Msg_A_B_1(s, st, fn (_t, st1) -> Q_B.close(s, Q_B.send_Msg_B_A_1(s, st1, 1)))) do
       Ok(_) -> println("B: ok")

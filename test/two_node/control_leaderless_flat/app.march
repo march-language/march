@@ -25,7 +25,7 @@ mod LeakApp do
     0
   end
 
-  fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : () do
+  fn start(node : Cap(ClusterNode.Live)) : () do
     let _ = Task.async(fn () -> measure())
     println("app: started")
     ()

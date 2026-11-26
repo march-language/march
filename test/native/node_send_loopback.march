@@ -138,7 +138,7 @@ mod NodeSendLoopback do
     end
   end
 
-  fn main(io : Cap(IO), _cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let listen_fd = match tcp_listen(0) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)

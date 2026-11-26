@@ -100,7 +100,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let n = 300
     let a = live_allocs()
     flat("from_list + length", a, int_to_string(from_list_len(n, 0)))

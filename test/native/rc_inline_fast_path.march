@@ -71,7 +71,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     -- The leak check covers every leg, `floats` included: a List(Float) cons
     -- cell used to leak its boxed Float when dropped, compiled, with or
     -- without this fast path, until the synthesized drop released the box

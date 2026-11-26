@@ -79,7 +79,7 @@ mod ActorRegistryLeakProbe do
     ()
   end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) : () do
+  fn main() : () needs IO, Actor.Introspect do
     let intro = Authority.must(Actor.introspect())
     probe("registered then killed", fn i -> retired(i))
     probe("looked up and unregistered", fn i -> unregistered(intro, i))

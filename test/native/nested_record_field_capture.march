@@ -44,7 +44,7 @@ mod Main do
     if i == 0 do acc else churn(i - 1, Cons("junk-" ++ String.from_int(i), acc)) end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     -- Heap strings, not literals: a static literal is immortal, so a stray
     -- dec_rc on it is invisible.
     let my_id = { name: "node-" ++ String.from_int(2), node_id: "pk-node-" ++ String.from_int(20001) }

@@ -117,7 +117,7 @@ mod StreamActorEvents do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let t = Session.in_process_with(fn line -> Authority.ignore(IO.puts(line)))
     let s = Authority.must(Session.attach(t.ops))
     let pc = spawn(ConsActor)

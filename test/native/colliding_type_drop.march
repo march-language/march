@@ -42,7 +42,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let frame = Msgpack.encode(Msgpack.array(Cons(Msgpack.int(9), Cons(Msgpack.bin(bytes_list(500, Nil)), Nil))))
     flat("Msgpack.Bin dropped", fn () -> mp_tag(Msgpack.bin(bytes_list(500, Nil))))
     flat("Msgpack.Array dropped", fn () -> mp_tag(Msgpack.array(List.map(bytes_list(50, Nil), fn i -> Msgpack.str(int_to_string(i))))))

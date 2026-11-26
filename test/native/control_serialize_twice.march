@@ -9,7 +9,7 @@ mod ControlSerializeTwice do
   needs IO
   needs IO.Console
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let sk = ed25519_seed_keypair(Bytes.from_list(List.map(List.range(0, 32), fn _ -> 3)))
     let base = "release v1\nseq 7\nparent none\nenv e\ntopology t\nstep 1 pools:* hosts:all do:topology\nsig -\n"
     match Control.parse(base) do

@@ -8,7 +8,7 @@ mod TlsHttpsGetRefused do
   needs IO.Console
   needs IO.NetConnect
 
-  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect)) do
+  fn main() needs IO.Console, IO.NetConnect do
     match Tls.https_get("127.0.0.1", 1, "/") do
     Ok(_) -> println("fetched")
     Err(e) -> println(Tls.error_to_string(e))

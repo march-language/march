@@ -43,7 +43,7 @@ mod CapMockSupervised do
     end
   end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let intro = Authority.must(Actor.introspect())
     let outside = spawn(Sup)
     mock IO.Console with { print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) } do

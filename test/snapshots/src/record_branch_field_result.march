@@ -18,7 +18,7 @@ mod RecordBranchFieldResult do
     if r.signature == "" do "-" else r.signature end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(ser({ seq: 1, signature: "s" ++ int_to_string(1) }))
     println(sig_of({ seq: 2, signature: "" }))
   end

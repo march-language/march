@@ -20,7 +20,7 @@ mod Main do
   type U = U((Bool, Float, Meters, MaybeName, ()))
   type Box(a) = Box(a)
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     -- undeclared records, top level
     println(to_string({ a: 1, b: "x" }))
     println(to_string({ f: 1.5, m: Meters(2), n: MaybeName.NoName, t: (1, false), u: () }))

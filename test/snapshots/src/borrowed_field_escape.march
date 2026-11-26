@@ -9,7 +9,7 @@ mod BorrowedFieldEscape do
     b.inner
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let b = { inner: "wrapped" }
     println(peek(b))
   end

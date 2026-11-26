@@ -49,7 +49,7 @@ mod SimdVectorEscapeArg do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     -- 1 cell x 4 lanes x 2.0 = 8.0 per traversal, twice per round, 200 rounds
     println(drive(200, 0.0))
   end

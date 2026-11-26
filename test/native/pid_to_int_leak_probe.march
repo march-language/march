@@ -50,7 +50,7 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO)) do
+  fn main() needs IO do
     let w = spawn(Worker)
     let idx = pid_to_int(w)
     -- Held by `w` and by the running actor itself.

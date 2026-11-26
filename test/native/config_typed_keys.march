@@ -36,7 +36,7 @@ mod M do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut), _p : Cap(IO.Process)) do
+  fn main() needs IO.Console, IO.Mut, IO.Process do
     -- the todo's witness path, through typed keys
     let as_int = Config.key(:config_erased_witness, :value, Config.int())
     let as_string = Config.key(:config_erased_witness, :value, Config.string())

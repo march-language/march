@@ -27,7 +27,7 @@ mod ClusterApRestartA do
   -- A failed attempt says why on stderr, which the harness prints only when
   -- the scenario fails: CI saw session 2 never form after node-b's restart
   -- (2026-10-02, 2026-10-03; never locally), and node-a said nothing.
-  pfn session(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int) : Bool do
+  pfn session(h : Cap(ClusterNode.Live), n : Int) : Bool do
     match Echo_Run.initiate_Client(h, fn (s, st) -> ask(s, st, n)) do
       Ok(_) -> true
       Err(e) ->
@@ -37,11 +37,11 @@ mod ClusterApRestartA do
   end
 
   -- The offer comes back when the restarted node-b registers it again.
-  pfn session_retry(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int, left : Int) : Bool do
-    if session(c, h, n) do true
+  pfn session_retry(h : Cap(ClusterNode.Live), n : Int, left : Int) : Bool do
+    if session(h, n) do true
     else if left <= 0 do false else
       sleep_ms(500)
-      session_retry(c, h, n, left - 500)
+      session_retry(h, n, left - 500)
     end end
   end
 
@@ -67,7 +67,7 @@ mod ClusterApRestartA do
     end end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "apr-secret", 1)
     match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
@@ -78,13 +78,13 @@ mod ClusterApRestartA do
         -- where node-b's restart, its join, and SWIM's verdict on the old
         -- incarnation (stretched there too) all take longer.
         let k = Authority.must(Env.get_int("TWO_NODE_TIME_SCALE", 1))
-        if session_retry(c, h, 1, 60000 * k) do println("Client: session 1 done") else panic("node-a: first session never formed") end
+        if session_retry(h, 1, 60000 * k) do println("Client: session 1 done") else panic("node-a: first session never formed") end
         let first = offer_creation(h)
         -- Both waits fit inside the harness's TWO_NODE_TIMEOUT for node-a to
         -- exit (60 s, 240 s under ASan), so a stall ends in node-a's own
         -- message, not a bare harness timeout.
         if wait_new_offer(h, first, 20000 * k) do () else panic("node-a: the restarted offer never appeared") end
-        if session_retry(c, h, 2, 30000 * k) do println("Client: session 2 done after the restart") else panic("node-a: no session after the restart") end
+        if session_retry(h, 2, 30000 * k) do println("Client: session 2 done after the restart") else panic("node-a: no session after the restart") end
         ClusterNode.stop(h)
     end
   end

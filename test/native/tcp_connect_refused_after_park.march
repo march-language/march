@@ -35,7 +35,7 @@ mod TcpConnectRefusedAfterPark do
     end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     -- A port nothing listens on: bind one, learn its number, close it.
     let l = match Authority.must(Socket.listen(0)) do
       Ok(l) -> l

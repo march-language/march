@@ -15,7 +15,7 @@ mod PreludeScopeUserShadow do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("hi " ++ show(Ok(true)))
     println(show(Err("err")))
     println([1, 2, 3])

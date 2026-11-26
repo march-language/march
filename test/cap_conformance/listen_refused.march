@@ -23,7 +23,7 @@ mod ListenRefused do
     |> HttpServer.plug(fn conn -> HttpServer.text(conn, 200, "ok"))
   end
 
-  fn main(_c : Cap(IO.Console), _l : Cap(IO.NetListen), _n : Cap(IO.NetConnect)) do
+  fn main() needs IO.Console, IO.NetListen, IO.NetConnect do
     println(verdict(HttpServer.listen(server())))
     println(verdict(HttpServer.spawn_n(server(), 1)))
     println(verdict(HttpServer.bind_host("127.0.0.1")))

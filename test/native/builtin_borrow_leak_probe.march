@@ -111,7 +111,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = 10000
     leg_eq(5, 0)
     let a = live_allocs()

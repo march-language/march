@@ -38,7 +38,7 @@ mod Outer do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let p = spawn(Inner.Box)
     println("spawned")
     Inner.put(p, 42)

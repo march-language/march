@@ -27,7 +27,7 @@ mod CtorShapeCollision do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let a = Aaa.mk(41)
     let z = Zzz.mk(1.5)
     println("a=" ++ int_to_string(Aaa.get(a) + 1))

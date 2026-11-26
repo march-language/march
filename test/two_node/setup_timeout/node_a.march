@@ -23,9 +23,9 @@ mod SetupTimeoutA do
     Tri_A.recv_Msg_C_A_1(s, st2, fn (_ok, st3) -> Tri_A.close(s, st3))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-a: up")
-    match Tri_Run.run_A(c, "node-a", "tri-secret", Tri_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
+    match Tri_Run.run_A("node-a", "tri-secret", Tri_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
       Ok(_) -> println("A: closed")
       Err(e) -> println("A: " ++ SessionNode.run_error_message(e))
     end

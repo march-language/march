@@ -23,7 +23,7 @@ mod ProcessSpawnErrors do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+  fn main() needs IO.Console, IO.Process do
     -- Missing program: Err from every spawn entry point.
     show_run("run missing", Authority.must(Process.run("march_no_such_program_xyz", ["a"])))
     match Authority.must(Process.run_stream("march_no_such_program_xyz", [])) do

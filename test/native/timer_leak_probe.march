@@ -66,7 +66,7 @@ mod TimerLeakProbe do
     end
   end
 
-  fn main(cap : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let live_pid = spawn(Sink)
     let dead_pid = spawn(Sink)
     kill(dead_pid)

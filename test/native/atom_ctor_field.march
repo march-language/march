@@ -18,7 +18,7 @@ mod AtomCtorField do
     ()
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     check("put", get(mk(:put)), :put)
     check("post", get(mk(:post)), :post)
     check("get", get(mk(:get)), :get)

@@ -8,7 +8,7 @@ mod Main do
 
   fn step(n : Int) : Int do n + 1 end
 
-  fn main(io : Cap(IO), _cap_debug : Cap(Actor.Debug)) do
+  fn main() needs IO, Actor.Debug do
     let d = Authority.must(Actor.debug())
     match Trace.start(d, ["step"], Trace.MaxEvents(0 - 3)) do
       Ok(_) -> println("started (wrong)")

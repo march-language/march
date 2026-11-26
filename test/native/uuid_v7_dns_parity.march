@@ -73,8 +73,7 @@ mod Main do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock),
-          _cap_net : Cap(IO.Network)) do
+  fn main() needs IO.Console, IO.Clock, IO.Network do
     let u = uuid_v7()
     println("uuid_v7 shape: " ++ to_string(shape_ok(u)))
     let now = unix_time_ms()

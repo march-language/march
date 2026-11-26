@@ -46,7 +46,7 @@ mod Main do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) do
+  fn main() needs IO.Console, IO.Clock do
     let pid = spawn(Echo)
     let first = Actor.call(pid, GetReq, 1)      -- times out; reply n=0 arrives late
     match first do

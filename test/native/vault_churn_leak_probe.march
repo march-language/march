@@ -168,7 +168,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     let n = 2000
 
     let t : Vault(Rec) = Authority.must(Vault.new("vault_churn_rec"))

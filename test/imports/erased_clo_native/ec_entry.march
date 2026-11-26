@@ -19,7 +19,7 @@ fn apply_thunk(thunk) do
   end
 end
 
-fn main(_cap_console : Cap(IO.Console)) do
+fn main() needs IO.Console do
   if apply_thunk(fn () -> true) do
     println("ok erased closure call")
   else

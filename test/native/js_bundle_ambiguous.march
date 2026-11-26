@@ -9,7 +9,7 @@ mod JsBundleAmbiguous do
     fn which() : String
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     println(which())
     ()
   end

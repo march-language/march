@@ -24,7 +24,7 @@
 mod Main do
   needs IO
 
-  fn main(cap: Cap(IO)) do
+  fn main() needs IO do
     let r = record_put(record_put(record_from_list([]), "z", 0.5), "n", 7)
 
     -- ── Float: inline and annotated were already right ───────────────────

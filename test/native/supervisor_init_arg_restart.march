@@ -48,7 +48,7 @@ mod SupervisorInitArgRestart do
     end
   end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let sup = spawn(Sup, "root")
     let w1 = child_int(sup, "w")
     println(int_to_string(child_int(Authority.must(Actor.pid_from_int(w1)), "n")))

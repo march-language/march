@@ -66,7 +66,7 @@ mod RemoteEpochB do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let cfg = ClusterNode.config("node-b", Authority.must(Env.require_int("MARCH_PORT_B")), "", Nil, "epoch-secret", 1)
     match ClusterNode.start(cfg) do
       Err(e) -> panic(e)

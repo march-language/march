@@ -22,7 +22,7 @@ mod ClusterApWithdrawC do
       Ring_C.close(s, Ring_C.send_Msg_C_A_1(s, st1, n + 1)))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let seed = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A")))
     let cfg = ClusterNode.config("node-c", Authority.must(Env.require_int("MARCH_PORT_C")), "", Cons(seed, Nil), "apw-secret", 1)
     match ClusterNode.start(cfg) do

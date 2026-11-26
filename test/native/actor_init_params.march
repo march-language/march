@@ -31,7 +31,7 @@ mod ActorInitParams do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let c = spawn(Counter, 41, "ab")
     send(c, Inc(1))
     send(c, Fold())

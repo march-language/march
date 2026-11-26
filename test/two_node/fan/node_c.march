@@ -27,9 +27,9 @@ mod FanNodeC do
         Fan_C.close(s, Fan_C.send_Msg_C_A_1(s, st2, a + b == 16))))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-c: up")
-    match Fan_Run.run_C(c, "node-c", "fan-secret", Fan_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
+    match Fan_Run.run_C("node-c", "fan-secret", Fan_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
       Ok(_) -> println("C: closed")
       Err(e) -> panic(SessionNode.run_error_message(e))
     end

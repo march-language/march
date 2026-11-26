@@ -22,7 +22,7 @@ mod NominalRecordActorDrops do
     string_length(r.a) + string_length(r.b)
   end
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let p = spawn(Bump)
     send(p, Hit(two_reads(1)))
     run_until_idle()

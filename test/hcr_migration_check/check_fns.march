@@ -51,7 +51,7 @@ mod CheckFns do
 
   fn verdict(s : String) : String do if s == "" do "holds" else s end end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("count 5: " ++ verdict(counter_migrate_state__check({ count: 5 })))
     println("count 137: " ++ verdict(counter_migrate_state__check({ count: 137 })))
     println("count 200: " ++ verdict(counter_migrate_state__check({ count: 200 })))

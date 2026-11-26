@@ -28,7 +28,7 @@ mod Main do
     if n == 0 do acc else rounds(n - 1, acc + round(n)) end
   end
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     println("total " ++ int_to_string(rounds(1000, 0)))
   end
 end

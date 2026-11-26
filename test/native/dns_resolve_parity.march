@@ -30,7 +30,7 @@ mod Main do
     List.all(xs, fn s -> Dns.is_ip(s) && !string_contains(s, ":"))
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_net : Cap(IO.Network)) do
+  fn main() needs IO.Console, IO.Network do
     -- Numeric IPv4: exactly one entry, whatever the socket-type fan-out.
     println(to_string(Authority.must(Dns.resolve("127.0.0.1"))))
     println(to_string(Authority.must(Dns.resolve("10.1.2.3"))))

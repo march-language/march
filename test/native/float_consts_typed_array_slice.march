@@ -51,7 +51,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let nan = float_nan()
     let inf = float_infinity()
     let ninf = float_neg_infinity()

@@ -25,7 +25,7 @@ mod BytesU8Bridge do
     pad16_go(NativeArray.make_u8(16, 0), src, 0, n)
   end
 
-  fn main(_cap : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let b = Bytes.from_string("hi there")
     let a = Bytes.to_u8_arr(b)
     println(NativeArray.length_u8(a))              -- 8

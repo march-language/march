@@ -23,7 +23,7 @@ mod JsLetShadowTarget do
     y + 1
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(int_to_string(pick(Some(3), 4)) ++ " " ++ int_to_string(pick(None, 4)) ++ " " ++ int_to_string(chain(5)))
     ()
   end

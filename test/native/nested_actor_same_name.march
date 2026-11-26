@@ -29,7 +29,7 @@ mod Outer do
         { n: r + 1 }
       end
     end
-    fn start(s : Cap(IO.Spawn)) do spawn(Box) end
+    fn start() do spawn(Box) end
     fn poke(pid, k) do
       let m : Box.Msg = Poke(k)
       send(pid, m)
@@ -48,8 +48,8 @@ mod Outer do
     fn poke(pid, k) do send(pid, Poke(k)) end
   end
 
-  fn main(_c : Cap(IO.Console), s : Cap(IO.Spawn)) do
-    let a = A.start(s)
+  fn main() needs IO.Console, IO.Spawn do
+    let a = A.start()
     let b = spawn(B.Box)
     let r = spawn(Box)
     A.poke(a, 41)

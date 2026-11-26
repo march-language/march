@@ -211,7 +211,7 @@ mod DrainPeers do
     end
   end
 
-  pfn stream_seeds(c : Cap(IO), totals : Vault(Int), seed : Int) : () do
+  pfn stream_seeds(totals : Vault(Int), seed : Int) : () do
     if seed == 60 do () else
       let tally = Authority.must(Vault.new("drain_peers_stream_" ++ int_to_string(seed)))
       let t = counting(tally)
@@ -225,11 +225,11 @@ mod DrainPeers do
       check(tally, t, 2, in_flight, "Stream", seed)
       if count(tally, "drained") > 0 do bump(totals, "drained_sessions") else bump(totals, "finished_sessions") end
       let _ = Vault.incr(totals, "returned", t.returned(()))
-      stream_seeds(c, totals, seed + 1)
+      stream_seeds(totals, seed + 1)
     end
   end
 
-  pfn ring_seeds(c : Cap(IO), totals : Vault(Int), seed : Int) : () do
+  pfn ring_seeds(totals : Vault(Int), seed : Int) : () do
     if seed == 60 do () else
       let tally = Authority.must(Vault.new("drain_peers_ring_" ++ int_to_string(seed)))
       let t = counting(tally)
@@ -244,7 +244,7 @@ mod DrainPeers do
       check(tally, t, 3, in_flight, "Ring", seed)
       if count(tally, "drained") > 0 do bump(totals, "drained_sessions") else bump(totals, "finished_sessions") end
       let _ = Vault.incr(totals, "returned", t.returned(()))
-      ring_seeds(c, totals, seed + 1)
+      ring_seeds(totals, seed + 1)
     end
   end
 
@@ -264,7 +264,7 @@ mod DrainPeers do
       else steady_dst(s, Steady_Dst.choose_more(s, st1, true), got + 1) end)
   end
 
-  pfn pair_seeds(c : Cap(IO), totals : Vault(Int), seed : Int) : () do
+  pfn pair_seeds(totals : Vault(Int), seed : Int) : () do
     if seed == 60 do () else
       let tally = Authority.must(Vault.new("drain_peers_pair_" ++ int_to_string(seed)))
       let t = counting(tally)
@@ -278,11 +278,11 @@ mod DrainPeers do
       check(tally, t, 2, in_flight, "Pair", seed)
       if count(tally, "drained") > 0 do bump(totals, "drained_sessions") else bump(totals, "finished_sessions") end
       let _ = Vault.incr(totals, "returned", t.returned(()))
-      pair_seeds(c, totals, seed + 1)
+      pair_seeds(totals, seed + 1)
     end
   end
 
-  pfn relay_seeds(c : Cap(IO), totals : Vault(Int), seed : Int) : () do
+  pfn relay_seeds(totals : Vault(Int), seed : Int) : () do
     if seed == 60 do () else
       let tally = Authority.must(Vault.new("drain_peers_relay_" ++ int_to_string(seed)))
       let t = counting(tally)
@@ -297,11 +297,11 @@ mod DrainPeers do
       check(tally, t, 3, in_flight, "Relay3", seed)
       if count(tally, "drained") > 0 do bump(totals, "drained_sessions") else bump(totals, "finished_sessions") end
       let _ = Vault.incr(totals, "returned", t.returned(()))
-      relay_seeds(c, totals, seed + 1)
+      relay_seeds(totals, seed + 1)
     end
   end
 
-  pfn fork_seeds(c : Cap(IO), totals : Vault(Int), seed : Int) : () do
+  pfn fork_seeds(totals : Vault(Int), seed : Int) : () do
     if seed == 60 do () else
       let tally = Authority.must(Vault.new("drain_peers_fork_" ++ int_to_string(seed)))
       let t = counting(tally)
@@ -316,11 +316,11 @@ mod DrainPeers do
       check(tally, t, 3, in_flight, "Fork", seed)
       if count(tally, "drained") > 0 do bump(totals, "drained_sessions") else bump(totals, "finished_sessions") end
       let _ = Vault.incr(totals, "returned", t.returned(()))
-      fork_seeds(c, totals, seed + 1)
+      fork_seeds(totals, seed + 1)
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     IO.puts("-- Stream: Cons drains at its loop boundary after two items")
     let t1 = tracing()
     let s1 = Authority.must(Session.attach(t1.ops))
@@ -357,13 +357,13 @@ mod DrainPeers do
 
     IO.puts("-- chaos: Stream, 60 seeds, a random role drains after a random number of steps")
     let tot1 = Authority.must(Vault.new("drain_peers_totals_stream"))
-    stream_seeds(c, tot1, 0)
+    stream_seeds(tot1, 0)
     IO.puts("drained " ++ int_to_string(count(tot1, "drained_sessions")) ++ ", finished first "
       ++ int_to_string(count(tot1, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot1, "returned")))
 
     IO.puts("-- chaos: Ring, three roles, 60 seeds")
     let tot2 = Authority.must(Vault.new("drain_peers_totals_ring"))
-    ring_seeds(c, tot2, 0)
+    ring_seeds(tot2, 0)
     IO.puts("drained " ++ int_to_string(count(tot2, "drained_sessions")) ++ ", finished first "
       ++ int_to_string(count(tot2, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot2, "returned")))
 
@@ -378,19 +378,19 @@ mod DrainPeers do
     IO.puts(counts(t4))
     IO.puts("-- chaos: Pair, two sends in a row to a loop head, 60 seeds")
     let tot3 = Authority.must(Vault.new("drain_peers_totals_pair"))
-    pair_seeds(c, tot3, 0)
+    pair_seeds(tot3, 0)
     IO.puts("drained " ++ int_to_string(count(tot3, "drained_sessions")) ++ ", finished first "
       ++ int_to_string(count(tot3, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot3, "returned")))
 
     IO.puts("-- chaos: Relay3, a send to a role after it drained, 60 seeds")
     let tot4 = Authority.must(Vault.new("drain_peers_totals_relay"))
-    relay_seeds(c, tot4, 0)
+    relay_seeds(tot4, 0)
     IO.puts("drained " ++ int_to_string(count(tot4, "drained_sessions")) ++ ", finished first "
       ++ int_to_string(count(tot4, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot4, "returned")))
 
     IO.puts("-- chaos: Fork, a send to a drained role, 60 seeds")
     let tot5 = Authority.must(Vault.new("drain_peers_totals_fork"))
-    fork_seeds(c, tot5, 0)
+    fork_seeds(tot5, 0)
     IO.puts("drained " ++ int_to_string(count(tot5, "drained_sessions")) ++ ", finished first "
       ++ int_to_string(count(tot5, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot5, "returned")))
     ()

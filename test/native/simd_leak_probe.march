@@ -62,7 +62,7 @@ mod SimdLeakProbe do
     else drive(n - 1, acc +. go(Simd.splat_f32x4(1.0), 1)) end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let before = live_allocs()
     println(drive(2000000, 0.0))
     let after = live_allocs()

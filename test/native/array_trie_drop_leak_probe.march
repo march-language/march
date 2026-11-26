@@ -111,7 +111,7 @@ mod Main do
     flat(label, before, r, builds)
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     from_list_leg("from_list 5 (tail only)", 5, 10)
     from_list_leg("from_list 40 (one leaf)", 40, 10)
     from_list_leg("from_list 1100 (two levels)", 1100, 6)

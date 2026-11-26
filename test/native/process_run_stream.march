@@ -27,7 +27,7 @@ mod ProcessRunStream do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+  fn main() needs IO.Console, IO.Process do
     report("echo", Authority.must(Process.run_stream("echo", ["hello"])))
     report("printf", Authority.must(Process.run_stream("printf", ["a\nb\n\nc\n"])))
     report("no trailing newline", Authority.must(Process.run_stream("printf", ["x\ny"])))

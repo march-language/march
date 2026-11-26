@@ -53,7 +53,7 @@ mod TcpRecvEagainAfterPark do
     end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     let listener = match Authority.must(Socket.listen(0)) do
       Ok(l) -> l
       Err(e) -> panic("listen: " ++ Socket.error_message(e))

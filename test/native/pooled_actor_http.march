@@ -99,7 +99,7 @@ mod PooledActorHttp do
     end
   end
 
-  fn main(_cap_netlisten : Cap(IO.NetListen), _cap_process : Cap(IO.Process), _cap_spawn : Cap(IO.Spawn)) do
+  fn main() needs IO.NetListen, IO.Process, IO.Spawn do
     let port = port_from_env()
     if port == 0 do
       Authority.ignore(Process.exit(2))

@@ -23,7 +23,7 @@
 mod Main do
   needs IO.Console
 
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     -- odd default: raw storage would read back as 7 >> 1 = 3
     let a = typed_array_create(3, 7)
     println("create/get odd  : " ++ int_to_string(typed_array_get(a, 0)))

@@ -160,7 +160,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let n = 300
     let a0 = live_allocs()
     flat("map of a map", a0, int_to_string(map_leg(n, 0)))

@@ -72,9 +72,9 @@ mod OptionFloatLeakProbe do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() do
     -- Warm every leg outside the measurement window so one-time statics
-    -- (string literals, closure globals) do not count as leaks.
+    -- (string literals, closure globals) needs IO.Console do not count as leaks.
     println("record=" ++ sc(record_leg(4, 0.0)))
     println("json=" ++ int_to_string(json_leg(4, 0)))
     println("int=" ++ int_to_string(int_leg(4, 0)))

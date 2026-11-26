@@ -70,7 +70,7 @@ mod CertDowngradeAfterRestart do
     end
   end
 
-  fn main(io : Cap(IO)) do
+  fn main() needs IO do
     let broad = cert("1700000000100-xbroad", ["Ctl.Agent:initiate", "Ctl.Control:offer"], ["raw_send"], 4102444800)
     let narrow = cert("1700000000200-ynarrow", ["Ctl.Agent:initiate"], Nil, 4102444800)
     let start_cert = cert("1700000000000-start", ["Ctl.Agent:initiate"], Nil, 4102444800)

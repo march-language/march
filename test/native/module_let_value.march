@@ -22,7 +22,7 @@ mod ModuleLetValue do
     fn twice() : Int do n + n end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println(int_to_string(top))
     println(int_to_string(Cst.n))
     println(Cst.greeting ++ "!")

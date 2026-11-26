@@ -33,7 +33,7 @@ mod ClusterQueueLimitA do
       Bulk_Client.recv_Msg_Server_Client_2(s, st4, fn (_n, st5) -> Bulk_Client.close(s, st5)))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "ql-secret", 1)
     -- SWIM's suspect timeout is raised to 15 s here: this scenario is about
     -- the queue limit giving up on a peer that stops reading, and under the

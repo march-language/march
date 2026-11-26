@@ -31,7 +31,7 @@ mod SupervisorOneForAllRestart do
     end
   end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let sup = spawn(Sup)
     let wa1 = child_int(sup, "wa")
     let wb1 = child_int(sup, "wb")

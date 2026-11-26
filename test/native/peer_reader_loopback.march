@@ -109,7 +109,7 @@ mod PeerReaderLoopback do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
+  fn main() needs IO.Console, IO.NetConnect, IO.NetListen, IO.Spawn, IO.Mut do
     let _ = Vault.new("peer_reader_frames")
     let _ = Vault.new("peer_reader_log")
     let listen_fd = match tcp_listen(0) do

@@ -37,7 +37,7 @@ mod TaskSpawnFloatThunk do
   needs IO.Console
   needs IO.Spawn
 
-  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Spawn do
     -- Capture-free Float thunk: the primary repro.  2.5 * 2 = 5.
     let tf = Authority.must(Task.async(fn () -> 2.5))
     match task_await(tf) do

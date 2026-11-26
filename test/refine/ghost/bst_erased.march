@@ -84,7 +84,7 @@ mod Bst do
     List.map(xs, fn x -> contains(t, x))
   end
 
-  fn main(cap : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = count_in(Node(Node(Leaf, 1, Leaf), 5, Node(Leaf, 9, Leaf)), [1, 4, 5, 9, 12], 0)
     println(int_to_string(n))
     let found = hits(Node(Node(Leaf, 1, Leaf), 5, Node(Leaf, 9, Leaf)), [5, 6])

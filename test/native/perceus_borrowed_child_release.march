@@ -79,7 +79,7 @@ mod Main do
     if i <= 0 do lst else build_desc(insert(lst, key(i), i), i - 1) end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     -- size: two rounds of inserts with Int payloads
     let a = insert(insert(insert(Nil, key(3), 30), key(1), 10), key(2), 20)
     let b = insert(insert(a, key(6), 60), key(4), 40)

@@ -75,7 +75,7 @@ mod FrameTamperedC do
     end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     match Authority.must(Socket.listen(Authority.must(Env.require_int("MARCH_PORT_C")))) do
       Err(e) -> panic("node-c: listen: " ++ Socket.error_message(e))
       Ok(lfd) ->

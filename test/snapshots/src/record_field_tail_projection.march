@@ -27,7 +27,7 @@ mod RecordFieldTailProjection do
     keep(addr)
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let ms = [{ node_id: "n" ++ int_to_string(0), addr: "a" ++ int_to_string(0) }]
     println(int_to_string(List.length(closed(ms, "n0"))))
   end

@@ -105,7 +105,7 @@ mod ClusterApOfferRetire do
     ()
   end
 
-  pfn open_close(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int) : () do
+  pfn open_close(h : Cap(ClusterNode.Live), n : Int) : () do
     if n <= 0 do () else
       match Echo_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st)) do
         Err(e) -> panic(Echo_Run.error_message(e))
@@ -114,48 +114,48 @@ mod ClusterApOfferRetire do
           SessionNode.close_offer(o)
           released(h, o, 10000)
       end
-      open_close(c, h, n - 1)
+      open_close(h, n - 1)
     end
   end
 
-  pfn refused(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int, count : Int) : Int do
+  pfn refused(h : Cap(ClusterNode.Live), n : Int, count : Int) : Int do
     if n <= 0 do count else
       match Echo_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st)) do
-        Err(SessionNode.AlreadyOffered(_)) -> refused(c, h, n - 1, count + 1)
+        Err(SessionNode.AlreadyOffered(_)) -> refused(h, n - 1, count + 1)
         Err(e) -> panic(Echo_Run.error_message(e))
         Ok(_) -> panic("a second offer of a held name was opened")
       end
     end
   end
 
-  pfn offer_idle(c : Cap(IO), h : Cap(ClusterNode.Live), host : Pid(a)) : Result(SessionNode.Offer, SessionNode.RunError) do
+  pfn offer_idle(h : Cap(ClusterNode.Live), host : Pid(a)) : Result(SessionNode.Offer, SessionNode.RunError) do
     Hosted_Run.offer_hosted_Server(h, 4, host,
       fn (_sid, _s) -> (),
       fn (_sid, _s, _from, _msg, _ep) -> (),
       fn (_sid, _s, _role, _cause, _ep) -> ())
   end
 
-  pfn hosted_open_close(c : Cap(IO), h : Cap(ClusterNode.Live), host : Pid(a), n : Int) : () do
+  pfn hosted_open_close(h : Cap(ClusterNode.Live), host : Pid(a), n : Int) : () do
     if n <= 0 do () else
-      match offer_idle(c, h, host) do
+      match offer_idle(h, host) do
         Err(e) -> panic(Hosted_Run.error_message(e))
         Ok(o) ->
           visible(h, o, 10000)
           SessionNode.close_offer(o)
           released(h, o, 10000)
       end
-      hosted_open_close(c, h, host, n - 1)
+      hosted_open_close(h, host, n - 1)
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "local-secret", 1)
     match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         -- 1. Open and close, no session.
         let before = Scheduler.live_procs()
-        open_close(c, h, 5)
+        open_close(h, 5)
         retired("5 offers opened and closed", before)
 
         -- 2. Refused re-offers of a held name.
@@ -164,7 +164,7 @@ mod ClusterApOfferRetire do
           Ok(o) ->
             visible(h, o, 10000)
             let held = Scheduler.live_procs()
-            let n = refused(c, h, 5, 0)
+            let n = refused(h, 5, 0)
             println("re-offers refused: " ++ int_to_string(n))
             retired("5 refused re-offers", held)
 
@@ -190,14 +190,14 @@ mod ClusterApOfferRetire do
         -- 4. Hosted offers.
         let host = spawn(Idle)
         let hbefore = Scheduler.live_procs()
-        hosted_open_close(c, h, host, 5)
+        hosted_open_close(h, host, 5)
         retired("5 hosted offers opened and closed", hbefore)
-        match offer_idle(c, h, host) do
+        match offer_idle(h, host) do
           Err(e) -> panic(Hosted_Run.error_message(e))
           Ok(o) ->
             visible(h, o, 10000)
             let held = Scheduler.live_procs()
-            let again = match offer_idle(c, h, host) do
+            let again = match offer_idle(h, host) do
               Err(SessionNode.AlreadyOffered(_)) -> "AlreadyOffered"
               Err(e) -> Hosted_Run.error_message(e)
               Ok(_) -> "opened"

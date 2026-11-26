@@ -32,7 +32,7 @@ mod ActorSharedNameDrop do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let c = spawn(Counter)
     let o = spawn(Rival)
     send(c, Counter.Inc(3))

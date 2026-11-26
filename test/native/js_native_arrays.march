@@ -6,7 +6,7 @@
 mod JsNativeArrays do
   needs IO.Console
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let a = NativeArray.set_i32(NativeArray.set_i32(NativeArray.make_i32(4, 7), 0, 4294967295), 3, 2147483648)
     println(int_to_string(NativeArray.length_i32(a)))
     println(int_to_string(NativeArray.get_i32(a, 0)) ++ " " ++ int_to_string(NativeArray.get_i32(a, 1)) ++ " " ++ int_to_string(NativeArray.get_i32(a, 3)))

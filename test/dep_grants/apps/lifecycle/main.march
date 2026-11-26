@@ -57,7 +57,7 @@ mod Main do
     println("after a panic in the package: " ++ mine())
   end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     actors(Authority.must(Actor.introspect()))
     tasks()
     panics()

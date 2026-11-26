@@ -119,7 +119,7 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
 
     -- with_context without a crash: nested, inner first, restored after.
     let inside = Diagnostics.with_context([("outer", Diagnostics.DBool(true))], fn ->

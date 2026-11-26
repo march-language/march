@@ -45,7 +45,7 @@ mod NicheConcretePayloadDrop do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     -- 9 x 2 + 90 x 3 + 900 x 4 + 1 x 5 = 3893
     println(int_to_string(spin(1000, 0)))
     println(int_to_string(size(Z)))

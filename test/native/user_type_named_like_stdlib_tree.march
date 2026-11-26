@@ -67,7 +67,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let m = OrderedMap.put(OrderedMap.new(fn (a, b) -> a - b), 5, "five")
     println(int_to_string(OrderedMap.size(m)))
     let m = OrderedMap.from_list(pairs(10), fn (a, b) -> a - b)

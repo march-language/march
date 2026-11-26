@@ -27,9 +27,9 @@ mod DrainHardA do
       fn (_b, st2) -> Stream_Prod.close(s, st2))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-a: up")
-    match Stream_Run.run_Prod(c, "node-a", "drain-secret", Stream_Run.addrs_from_env(), fn (s, st) -> prod(s, st, 1)) do
+    match Stream_Run.run_Prod("node-a", "drain-secret", Stream_Run.addrs_from_env(), fn (s, st) -> prod(s, st, 1)) do
       Ok(_) -> println("Prod: Ok")
       Err(SessionNode.Cancelled(role, _why)) -> println("Prod: cancelled waiting on role " ++ int_to_string(role))
       Err(e) -> println("Prod: " ++ Stream_Run.error_message(e))

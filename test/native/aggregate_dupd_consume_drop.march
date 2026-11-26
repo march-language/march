@@ -69,7 +69,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = 3000
     let obs = [{ report: { node: "1", detail: "x" } }, { report: { node: "2", detail: "yy" } }]
     let a = live_allocs()

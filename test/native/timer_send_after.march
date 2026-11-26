@@ -43,7 +43,7 @@ mod TimerSendAfter do
     end
   end
 
-  fn main(_cap : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let silent = spawn(Silent)
     let counter = spawn(Counter)
 

@@ -35,7 +35,7 @@ mod ErasedTypeId do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let h = H(0, Cons(Circle(1), Cons(Rect(2, 3), Nil)))
     println("nested=" ++ to_string(h))
 

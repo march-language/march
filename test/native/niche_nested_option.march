@@ -40,7 +40,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(describe(wrap_name(true)))
     println(describe(Some(MaybeName.Named("x"))))
     println(describe(wrap_name(false)))

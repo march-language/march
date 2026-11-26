@@ -10,7 +10,7 @@ mod CrossBranchConsumption do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(pick(true, "value"))
   end
 end

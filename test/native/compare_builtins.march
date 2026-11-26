@@ -21,7 +21,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("compare_int(3, 5) = " ++ int_to_string(compare_int(3, 5)))
     println("compare_int(5, 5) = " ++ int_to_string(compare_int(5, 5)))
     println("compare_int(7, 5) = " ++ int_to_string(compare_int(7, 5)))

@@ -92,7 +92,7 @@ mod SessionNodeFan do
   end
 
   -- ── role A: sends to C (late), then hears back ──────────────────────────
-  fn run_a(c : Cap(IO), listen_fd : Int) : Int do
+  fn run_a(listen_fd : Int) : Int do
     let conn = accept_on(listen_fd, "node-a")
     phase("A", "accepted C")
     let p0 = SessionNode.party(Fan_Msg.role_A(), "node-a", fn _ep -> note("A", "A: closed"))
@@ -118,7 +118,7 @@ mod SessionNodeFan do
   end
 
   -- ── role B: sends to C at once ──────────────────────────────────────────
-  fn run_b(c : Cap(IO), port_c : Int) : Int do
+  fn run_b(port_c : Int) : Int do
     let conn = connect_retry(port_c, "node-b", 100)
     phase("B", "connected to C")
     let p0 = SessionNode.party(Fan_Msg.role_B(), "node-b", fn _ep -> note("B", "B: closed"))
@@ -136,7 +136,7 @@ mod SessionNodeFan do
   end
 
   -- ── role C: receives A then B, answers A ────────────────────────────────
-  fn run_c(c : Cap(IO), port_a : Int, listen_fd : Int) : Int do
+  fn run_c(port_a : Int, listen_fd : Int) : Int do
     let conn_a = connect_retry(port_a, "node-c", 100)
     phase("C", "connected to A")
     let p0 = SessionNode.party(Fan_Msg.role_C(), "node-c", fn _ep -> note("C", "C: closed"))
@@ -161,7 +161,7 @@ mod SessionNodeFan do
     0
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let listen_a = match tcp_listen(0) do
       Ok(fd) -> fd
       Err(e) -> panic("listen a: " ++ e)
@@ -178,9 +178,9 @@ mod SessionNodeFan do
       Ok(p) -> p
       Err(e) -> panic("port c: " ++ e)
     end
-    let ta = task_spawn(fn _ -> run_a(c, listen_a))
-    let tc = task_spawn(fn _ -> run_c(c, port_a, listen_c))
-    let tb = task_spawn(fn _ -> run_b(c, port_c))
+    let ta = task_spawn(fn _ -> run_a(listen_a))
+    let tc = task_spawn(fn _ -> run_c(port_a, listen_c))
+    let tb = task_spawn(fn _ -> run_b(port_c))
     let _ = task_await(ta)
     let _ = task_await(tb)
     let _ = task_await(tc)

@@ -20,7 +20,7 @@ mod Main do
     if n <= 0 do acc else times(n - 1, acc + shown(n)) end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let _ = times(3, 0)
     let a0 = live_allocs()
     let _ = times(200, 0)

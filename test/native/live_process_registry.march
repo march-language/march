@@ -50,7 +50,7 @@ mod LiveProcReg do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Process, IO.Spawn do
     match Authority.must(Process.spawn_async("cat", [])) do
       Ok(p0) ->
         -- 70 spawn/read/wait cycles while p0 stays open.

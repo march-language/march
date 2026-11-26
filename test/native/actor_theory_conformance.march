@@ -60,7 +60,7 @@ mod Main do
     ()
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let k = 50
     let log = spawn(Logger)
     let a = spawn(Sender)

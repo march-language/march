@@ -35,9 +35,9 @@ mod DrainStreamA do
         Stream_Prod.drained(s, d))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-a: up")
-    match Stream_Run.run_Prod(c, "node-a", "drain-secret", Stream_Run.addrs_from_env(), fn (s, st) -> prod(s, st, 1)) do
+    match Stream_Run.run_Prod("node-a", "drain-secret", Stream_Run.addrs_from_env(), fn (s, st) -> prod(s, st, 1)) do
       Ok(Session.Drained(n)) -> println("Prod: Ok(Drained(" ++ int_to_string(n) ++ "))")
       Ok(Session.Finished) -> println("Prod: Ok(Finished)")
       Err(e) -> panic(Stream_Run.error_message(e))

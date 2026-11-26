@@ -68,7 +68,7 @@ mod Main do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let f = joiner(Pair(string_concat("left-", int_to_string(7)), string_concat("right-", int_to_string(8))))
     println(f((1, 2)))
     let r = rebinder(Pair(string_concat("t-", int_to_string(9)), string_concat("u-", int_to_string(10))))

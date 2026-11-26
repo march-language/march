@@ -17,7 +17,7 @@ mod Main do
 
   derive Eq for Tagged
 
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let allowed = Cons(:get, Cons(:post, Nil))
     let m = :post
     println(bool_to_string(List.any(allowed, fn a -> a == m)))

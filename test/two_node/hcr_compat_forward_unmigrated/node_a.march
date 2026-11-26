@@ -20,7 +20,7 @@ mod Fwd do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _k : Cap(IO.Clock)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Spawn, IO.Clock do
     let counter = spawn(Counter)
     List.each(List.range(0, 5), fn _ -> send(counter, Tick))
     sleep_ms(300)

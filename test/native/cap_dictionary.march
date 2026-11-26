@@ -24,16 +24,16 @@ mod CapDict do
   type Ops = { tick : (Int) -> Int }
   proof cap Live with Ops
 
-  fn with_add(c : Cap(IO), k : Int) : Cap(CapDict.Live) do
-    cap_impl(mint_cap(c), { tick: fn n -> n + k })
+  fn with_add(k : Int) : Cap(CapDict.Live) do
+    cap_impl(mint_cap(), { tick: fn n -> n + k })
   end
 
-  fn with_mul(c : Cap(IO), k : Int) : Cap(CapDict.Live) do
-    cap_impl(mint_cap(c), { tick: fn n -> n * k })
+  fn with_mul(k : Int) : Cap(CapDict.Live) do
+    cap_impl(mint_cap(), { tick: fn n -> n * k })
   end
 
-  fn plain(c : Cap(IO)) : Cap(CapDict.Live) do
-    mint_cap(c)
+  fn plain() : Cap(CapDict.Live) do
+    mint_cap()
   end
 
   fn run(c : Cap(CapDict.Live), n : Int) : Int do
@@ -43,12 +43,12 @@ mod CapDict do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     -- one dictionary proves dispatch reaches it; TWO prove the swap is real
     -- and not a hard-coded implementation
-    println(int_to_string(run(with_add(c, 100), 5)))
-    println(int_to_string(run(with_mul(c, 3), 5)))
+    println(int_to_string(run(with_add(100), 5)))
+    println(int_to_string(run(with_mul(3), 5)))
     -- no dictionary: the sentinel reads back as None and the default path runs
-    println(int_to_string(run(plain(c), 7)))
+    println(int_to_string(run(plain(), 7)))
   end
 end

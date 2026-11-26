@@ -28,7 +28,7 @@ mod JpTail do
     if i < 0 do acc else build(i - 1, Cons((i / 3, i), acc)) end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let xs = build(200000, Nil)
     println(bool_to_string(ordered(xs)))
     println(bool_to_string(ordered(Cons((9, 0), xs))))

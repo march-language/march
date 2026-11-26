@@ -44,7 +44,7 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let boss = spawn(Boss)
     let a1 = child_int(boss, "a")
     let t1 = child_int(boss, "t")

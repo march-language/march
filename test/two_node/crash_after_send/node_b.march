@@ -39,9 +39,9 @@ mod CrashAfterSendNodeB do
           Logging_I.close(s, Logging_I.send_Msg_I_L_1(s, st2, "C crashed: " ++ crashed.cause))))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-b: up")
-    match Logging_Run.run_I(c, "node-b", "logging-secret", Logging_Run.addrs_from_env(), fn (s, st) -> role_i(s, st)) do
+    match Logging_Run.run_I("node-b", "logging-secret", Logging_Run.addrs_from_env(), fn (s, st) -> role_i(s, st)) do
       Ok(_) -> println("I: closed")
       Err(SessionNode.Cancelled(role, cause)) ->
         println("I: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)

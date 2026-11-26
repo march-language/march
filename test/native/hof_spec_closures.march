@@ -24,7 +24,7 @@ mod Main do
     if n <= 0 do x else alternate(n - 1, f(x), g, f) end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let xs = Cons(1.5, Cons(-2.25, Cons(3.0, Cons(0.125, Nil))))
     let ns = Cons(4, Cons(-5, Cons(6, Nil)))
     let k = List.length(ns)

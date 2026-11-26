@@ -26,9 +26,9 @@ mod SilentNodeA do
       Silent_A.close(s, st1))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-a: up")
-    match Silent_Run.run_A(c, "node-a", "silent-secret", Silent_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
+    match Silent_Run.run_A("node-a", "silent-secret", Silent_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
       Ok(_) -> println("A: closed")
       Err(SessionNode.Cancelled(role, cause)) ->
         println("A: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)

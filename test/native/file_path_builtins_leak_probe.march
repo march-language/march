@@ -82,7 +82,7 @@ mod FilePathBuiltinsLeakProbe do
     ()
   end
 
-  fn main(_io : Cap(IO), _r : Cap(IO.FileRead), _w : Cap(IO.FileWrite)) : () do
+  fn main() : () needs IO do
     probe("missing file", fn i -> missing(i))
     probe("write, append, read, delete", fn i -> round_trip(i))
     probe("mkdir_p, exists, rm_rf", fn i -> dirs(i))

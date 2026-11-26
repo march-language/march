@@ -112,7 +112,7 @@ mod Main do
     ()
   end
 
-  fn main(_io : Cap(IO)) : () do
+  fn main() : () needs IO do
     probe("pushed to, called and killed", fn i -> pushed(i))
     probe("called twice and killed", fn i -> called(i))
     probe("stopped, on_stop ran", fn i -> stopped(i))

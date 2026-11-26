@@ -145,7 +145,7 @@ mod CertUpdateReplayC do
     end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     let old = Authority.must(Env.require("OLD_PKI"))
     let signed = match NodeCert.from_text(read(old ++ "/node-b.cert")) do
       Ok(s) -> s

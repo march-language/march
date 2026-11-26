@@ -46,21 +46,21 @@ mod CertDirectA do
     Ledger_A.recv_Msg_B_A_1(s, Ledger_A.send_Msg_A_B_1(s, st, 1), fn (_n, st1) -> Ledger_A.close(s, st1))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let pki = Authority.must(Env.require("PKI"))
     Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
     Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
     Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
     println(me() ++ ": up")
-    match Pair_Run.run_A(c, me(), "unused-secret", Pair_Run.addrs_from_env(), fn (s, st) -> pair(s, st)) do
+    match Pair_Run.run_A(me(), "unused-secret", Pair_Run.addrs_from_env(), fn (s, st) -> pair(s, st)) do
       Ok(_) -> println(me() ++ ": Pair closed")
       Err(e) -> println(me() ++ ": Pair: " ++ Pair_Run.error_message(e))
     end
-    match Audit_Run.run_A(c, me(), "unused-secret", Audit_Run.addrs_from_env(), fn (s, st) -> audit(s, st)) do
+    match Audit_Run.run_A(me(), "unused-secret", Audit_Run.addrs_from_env(), fn (s, st) -> audit(s, st)) do
       Ok(_) -> println(me() ++ ": Audit formed (wrong)")
       Err(_) -> println(me() ++ ": Audit did not form")
     end
-    match Ledger_Run.run_A(c, me(), "unused-secret", Ledger_Run.addrs_from_env(), fn (s, st) -> ledger(s, st)) do
+    match Ledger_Run.run_A(me(), "unused-secret", Ledger_Run.addrs_from_env(), fn (s, st) -> ledger(s, st)) do
       Ok(_) -> println(me() ++ ": Ledger formed (wrong)")
       Err(e) -> println(me() ++ ": Ledger: " ++ Ledger_Run.error_message(e))
     end

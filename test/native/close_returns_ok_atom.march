@@ -15,7 +15,7 @@ mod Test do
   needs IO.FileRead
   needs IO.FileWrite
 
-  fn main(_c : Cap(IO.Console), _r : Cap(IO.FileRead), _w : Cap(IO.FileWrite)) : Unit do
+  fn main() : Unit needs IO.Console, IO.FileRead, IO.FileWrite do
     let path = "/tmp/march_native_close_returns_ok_atom.csv"
     match File.write(path, "a,b\n1,2\n") do
     Err(_) -> panic("write failed")

@@ -40,7 +40,7 @@ mod ActorHandlerTailFieldProjection do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let b = spawn(Box)
     let x1 = show(Actor.call(b, GetReq, 1000))
     let x2 = show(Actor.call(b, GetReq, 1000))

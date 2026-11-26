@@ -6,7 +6,7 @@ mod FileAllowed do
   needs IO.FileRead
   needs IO.FileWrite
 
-  fn main(_c : Cap(IO.Console), _r : Cap(IO.FileRead), _w : Cap(IO.FileWrite)) do
+  fn main() needs IO.Console, IO.FileRead, IO.FileWrite do
     match File.read("/tmp/march_conformance_no_such_file") do
     Ok(Err(File.NotFound(_))) -> println("missing: Ok(Err(NotFound))")
     _ -> println("unexpected")

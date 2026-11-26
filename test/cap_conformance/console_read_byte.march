@@ -6,7 +6,7 @@ mod ConsoleReadByte do
   needs IO.Console
   needs IO.Process
 
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+  fn main() needs IO.Console, IO.Process do
     match IO.read_byte() do
     Err(CapError("IO.Console", "stdin", ByLaunch, "IO.Process")) -> Process.exit(0)
     _ -> Process.exit(1)

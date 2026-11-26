@@ -43,8 +43,8 @@ mod BulkNodeB do
           drain(s, st4, 0))))
   end
 
-  fn main(c : Cap(IO)) do
-    match Bulk_Run.run_B(c, "node-b", "bulk-secret", Bulk_Run.addrs_from_env(), fn (s, st) -> role_b(s, st)) do
+  fn main() needs IO do
+    match Bulk_Run.run_B("node-b", "bulk-secret", Bulk_Run.addrs_from_env(), fn (s, st) -> role_b(s, st)) do
       Ok(_) -> println("B: closed")
       Err(e) -> panic(SessionNode.run_error_message(e))
     end

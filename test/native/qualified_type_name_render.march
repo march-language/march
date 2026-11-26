@@ -34,7 +34,7 @@ mod QualifiedTypeNameRender do
   needs IO.Console
   needs IO.FileRead
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.FileRead)) : Unit do
+  fn main() : Unit needs IO.Console, IO.FileRead do
     match Authority.must(File.read("/definitely/missing/path.txt")) do
     Ok(_)  -> Authority.ignore(println("file=ok"))
     Err(e) -> Authority.ignore(println("file_err=" ++ to_string(e)))

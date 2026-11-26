@@ -37,9 +37,9 @@ mod CrashHostedNodeA do
         Logging_L.close(s, st2))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-a: up")
-    match Logging_Run.run_L(c, "node-a", "logging-secret", Logging_Run.addrs_from_env(), fn (s, st) -> role_l(s, st)) do
+    match Logging_Run.run_L("node-a", "logging-secret", Logging_Run.addrs_from_env(), fn (s, st) -> role_l(s, st)) do
       Ok(_) -> println("L: closed")
       Err(SessionNode.Cancelled(role, cause)) ->
         println("L: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)

@@ -96,7 +96,7 @@ mod RecordSharedRelease do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Spawn do
     let warm = shared(5) + final(5, 0) + two_owners(5, 0) + tasks(3, 0)
     let a0 = live_allocs()
     let s = shared(2000)

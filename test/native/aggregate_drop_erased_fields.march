@@ -90,7 +90,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let _w1 = go_tuple(10, 0)
     let b1 = live_allocs()
     flat("tuple Float", b1, int_to_string(go_tuple(400, 0)))

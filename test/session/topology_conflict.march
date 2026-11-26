@@ -96,7 +96,7 @@ mod TopologyConflict do
     end
   end
 
-  fn main(io : Cap(IO)) do
+  fn main() needs IO do
     let fk = { members: Authority.must(Vault.new("tc_members")), names: Authority.must(Vault.new("tc_names")),
                pending: Authority.must(Vault.new("tc_pending")), meta: Authority.must(Vault.new("tc_meta")) }
     let peer = peer_above("Echo.Primary", ["n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8"])

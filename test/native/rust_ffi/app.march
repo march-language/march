@@ -33,7 +33,7 @@ mod App do
       None -> "none"
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     println(int_to_string(add(20, 22)))            -- 42
     println(shout("hello"))                         -- HELLO
     println(shown(parse("7")))                      -- 7

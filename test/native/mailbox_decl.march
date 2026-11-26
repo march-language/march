@@ -28,7 +28,7 @@ mod MailboxDecl do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let pid = spawn(Slow)
     flood(pid, 5000)
     run_until_idle()

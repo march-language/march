@@ -82,7 +82,7 @@ mod FfiExternLambda do
       churn(n - 1)
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     println(int_to_string(pushes()))
     println(int_to_string(fresh_in_lambda()))
     println(int_to_string(as_value()))

@@ -10,7 +10,7 @@ mod Main do
 
   fn f(m) do m + 1 end
 
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let xs = Cons(1, Cons(2, Cons(3, Nil)))
     println(int_to_string(List.fold_left(List.map(xs, fn x -> x * f(x)), 0, fn (a, x) -> a + x)))
     println(int_to_string(List.fold_left(List.map(xs, fn x -> f(x) + 100), 0, fn (a, x) -> a + x)))

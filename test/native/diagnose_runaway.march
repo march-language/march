@@ -30,7 +30,7 @@ mod Main do
     end
   end
 
-  fn main(_io : Cap(IO)) do
+  fn main() needs IO do
     let sink = spawn(Sink)
     let _r = Actor.register(sink, "sink")
     let _ = send(sink, Stall())

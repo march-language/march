@@ -10,7 +10,7 @@ mod BindHost do
     end
   end
 
-  fn main(_cap_netlisten : Cap(IO.NetListen)) do
+  fn main() needs IO.NetListen do
     Authority.must(HttpServer.bind_host("127.0.0.1"))
     Authority.must(HttpServer.new(47811)
     |> HttpServer.plug(router)

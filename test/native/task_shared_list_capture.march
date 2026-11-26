@@ -42,7 +42,7 @@ mod Main do
     if left <= 0 do acc else rep(left - 1, int_and(acc + collect(start(8, Nil), 0), 1048575)) end
   end
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     println("total " ++ int_to_string(rep(15000, 0)))
   end
 end

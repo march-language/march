@@ -125,7 +125,7 @@ mod ControlPeers do
   end
 
   -- The Agent role of `Ctl`: say hello with a report, then answer every order and poll until the leader says bye.
-  pfn agent_role(s : Cap(Session.Live), _nc : Cap(IO.NetConnect), st : Ctl_Agent.S_send_Hello, ops : Control.AgentOps) : Ctl_Agent.Yield do
+  pfn agent_role(s : Cap(Session.Live), st : Ctl_Agent.S_send_Hello, ops : Control.AgentOps) : Ctl_Agent.Yield do
     agent_loop(s, Ctl_Agent.send_Hello(s, st, wire_report(ops.report())), ops)
   end
 
@@ -137,7 +137,7 @@ mod ControlPeers do
   end
 
   -- The Control role of `Ctl` for one agent's session, driven by [ops] (the leader's executor).
-  pfn control_role(s : Cap(Session.Live), _nc : Cap(IO.NetConnect), _fw : Cap(IO.FileWrite), st : Ctl_Control.S_recv_Hello, ops : Control.ControlOps) : Ctl_Control.Yield do
+  pfn control_role(s : Cap(Session.Live), st : Ctl_Control.S_recv_Hello, ops : Control.ControlOps) : Ctl_Control.Yield do
     Ctl_Control.recv_Hello(s, st, fn (rep, st1) ->
       ops.report(report_of(rep))
       control_loop(s, st1, rep.node, ops))
@@ -158,7 +158,7 @@ mod ControlPeers do
   end
 
   -- The Server role of `CtlFetch`: [lookup] a hash's bytes as hex (None: unknown, one empty last chunk), sent in chunks of [size].
-  pfn fetch_server(s : Cap(Session.Live), _nc : Cap(IO.NetConnect), st : CtlFetch_Server.S_recv_Want, lookup : String -> Option(String), size : Int) : CtlFetch_Server.Yield do
+  pfn fetch_server(s : Cap(Session.Live), st : CtlFetch_Server.S_recv_Want, lookup : String -> Option(String), size : Int) : CtlFetch_Server.Yield do
     CtlFetch_Server.recv_Want(s, st, fn (h, st1) ->
       match lookup(h) do
         Some(hex) -> send_chunks(s, st1, List.map(Control.chunks(hex, size), fn c -> wire_chunk(c)))
@@ -175,7 +175,7 @@ mod ControlPeers do
   end
 
   -- The Agent role of `CtlFetch`: ask for [hash] and hand the reassembled hex ("" for an unknown hash) to [done].
-  pfn fetch_agent(s : Cap(Session.Live), _nc : Cap(IO.NetConnect), st : CtlFetch_Agent.S_send_Want, hash : String, done : String -> ()) : CtlFetch_Agent.Yield do
+  pfn fetch_agent(s : Cap(Session.Live), st : CtlFetch_Agent.S_send_Want, hash : String, done : String -> ()) : CtlFetch_Agent.Yield do
     fetch_loop(s, CtlFetch_Agent.send_Want(s, st, hash), Nil, done)
   end
 
@@ -378,12 +378,12 @@ mod ControlPeers do
 
   -- ── one Ctl session: the real Agent against the real Control ─────────────
 
-  pfn session(c : Cap(IO), nc : Cap(IO.NetConnect), fw : Cap(IO.FileWrite), lv : Vault(Control.CtlLeader), ints : Vault(Int), nodes : Vault(SimNode), tally : Vault(Int), name : String) : () do
+  pfn session(lv : Vault(Control.CtlLeader), ints : Vault(Int), nodes : Vault(SimNode), tally : Vault(Int), name : String) : () do
     put_int(ints, "budget", 3)
     let t = counting(tally)
     let s = Authority.must(Session.attach(t.ops))
-    let _ = agent_role(s, nc, Ctl_Agent.register(s, 0), agent_ops(nodes, name))
-    let _ = control_role(s, nc, fw, Ctl_Control.register(s, 0), leader_ops(lv, ints, nodes))
+    let _ = agent_role(s, Ctl_Agent.register(s, 0), agent_ops(nodes, name))
+    let _ = control_role(s, Ctl_Control.register(s, 0), leader_ops(lv, ints, nodes))
     t.drain(())
   end
 
@@ -402,16 +402,16 @@ mod ControlPeers do
 
   -- Rounds: each node's agent connects once per round. [swap] is the round
   -- after which the leader is replaced by a fresh one (0: never).
-  pfn rounds(c : Cap(IO), nc : Cap(IO.NetConnect), fw : Cap(IO.FileWrite), lv : Vault(Control.CtlLeader), ints : Vault(Int), nodes : Vault(SimNode), tally : Vault(Int), k : Int, swap : Int) : Int do
+  pfn rounds(lv : Vault(Control.CtlLeader), ints : Vault(Int), nodes : Vault(SimNode), tally : Vault(Int), k : Int, swap : Int) : Int do
     if k > 40 || finished(lv, nodes, ints) do k - 1
     else
-      List.fold_left(names(), (), fn (_, nm) -> session(c, nc, fw, lv, ints, nodes, tally, nm))
+      List.fold_left(names(), (), fn (_, nm) -> session(lv, ints, nodes, tally, nm))
       let _ = if k == swap do
         let progress = String.join(List.map(names(), fn nm -> progress_of(node_of(nodes, nm))), ", ")
         IO.puts("leader replaced after round " ++ int_to_string(k) ++ " (" ++ decision_of(lv, nodes, ints) ++ "; lines applied " ++ progress ++ ")")
         fresh_leader(lv)
       else () end
-      rounds(c, nc, fw, lv, ints, nodes, tally, k + 1, swap)
+      rounds(lv, ints, nodes, tally, k + 1, swap)
     end
   end
 
@@ -473,21 +473,21 @@ mod ControlPeers do
     Gen.map(Gen.tuple3(Gen.int(0, 100), Gen.string(), Gen.bool()), fn t -> mk_chunk(t))
   end
 
-  pfn chaos_control(c : Cap(IO), nc : Cap(IO.NetConnect), fw : Cap(IO.FileWrite), tally : Vault(Int), seed : Int) : () do
+  pfn chaos_control(tally : Vault(Int), seed : Int) : () do
     if seed == 30 do ()
     else
       let nodes = Authority.must(Vault.new("control_peers_chaos_nodes"))
       put_node(nodes, sim("r1", "render"))
       let t = counting(tally)
       let s = Authority.must(Session.attach(t.ops))
-      let _ = agent_role(s, nc, Ctl_Agent.register(s, 0), agent_ops(nodes, "r1"))
-      let _ = Ctl_Control.chaos(s, nc, fw, Ctl_Control.register(s, 0), seed, gen_order())
+      let _ = agent_role(s, Ctl_Agent.register(s, 0), agent_ops(nodes, "r1"))
+      let _ = Ctl_Control.chaos(s, Ctl_Control.register(s, 0), seed, gen_order())
       t.drain(())
-      chaos_control(c, nc, fw, tally, seed + 1)
+      chaos_control(tally, seed + 1)
     end
   end
 
-  pfn chaos_agent(c : Cap(IO), nc : Cap(IO.NetConnect), fw : Cap(IO.FileWrite), tally : Vault(Int), seed : Int) : () do
+  pfn chaos_agent(tally : Vault(Int), seed : Int) : () do
     if seed == 30 do ()
     else
       let nodes = Authority.must(Vault.new("control_peers_chaos_nodes2"))
@@ -498,10 +498,10 @@ mod ControlPeers do
       put_int(ints, "budget", 6)
       let t = counting(tally)
       let s = Authority.must(Session.attach(t.ops))
-      let _ = control_role(s, nc, fw, Ctl_Control.register(s, 0), leader_ops(lv, ints, nodes))
-      let _ = Ctl_Agent.chaos(s, nc, Ctl_Agent.register(s, 0), seed, gen_report(), gen_result())
+      let _ = control_role(s, Ctl_Control.register(s, 0), leader_ops(lv, ints, nodes))
+      let _ = Ctl_Agent.chaos(s, Ctl_Agent.register(s, 0), seed, gen_report(), gen_result())
       t.drain(())
-      chaos_agent(c, nc, fw, tally, seed + 1)
+      chaos_agent(tally, seed + 1)
     end
   end
 
@@ -509,26 +509,24 @@ mod ControlPeers do
     if h == "h1" do Some("00112233445566778899aabbccddeeff00") else None end
   end
 
-  pfn fetch_seeds(c : Cap(IO), nc : Cap(IO.NetConnect), tally : Vault(Int), got : Vault(Int), seed : Int) : () do
+  pfn fetch_seeds(tally : Vault(Int), got : Vault(Int), seed : Int) : () do
     if seed == 30 do ()
     else
       let t = counting(tally)
       let s = Authority.must(Session.attach(t.ops))
-      let _ = fetch_server(s, nc, CtlFetch_Server.register(s, 0), fn h -> artifact(h), 4)
-      let _ = CtlFetch_Agent.chaos(s, nc, CtlFetch_Agent.register(s, 0), seed)
+      let _ = fetch_server(s, CtlFetch_Server.register(s, 0), fn h -> artifact(h), 4)
+      let _ = CtlFetch_Agent.chaos(s, CtlFetch_Agent.register(s, 0), seed)
       t.drain(())
       let t2 = counting(tally)
       let s2 = Authority.must(Session.attach(t2.ops))
-      let _ = fetch_agent(s2, nc, CtlFetch_Agent.register(s2, 0), "h1", fn _ -> bump(got, "fetched"))
-      let _ = CtlFetch_Server.chaos(s2, nc, CtlFetch_Server.register(s2, 0), seed, gen_chunk())
+      let _ = fetch_agent(s2, CtlFetch_Agent.register(s2, 0), "h1", fn _ -> bump(got, "fetched"))
+      let _ = CtlFetch_Server.chaos(s2, CtlFetch_Server.register(s2, 0), seed, gen_chunk())
       t2.drain(())
-      fetch_seeds(c, nc, tally, got, seed + 1)
+      fetch_seeds(tally, got, seed + 1)
     end
   end
 
-  fn main(c : Cap(IO)) do
-    let nc : Cap(IO.NetConnect) = cap_narrow(c)
-    let fw : Cap(IO.FileWrite) = cap_narrow(c)
+  fn main() needs IO do
     let r = rel()
 
     IO.puts("-- scripted Control against the real Agent")
@@ -537,8 +535,8 @@ mod ControlPeers do
     let o1 = Control.order(r, head(r.steps), "r1")
     let t1 = Session.in_process()
     let s1 = Authority.must(Session.attach(t1.ops))
-    let _ = agent_role(s1, nc, Ctl_Agent.register(s1, 0), agent_ops(nodes1, "r1"))
-    let _ = Ctl_Control.script(s1, nc, fw, Ctl_Control.register(s1, 0), [
+    let _ = agent_role(s1, Ctl_Agent.register(s1, 0), agent_ops(nodes1, "r1"))
+    let _ = Ctl_Control.script(s1, Ctl_Control.register(s1, 0), [
       Ctl_Control.Expect_Hello(fn rep -> Authority.ignore(IO.puts("script: hello from " ++ rep.node ++ " at seq " ++ int_to_string(rep.seq)))),
       Ctl_Control.Choose_apply(wire_order(o1)),
       Ctl_Control.Expect_Stepped(fn res -> Authority.ignore(IO.puts("script: " ++ show_result(result_of(res))))),
@@ -564,8 +562,8 @@ mod ControlPeers do
     let r1_old = sim_report(node_of(nodes2, "r1"))
     let t2 = Session.in_process()
     let s2 = Authority.must(Session.attach(t2.ops))
-    let _ = control_role(s2, nc, fw, Ctl_Control.register(s2, 0), leader_ops(lv2, ints2, nodes2))
-    let _ = Ctl_Agent.script(s2, nc, Ctl_Agent.register(s2, 0), [
+    let _ = control_role(s2, Ctl_Control.register(s2, 0), leader_ops(lv2, ints2, nodes2))
+    let _ = Ctl_Agent.script(s2, Ctl_Agent.register(s2, 0), [
       Ctl_Agent.Send_Hello(wire_report(r1_old)),
       Ctl_Agent.Expect_Apply(fn o -> Authority.ignore(IO.puts(show_order(o)))),
       Ctl_Agent.Send_Stepped(wire_result({ seq: 42, step: 1, node: "r1", ok: true, detail: "applied" })),
@@ -585,7 +583,7 @@ mod ControlPeers do
     fresh_leader(lv3)
     let ints3 = Authority.must(Vault.new("control_peers_ints3"))
     let tally3 = Authority.must(Vault.new("control_peers_tally3"))
-    let n3 = rounds(c, nc, fw, lv3, ints3, nodes3, tally3, 1, 1)
+    let n3 = rounds(lv3, ints3, nodes3, tally3, 1, 1)
     IO.puts("after " ++ int_to_string(n3) ++ " rounds: " ++ decision_of(lv3, nodes3, ints3))
     List.fold_left(names(), (), fn (_, nm) -> Authority.ignore(IO.puts(show_node(node_of(nodes3, nm)))))
     IO.puts(tallies(tally3, n3 * 8))
@@ -599,25 +597,25 @@ mod ControlPeers do
     fresh_leader(lv4)
     let ints4 = Authority.must(Vault.new("control_peers_ints4"))
     let tally4 = Authority.must(Vault.new("control_peers_tally4"))
-    let n4 = rounds(c, nc, fw, lv4, ints4, nodes4, tally4, 1, 0)
+    let n4 = rounds(lv4, ints4, nodes4, tally4, 1, 0)
     IO.puts("after " ++ int_to_string(n4) ++ " rounds: " ++ decision_of(lv4, nodes4, ints4))
     List.fold_left(names(), (), fn (_, nm) -> Authority.ignore(IO.puts(show_node(node_of(nodes4, nm)))))
 
     IO.puts("-- CtlFetch: the real roles, a known and an unknown hash")
     let t5 = Session.in_process()
     let s5 = Authority.must(Session.attach(t5.ops))
-    let _ = fetch_server(s5, nc, CtlFetch_Server.register(s5, 0), fn h -> artifact(h), 4)
-    let _ = fetch_agent(s5, nc, CtlFetch_Agent.register(s5, 0), "h1", fn hex -> Authority.ignore(IO.puts("fetched h1: " ++ hex)))
+    let _ = fetch_server(s5, CtlFetch_Server.register(s5, 0), fn h -> artifact(h), 4)
+    let _ = fetch_agent(s5, CtlFetch_Agent.register(s5, 0), "h1", fn hex -> Authority.ignore(IO.puts("fetched h1: " ++ hex)))
     t5.drain(())
     let t6 = Session.in_process()
     let s6 = Authority.must(Session.attach(t6.ops))
-    let _ = fetch_server(s6, nc, CtlFetch_Server.register(s6, 0), fn h -> artifact(h), 4)
-    let _ = fetch_agent(s6, nc, CtlFetch_Agent.register(s6, 0), "nope", fn hex -> Authority.ignore(IO.puts("fetched nope: \"" ++ hex ++ "\"")))
+    let _ = fetch_server(s6, CtlFetch_Server.register(s6, 0), fn h -> artifact(h), 4)
+    let _ = fetch_agent(s6, CtlFetch_Agent.register(s6, 0), "nope", fn hex -> Authority.ignore(IO.puts("fetched nope: \"" ++ hex ++ "\"")))
     t6.drain(())
     let t7 = Session.in_process()
     let s7 = Authority.must(Session.attach(t7.ops))
-    let _ = fetch_server(s7, nc, CtlFetch_Server.register(s7, 0), fn h -> artifact(h), 16)
-    let _ = CtlFetch_Agent.script(s7, nc, CtlFetch_Agent.register(s7, 0), [
+    let _ = fetch_server(s7, CtlFetch_Server.register(s7, 0), fn h -> artifact(h), 16)
+    let _ = CtlFetch_Agent.script(s7, CtlFetch_Agent.register(s7, 0), [
       CtlFetch_Agent.Send_Want("h1"),
       CtlFetch_Agent.Expect_Chunk(fn ch -> Authority.ignore(IO.puts("script: chunk at " ++ int_to_string(ch.offset) ++ ": " ++ ch.data))),
       CtlFetch_Agent.Expect_Chunk(fn ch -> Authority.ignore(IO.puts("script: chunk at " ++ int_to_string(ch.offset) ++ ": " ++ ch.data))),
@@ -627,18 +625,18 @@ mod ControlPeers do
 
     IO.puts("-- chaos: Control against the real Agent, 30 seeds")
     let tally8 = Authority.must(Vault.new("control_peers_tally8"))
-    chaos_control(c, nc, fw, tally8, 0)
+    chaos_control(tally8, 0)
     IO.puts(tallies(tally8, 60))
 
     IO.puts("-- chaos: Agent against the real Control, 30 seeds")
     let tally9 = Authority.must(Vault.new("control_peers_tally9"))
-    chaos_agent(c, nc, fw, tally9, 0)
+    chaos_agent(tally9, 0)
     IO.puts(tallies(tally9, 60))
 
     IO.puts("-- chaos: CtlFetch, each role against the real other, 30 seeds")
     let tally10 = Authority.must(Vault.new("control_peers_tally10"))
     let got = Authority.must(Vault.new("control_peers_got"))
-    fetch_seeds(c, nc, tally10, got, 0)
+    fetch_seeds(tally10, got, 0)
     IO.puts(tallies(tally10, 120) ++ ", real agents finished: " ++ int_to_string(int_of(got, "fetched")) ++ " of 30")
     ()
   end

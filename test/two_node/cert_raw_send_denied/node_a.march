@@ -63,7 +63,7 @@ mod CertRawSendDeniedA do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let pki = Authority.must(Env.require("PKI"))
     Process.set_env("MARCH_NODE_NAME", me())
     Process.set_env("MARCH_NODE_PORT", int_to_string(Authority.must(Env.require_int("MARCH_PORT_A"))))

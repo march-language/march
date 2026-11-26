@@ -67,7 +67,7 @@ mod LoggingCrash do
       Logging_C.close(s, st2))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     IO.puts("-- round 1: C is alive")
     let t1 = Session.in_process_with(fn line -> Authority.ignore(IO.puts("transport: " ++ line)))
     let s1 = Authority.must(Session.attach(t1.ops))

@@ -83,7 +83,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let e = Nil
     println("self: " ++ int_to_string(dd(rows(1000000, Nil), e, e, 0)))
     println("mutual: " ++ int_to_string(mg(rows(1000000, Nil), 0)))

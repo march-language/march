@@ -53,7 +53,7 @@ mod CrashHostedNodeB do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-b: up")
     let pi = spawn(IActor)
     let start = fn s ->
@@ -62,7 +62,7 @@ mod CrashHostedNodeB do
     let deliver = fn (s, from, msg, ep) ->
       let _ = send(pi, DeliverI(s, from, msg, ep))
       ()
-    match Logging_Run.host_I(c, "node-b", "logging-secret", Logging_Run.addrs_from_env(), pi, start, deliver) do
+    match Logging_Run.host_I("node-b", "logging-secret", Logging_Run.addrs_from_env(), pi, start, deliver) do
       Ok(_) -> println("I: closed")
       Err(SessionNode.Cancelled(role, cause)) ->
         println("I: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)

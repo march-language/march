@@ -18,7 +18,7 @@ mod ClusterStallB do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let port = Authority.must(Env.require_int("MARCH_PORT_B"))
     let seed = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A")))
     let cfg = ClusterNode.config("node-b", port, "", Cons(seed, Nil), "stall-secret", Authority.must(Env.require_int("MARCH_NODE_CREATION")))

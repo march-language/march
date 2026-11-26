@@ -18,7 +18,7 @@ mod TrmcComputedArgNested do
     go(0)
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(List.sum_int(ascending(0, 5)))
     println(List.sum_int(squares(5)))
   end

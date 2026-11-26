@@ -34,7 +34,7 @@ mod Main do
     NativeArray.sum_int(NativeArray.map_int(a, f))
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let a = NativeArray.from_list_int(ints(1000))
     let a2 = NativeArray.from_list_int(ints(1000))
     let small = NativeArray.from_list_int(Cons(1, Cons(2, Cons(7, Nil))))

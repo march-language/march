@@ -116,7 +116,7 @@ mod TwoNodeSkewB do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
+  fn main() needs IO.Console, IO.NetListen, IO.NetConnect, IO.Process, IO.Clock do
     let port = Authority.must(Env.require_int("MARCH_NODE_PORT"))
     let listen_fd = match Authority.must(Socket.listen(port)) do
       Ok(l) -> l

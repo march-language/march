@@ -21,8 +21,8 @@ mod SlowStartB do
       Slow_B.close(s, Slow_B.send_Msg_B_A_1(s, st1, n * 2)))
   end
 
-  fn main(c : Cap(IO)) do
-    match Slow_Run.run_B(c, "node-b", "slow-secret", Slow_Run.addrs_from_env(), fn (s, st) -> role_b(s, st)) do
+  fn main() needs IO do
+    match Slow_Run.run_B("node-b", "slow-secret", Slow_Run.addrs_from_env(), fn (s, st) -> role_b(s, st)) do
       Ok(_) -> println("B: closed")
       Err(e) -> println("B: " ++ SessionNode.run_error_message(e))
     end

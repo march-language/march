@@ -21,7 +21,7 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO), _cap_debug : Cap(Actor.Debug)) do
+  fn main() needs IO, Actor.Debug do
     let d = Authority.must(Actor.debug())
     let st = spawn(Staller)
     Actor.set_queue_limit(st, 1, 3)

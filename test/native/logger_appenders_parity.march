@@ -71,7 +71,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("appenders at start: " ++ names())
     -- A capturing appender: the registry must keep its closure (and what
     -- it captured) alive after this binding goes out of scope.

@@ -34,7 +34,7 @@ fn wrapped(w : Wrap) : String do
   end
 end
 
-fn main(_cap_console : Cap(IO.Console)) : Unit do
+fn main() : Unit needs IO.Console do
   let r = { x: 3, y: 4 }
   match r do
     { x: a, y: b } -> println(int_to_string(a * b))

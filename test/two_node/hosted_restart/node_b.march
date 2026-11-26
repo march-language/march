@@ -69,7 +69,7 @@ mod HostedRestartNodeB do
     end
   end
 
-  fn main(c : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let intro = Authority.must(Actor.introspect())
     println("node-b: up")
     let sup = spawn(ConsSup)
@@ -80,7 +80,7 @@ mod HostedRestartNodeB do
     let deliver = fn (s, from, msg, ep) ->
       let _ = send(pc, DeliverC(s, from, msg, ep))
       ()
-    match Stream_Run.host_Cons(c, "node-b", "stream-secret", Stream_Run.addrs_from_env(), pc, start, deliver) do
+    match Stream_Run.host_Cons("node-b", "stream-secret", Stream_Run.addrs_from_env(), pc, start, deliver) do
       Ok(_) -> println("Cons: closed")
       Err(SessionNode.HostGone(ep)) -> println("Cons: host of endpoint " ++ int_to_string(ep) ++ " gone; session abandoned")
       Err(e) -> panic(SessionNode.run_error_message(e))

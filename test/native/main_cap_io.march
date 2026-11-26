@@ -6,12 +6,14 @@
 -- real (unused) parameter in its LLVM signature, an ABI mismatch. The fix
 -- emits a thin 0-arg adapter that supplies the erased Cap(IO) (a null
 -- pointer) and forwards into the real, 1-arg mangled main. Compile, run, diff
--- stdout.
+-- stdout. Since ocap phase 7b the form is deprecated (`deprecated_main_cap`)
+-- and still accepted for one release; this fixture keeps it on purpose, so the
+-- adapter stays tested until the form is removed.
 mod MainCapIo do
   needs IO
 
   fn main(cap : Cap(IO)) : () do
-    let _console : Cap(IO.Console) = cap_narrow(cap)
+    let _ = cap
     println("main ran with cap")
     ()
   end

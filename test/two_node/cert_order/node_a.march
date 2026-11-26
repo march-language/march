@@ -60,7 +60,7 @@ mod CertOrderA do
   -- peer's, specs/progress/2026-10-12-cert-mode-offer-to-offer-session-
   -- hang.md -- and since that party now cancels the session rather than
   -- leaving it to hang, retrying it here would hide a regression.
-  pfn attempt(c : Cap(IO), h : Cap(ClusterNode.Live), left : Int) : () do
+  pfn attempt(h : Cap(ClusterNode.Live), left : Int) : () do
     match Order_Run.initiate_Shop(h, fn (s, st) -> shop(s, st, 1)) do
       Ok(_) -> ()
       Err(e) ->
@@ -72,7 +72,7 @@ mod CertOrderA do
             _ -> Authority.ignore(IO.warn("node-a: retrying a failed session: " ++ msg))
           end
           sleep_ms(500)
-          attempt(c, h, left - 500)
+          attempt(h, left - 500)
         end end
     end
   end
@@ -83,11 +83,11 @@ mod CertOrderA do
   -- has hung for good (still running at 400 s, past the session's own
   -- ASan-scaled heartbeat and setup bounds). A stall here was the
   -- offer-to-offer hang, specs/progress/2026-10-12-cert-mode-offer-to-offer-session-hang.md.
-  pfn round(c : Cap(IO), h : Cap(ClusterNode.Live), done : Vault(Int), r : Int) : () do
+  pfn round(h : Cap(ClusterNode.Live), done : Vault(Int), r : Int) : () do
     if r > 3 do () else
       let _ = List.map(List.range(0, 4), fn _ ->
         Task.async(fn () -> do
-          attempt(c, h, 30000)
+          attempt(h, 30000)
           let _ = Vault.incr(done, "n", 1)
           0
         end))
@@ -97,7 +97,7 @@ mod CertOrderA do
               ++ " (a hung session: specs/progress/2026-10-12-cert-mode-offer-to-offer-session-hang.md)")
       end
       println("Client: round " ++ int_to_string(r) ++ " done")
-      round(c, h, done, r + 1)
+      round(h, done, r + 1)
     end
   end
 
@@ -109,13 +109,13 @@ mod CertOrderA do
     end end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     match ClusterNode.start(config("node-a", "MARCH_PORT_A", "")) do
       Err(e) -> panic(e)
       Ok(h) ->
         println("node-a: up")
         if ClusterNode.await_members(h, 2, 120000) do () else panic("node-a: the offers never joined") end
-        round(c, h, Authority.must(Vault.new("cert_order_done")), 1)
+        round(h, Authority.must(Vault.new("cert_order_done")), 1)
         ClusterNode.stop(h)
     end
   end

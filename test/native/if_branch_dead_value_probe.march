@@ -77,7 +77,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = 20000
     let a = live_allocs()
     let ra = p_loop(n, 0)

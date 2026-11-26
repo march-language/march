@@ -45,7 +45,7 @@ mod RecordFieldTailProjection do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let ms = [ { node_id: "n" ++ int_to_string(0), addr: "addr-" ++ int_to_string(0), inc: 0 },
                { node_id: "n" ++ int_to_string(1), addr: "addr-" ++ int_to_string(1), inc: 0 },
                { node_id: "n" ++ int_to_string(2), addr: "addr-" ++ int_to_string(2), inc: 0 },

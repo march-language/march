@@ -16,7 +16,7 @@ mod RefuseTwoExact do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _fs : Cap(IO.FileSystem), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.FileSystem, IO.Spawn do
     println(show_check("IO.FileRead", "/etc/passwd"))
     println(show_check("IO.Spawn", ""))
     println(show_check("IO.FileWrite", "/tmp/x"))

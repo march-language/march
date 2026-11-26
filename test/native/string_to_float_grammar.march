@@ -38,7 +38,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     -- the rows from the issue
     p("inf")
     p("-inf")

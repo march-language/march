@@ -78,7 +78,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = 400
     let r0 = { buf: RingBuf.make(8), count: 0 }
     let r1 = leg_update(r0, 0, 3)

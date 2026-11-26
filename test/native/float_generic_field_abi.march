@@ -73,7 +73,7 @@ mod Main do
     println(Array.get(iarr, 2))
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     arr_case()
     rrb_case()
     tco_case()

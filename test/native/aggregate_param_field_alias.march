@@ -42,7 +42,7 @@ mod AggregateParamFieldAlias do
     {label: "box" ++ int_to_string(1), tree: Fork(Fork(Twig, 1, Twig), 2, Fork(Twig, 3, Fork(Twig, 4, Twig)))}
   end
 
-  fn main(cap : Cap(IO)) do
+  fn main() needs IO do
     println(int_to_string(SortedSet.size(SortedSet.new(icmp))))
     println(int_to_string(SortedSet.size(SortedSet.add(SortedSet.new(icmp), 5))))
     let s = SortedSet.add(SortedSet.add(SortedSet.add(SortedSet.new(icmp), 5), 3), 9)

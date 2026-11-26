@@ -44,7 +44,7 @@ mod ActorMsgQualified do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let plus = spawn(Plus)
     let times = spawn(Times)
     let words = spawn(Words)

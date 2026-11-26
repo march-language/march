@@ -29,9 +29,9 @@ mod ProtocolNodeA do
       Bad_A.close(s, st1))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-a: up")
-    match Bad_Run.run_A(c, "node-a", "bad-secret", Bad_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
+    match Bad_Run.run_A("node-a", "bad-secret", Bad_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
       Ok(_) -> println("A: clean end")
       Err(SessionNode.Protocol(role, why)) ->
         println("A: protocol error from role " ++ int_to_string(role) ++ ": " ++ why)

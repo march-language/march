@@ -56,7 +56,7 @@ mod CapMockSupervisedNested do
   fn mid_of(intro : Cap(Actor.Introspect), top) do field_pid(intro, top, "m") end
   fn leaf_of(intro : Cap(Actor.Introspect), top) do field_pid(intro, mid_of(intro, top), "l") end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let intro = Authority.must(Actor.introspect())
     let outside = spawn(Top)
     mock IO.Console with { print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) } do

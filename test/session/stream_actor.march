@@ -176,7 +176,7 @@ mod StreamActor do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let handlers = Authority.must(Vault.new("stream_actor_handlers"))
     let owners   = Authority.must(Vault.new("stream_actor_owners"))
     let pending  = Authority.must(Vault.new("stream_actor_pending"))

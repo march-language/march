@@ -5,7 +5,7 @@
 -- Int, so it gets the tailored message.
 mod JsUnmappedBuiltin do
   needs IO.Console
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(int_to_string(int_max_value(())))
     ()
   end

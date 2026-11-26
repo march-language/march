@@ -119,8 +119,8 @@ mod ErasedFloatReuseLeakProbe do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
-    -- Warm every leg outside the window so one-time statics do not count.
+  fn main() do
+    -- Warm every leg outside the window so one-time statics needs IO.Console do not count.
     println("unique=" ++ float_to_string(unique_leg(4, 0.0)))
     println("shared=" ++ float_to_string(shared_leg(4, 0.0)))
     println("json=" ++ int_to_string(json_leg(4, 0)))

@@ -71,7 +71,7 @@ mod RestrictActorRestrictedForLife do
     end
   end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let w = start_worker()
     println("worker: " ++ ask(w))
     let boss = start_boss()

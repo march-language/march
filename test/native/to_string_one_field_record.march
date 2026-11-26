@@ -12,7 +12,7 @@ mod Main do
   type V = { v : List(Int) }
   type W = W(Bool)
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     -- one-field undeclared records of each scalar
     println(to_string({ n: true }))
     println(to_string({ f: 1.5 }))

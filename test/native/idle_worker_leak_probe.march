@@ -186,7 +186,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _m : Cap(IO.Mut)) : () do
+  fn main() : () needs IO.Console, IO.Spawn, IO.Mut do
     let b = spawn(Box)
     let _ = send(b, Init({ host: "db", max: 4 }))
     let _ = send(b, Give(int_to_string(42)))

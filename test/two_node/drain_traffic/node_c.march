@@ -41,13 +41,13 @@ mod DrainTrafficC do
 
   -- One initiator: sessions back to back. The first 20 finished sessions
   -- across all initiators print "node-c: traffic flowing" once.
-  pfn traffic(c : Cap(IO), h : Cap(ClusterNode.Live), done : Vault(Int)) : Int do
+  pfn traffic(h : Cap(ClusterNode.Live), done : Vault(Int)) : Int do
     match Order_Run.initiate_Shop(h, fn (s, st) -> shop(s, st, 101)) do
       Ok(_) ->
         if Vault.incr(done, "sessions", 1) == 20 do Authority.ignore(println("node-c: traffic flowing")) else () end
       Err(_) -> sleep_ms(10)
     end
-    traffic(c, h, done)
+    traffic(h, done)
   end
 
   pfn idle() : () do
@@ -55,7 +55,7 @@ mod DrainTrafficC do
     idle()
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let seed = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A")))
     let cfg = ClusterNode.config("node-c", Authority.must(Env.require_int("MARCH_PORT_C")), "", Cons(seed, Nil), "drain-traffic-secret", 1)
     match ClusterNode.start(cfg) do
@@ -64,7 +64,7 @@ mod DrainTrafficC do
         if ClusterNode.await_members(h, 2, 120000) do () else panic("node-c: never joined") end
         Topology.drain_on_signal(h, 1000, 4000)
         let done = Authority.must(Vault.new("traffic"))
-        let _ = List.map(List.range(0, 8), fn _ -> Task.async(fn () -> traffic(c, h, done)))
+        let _ = List.map(List.range(0, 8), fn _ -> Task.async(fn () -> traffic(h, done)))
         -- The drain exits the process.
         idle()
     end

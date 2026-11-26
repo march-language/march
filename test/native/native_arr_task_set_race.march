@@ -26,7 +26,7 @@ mod Main do
   pfn rounds(arr : NativeIntArr, i : Int, n : Int, ok : Int) : Int do
     if i == n do ok else rounds(arr, i + 1, n, ok + round(arr, i)) end
   end
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let arr = NativeArray.make_int(4, 0)
     let n = 300
     println("passed " ++ int_to_string(rounds(arr, 0, n, 0)) ++ " of " ++ int_to_string(3 * n))

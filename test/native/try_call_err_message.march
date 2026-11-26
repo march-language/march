@@ -27,7 +27,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(show(__try_call(fn _ -> boom(1))))
     println(show(__try_call(fn _ -> boom(3))))
     println(show_val(__try_call_val(fn _ -> "fine")))

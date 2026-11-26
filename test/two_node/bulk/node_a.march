@@ -50,9 +50,9 @@ mod BulkNodeA do
       burst(s, st4, 0, 500, pad(500, "")))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-a: up")
-    match Bulk_Run.run_A(c, "node-a", "bulk-secret", Bulk_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
+    match Bulk_Run.run_A("node-a", "bulk-secret", Bulk_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
       Ok(_) -> println("A: closed")
       Err(e) -> panic(SessionNode.run_error_message(e))
     end

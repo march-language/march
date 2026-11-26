@@ -21,7 +21,7 @@ mod JsBinaryString do
     if i == n do acc else sum_bytes(s, i + 1, n, acc + string_byte_at(s, i)) end
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     let s = allBytes()
     println(int_to_string(string_byte_length(s)) ++ " " ++ int_to_string(mismatches(s, 0, 0)))
     let tail = String.slice(s, 250, 6)

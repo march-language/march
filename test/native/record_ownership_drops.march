@@ -65,7 +65,7 @@ mod Main do
   end
 
   -- IO.Process: ClusterNode.config reads its env overrides (System.env).
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) : () do
+  fn main() : () needs IO.Console, IO.Process do
     flat("update base on one branch, released on the other", fn () -> opt_n(guarded(Some(mk(1)))))
     flat("record passed to a function, then updated", fn () -> passed_then_updated(mk(1), 0, 5))
     flat("nominal record in a Map, dropped through its holder", fn () -> swap_reg(ClusterNode.core_new(ClusterNode.config("a", 7000, "", Nil, "s", 1), 1), 0, 5))

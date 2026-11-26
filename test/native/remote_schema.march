@@ -81,7 +81,7 @@ mod RemoteSchema do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let now = Node.schema_of(fn (_w : Msgs.Hit) -> ())
     let old = Node.schema_of(fn (_w : V1.OldHit) -> ())
     println("schemas: new and old differ " ++ bool_to_string(now != old)

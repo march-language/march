@@ -36,7 +36,7 @@ mod ConsoleRefused do
     ], 1)
   end
 
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+  fn main() needs IO.Console, IO.Process do
     Process.exit(verdict())
   end
 end

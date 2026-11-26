@@ -72,7 +72,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("-- char predicates and case maps")
     -- '@' '[' '`' '{' sit one byte outside each ASCII letter range.
     classify_all(string_chars("aZm9 _!@[`{~Qz"))

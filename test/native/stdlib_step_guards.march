@@ -35,7 +35,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let zero = hidden_int("0")
     println("s1 good: " ++ ints(List.range_step(0, 10, 3)) ++ " " ++ ints(List.range_step(5, 0, -2)))
     println("s1 bad:  " ++ show(__try_call_val(fn _ -> List.range_step(5, 0, zero))))

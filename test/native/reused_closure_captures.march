@@ -43,7 +43,7 @@ mod Main do
     if n <= 0 do acc else times2(n - 1, m, acc + Map.size(fold_map_acc(m, n))) end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let m = Map.insert(Map.insert(Map.empty(), "a", 1, Map.str_cmp), "b", 2, Map.str_cmp)
     let _ = times(3, m, 0)
     let a0 = live_allocs()

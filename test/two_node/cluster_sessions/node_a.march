@@ -33,7 +33,7 @@ mod ClusterSessionsA do
       Echo_A.close(s, st1))
   end
 
-  pfn session(c : Cap(IO), h : Cap(ClusterNode.Live), sid : String, n : Int, out : Vault(Int)) : Int do
+  pfn session(h : Cap(ClusterNode.Live), sid : String, n : Int, out : Vault(Int)) : Int do
     match Echo_Run.cluster_A(h, sid, fn (s, st) -> role_a(s, st, n, out, sid, h)) do
       Ok(_) -> 1
       Err(e) ->
@@ -42,7 +42,7 @@ mod ClusterSessionsA do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "echo-secret", 1)
     match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
@@ -50,8 +50,8 @@ mod ClusterSessionsA do
         println("node-a: up")
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: never joined") end
         let out = Authority.must(Vault.new("echo_out"))
-        let t1 = Authority.must(Task.async(fn () -> session(c, h, "s1", 10, out)))
-        let t2 = Authority.must(Task.async(fn () -> session(c, h, "s2", 20, out)))
+        let t1 = Authority.must(Task.async(fn () -> session(h, "s1", 10, out)))
+        let t2 = Authority.must(Task.async(fn () -> session(h, "s2", 20, out)))
         let ok = task_await_unwrap(t1) + task_await_unwrap(t2)
         println("A: sessions completed " ++ int_to_string(ok))
         println("A: s1 got " ++ int_to_string(Vault.get_or(out, "s1", -1)))

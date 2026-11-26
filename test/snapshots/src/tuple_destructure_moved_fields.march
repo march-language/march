@@ -24,7 +24,7 @@ mod TupleDestructureMovedFields do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let _ = from_tuple(("a", 1, "b"))
     let _ = from_ctor(Raw("a", 1, "b"))
     println("done")

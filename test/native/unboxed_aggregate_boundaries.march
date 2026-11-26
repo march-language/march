@@ -44,7 +44,7 @@ mod UnboxedAggregateBoundaries do
     end
   end
 
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     -- record field of aggregate type
     let b = { pos: mkv(1.0), id: 4 }
     println(to_string(b.pos))

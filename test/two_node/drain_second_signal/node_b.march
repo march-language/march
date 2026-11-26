@@ -29,7 +29,7 @@ mod DrainSecondSignalB do
       Echo_Client.close(s, st2))
   end
 
-  pfn session(c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
+  pfn session(h : Cap(ClusterNode.Live)) : () do
     match Echo_Run.initiate_Client(h, fn (s, st) -> ask(s, st, 7)) do
       Ok(_) -> ()
       Err(e) -> Authority.ignore(println("Client: " ++ SessionNode.run_error_message(e)))
@@ -41,7 +41,7 @@ mod DrainSecondSignalB do
     idle()
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let seed = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A")))
     let cfg = ClusterNode.config("node-b", Authority.must(Env.require_int("MARCH_PORT_B")), "", Cons(seed, Nil), "drain-second-secret", 1)
     match ClusterNode.start(cfg) do
@@ -49,7 +49,7 @@ mod DrainSecondSignalB do
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
         Topology.drain_on_signal(h, 10000, 30000)
-        let _ = Task.async(fn () -> session(c, h))
+        let _ = Task.async(fn () -> session(h))
         -- The drain exits the process.
         idle()
     end

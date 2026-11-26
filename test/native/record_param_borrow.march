@@ -230,7 +230,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = 10000
     let keep = fresh(5)
     let a = live_allocs()

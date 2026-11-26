@@ -65,7 +65,7 @@ mod ActorRestartKeepsAuthority do
     end
   end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let boss = start()
     let c1 = child_of(boss)
     println("first: " ++ ask(Authority.must(Actor.pid_from_int(c1))))

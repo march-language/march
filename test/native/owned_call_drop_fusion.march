@@ -152,7 +152,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println("fresh tree: " ++ int_to_string(check(make(10))))
     -- The argument is read again after the first call: only the second
     -- call may consume it.

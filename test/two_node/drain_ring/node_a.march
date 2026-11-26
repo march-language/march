@@ -34,9 +34,9 @@ mod DrainRingA do
         Ring_A.drained(s, d))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-a: up")
-    match Ring_Run.run_A(c, "node-a", "ring-secret", Ring_Run.addrs_from_env(), fn (s, st) -> role_a(s, st, 1)) do
+    match Ring_Run.run_A("node-a", "ring-secret", Ring_Run.addrs_from_env(), fn (s, st) -> role_a(s, st, 1)) do
       Ok(Session.Drained(n)) -> println("A: Ok(Drained(" ++ int_to_string(n) ++ "))")
       Ok(Session.Finished) -> println("A: Ok(Finished)")
       Err(e) -> panic(Ring_Run.error_message(e))

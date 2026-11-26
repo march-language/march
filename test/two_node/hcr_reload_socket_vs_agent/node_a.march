@@ -16,7 +16,7 @@ mod Hammer do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     match Authority.must(Process.env("HAMMER_STOP")) do
       None -> println("hammer: HAMMER_STOP is not set")
       Some(stop) ->

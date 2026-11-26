@@ -15,7 +15,7 @@ mod CtlApp do
     fn version() : Int do 2 end
   end
 
-  fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : () do
+  fn start(node : Cap(ClusterNode.Live)) : () do
     println("app: version " ++ int_to_string(Ver.version()))
     ()
   end

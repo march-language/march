@@ -6,7 +6,7 @@
 mod VaultNewSameName do
   needs IO
 
-  fn main(_cap : Cap(IO)) do
+  fn main() needs IO do
     let a = Authority.must(Vault.new("vn_probe"))
     Vault.set(a, "k", 42)
     let b = Authority.must(Vault.new("vn_probe"))

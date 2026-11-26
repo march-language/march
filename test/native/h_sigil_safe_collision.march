@@ -23,7 +23,7 @@
 
 mod HSigilSafeCollision do
   needs IO.Console
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let s = Html.raw("<b>x</b>")
     let out = IOList.to_string(~H"<p>${s}</p>")
     -- Was `true` before the fix: the markup vanished entirely.

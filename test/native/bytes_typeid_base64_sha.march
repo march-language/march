@@ -9,7 +9,7 @@
 mod BytesTypeidBase64Sha do
   needs IO.Console
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let s = "Basic " ++ Base64.encode(Bytes.from_string("api:SECRET"))
     println(s)
     println(Base64.encode(Bytes.from_string("")))

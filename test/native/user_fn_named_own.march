@@ -12,7 +12,7 @@ mod UserFnNamedOwn do
   fn own(ep : Int, p) : Int do
     if is_alive(p) do ep * 10 else 0 - ep end
   end
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let pc = spawn(A)
     let pd = spawn(A)
     println("own: " ++ int_to_string(own(2, pc)) ++ " " ++ int_to_string(own(3, pd)))

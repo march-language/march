@@ -20,9 +20,9 @@ mod FingerprintSkewA do
     B -> A : Int
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-a: up")
-    match Q_Run.run_A(c, "node-a", "skew-secret", Q_Run.addrs_from_env(), fn (s, st) ->
+    match Q_Run.run_A("node-a", "skew-secret", Q_Run.addrs_from_env(), fn (s, st) ->
       println("A: RAN THE BODY")
       Q_A.recv_Msg_B_A_1(s, Q_A.send_Msg_A_B_1(s, st, { x: 1 }), fn (_n, st2) -> Q_A.close(s, st2))) do
       Ok(_) -> println("A: ok")

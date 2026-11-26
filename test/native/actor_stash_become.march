@@ -52,7 +52,7 @@ mod ActorStashBecome do
     { mode: st.mode, stash: st.stash, served: st.served ++ q ++ ";" }
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let s = spawn(Session)
     send(s, Query("a"))
     send(s, Query("b"))

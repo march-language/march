@@ -48,7 +48,7 @@ mod MutualTcoForwardedArg do
     if String.starts_with(x, "no") do walk(rest, seen + 1) else walk(rest, seen) end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println(take_next(Cons("no-a", Cons("no-b", Cons("ok-c", Nil))), ""))
     println(take_next(Cons("no-x", Cons("no-y", Nil)), ""))
     let before = live_allocs()

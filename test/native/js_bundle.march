@@ -12,7 +12,7 @@ mod JsBundle do
     fn greet() : String
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _p : Cap(IO.Process)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign, IO.Process do
     println(greet())
     if List.length(Authority.must(Process.argv())) > 100 do
       match Js.Canvas.get_context(Js.Dom.body()) do

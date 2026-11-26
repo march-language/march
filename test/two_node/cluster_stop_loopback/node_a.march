@@ -49,7 +49,7 @@ mod ClusterStopLoopback do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "local-secret", 1)
     match ClusterNode.start(cfg) do
       Err(e) -> panic(e)

@@ -72,7 +72,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println(float_to_string(oof(Some(Some(2.5)))))
     println(float_to_string(oof(Some(None))))
     println(float_to_string(oof(None)))
