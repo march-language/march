@@ -7306,6 +7306,13 @@ let compile filename =
           rc=2, which reads like an internal compiler error. *)
        Printf.eprintf "march --jit: %s\n%!" msg;
        exit 1
+     | March_errors.Errors.Diagnostic_exn d ->
+       (* A positioned rejection raised while lowering (an interpreter-only
+          builtin such as App.stop): the program was refused, correctly, so
+          render it as `--compile` does and exit 1.  It used to fall into the
+          arm below and be reported as a compiler bug with exit 3. *)
+       emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d));
+       exit 1
      | exn ->
        (* Same reasoning as the compile_mode `| exn ->` handler above: any
           OCaml exception other than `Failure` that escapes the shared
