@@ -10282,12 +10282,14 @@ let test_cap_needs_pure_ok () =
   end|} in
   Alcotest.(check bool) "pure module: no errors" false (has_errors ctx)
 
-(* Module declares needs and uses Cap in a function signature — should be clean *)
+(* Ocap phase 7b retired `Cap(IO.X)` values, so the coverage these pin is
+   now shown with a function `needs` clause, which must lie within the
+   module's `needs` ([cap_bound_needs]). *)
 let test_cap_needs_declared_ok () =
   let ctx = typecheck {|mod Test do
     needs IO
-    fn greet(cap : Cap(IO)) do
-      cap
+    fn greet() needs IO do
+      ()
     end
   end|} in
   Alcotest.(check bool) "declared needs with Cap: no errors" false (has_errors ctx)
@@ -10330,8 +10332,8 @@ let test_cap_extern_block_counts_as_use () =
 let test_cap_supertype_covers_subtype () =
   let ctx = typecheck {|mod Test do
     needs IO
-    fn connect(cap : Cap(IO.Network)) do
-      cap
+    fn connect() needs IO.Network do
+      ()
     end
   end|} in
   Alcotest.(check bool) "needs IO covers Cap(IO.Network): no errors" false (has_errors ctx)
@@ -10351,8 +10353,8 @@ let test_cap_needs_wrong_subtype () =
 let test_cap_multiple_needs () =
   let ctx = typecheck {|mod Test do
     needs IO.Network, IO.FileRead
-    fn connect(cap : Cap(IO.Network)) do cap end
-    fn read_file(cap : Cap(IO.FileRead)) do cap end
+    fn connect() needs IO.Network do () end
+    fn read_file() needs IO.FileRead do () end
   end|} in
   Alcotest.(check bool) "multiple needs: no errors" false (has_errors ctx)
 
@@ -10405,13 +10407,13 @@ let has_message_containing ctx needle =
 let test_cap_transitive_ok () =
   let ctx = typecheck {|mod Outer do
     mod Lib do
-      needs IO.Network
-      fn connect(cap : Cap(IO.Network)) do cap end
+      needs IO.Console
+      fn connect() do println("x") end
     end
     mod Test do
-      needs IO.Network
+      needs IO.Console
       use Lib.*
-      fn run(cap : Cap(IO.Network)) do Lib.connect(cap) end
+      fn run() do Lib.connect() end
     end
   end|} in
   Alcotest.(check bool) "transitive ok when needs declared" false (has_errors ctx)
@@ -10420,12 +10422,12 @@ let test_cap_transitive_ok () =
 let test_cap_transitive_missing_error () =
   let ctx = typecheck {|mod Outer do
     mod Lib do
-      needs IO.Network
-      fn connect(cap : Cap(IO.Network)) do cap end
+      needs IO.Console
+      fn connect() do println("x") end
     end
     mod Test do
       use Lib.*
-      fn run(cap) do connect(cap) end
+      fn run() do connect() end
     end
   end|} in
   Alcotest.(check bool) "transitive import without needs is an error" true (has_errors ctx);
@@ -10437,8 +10439,8 @@ let test_cap_transitive_missing_error () =
      above about propagation rather than about the mere presence of a `use`. *)
   let unreferenced = typecheck {|mod Outer do
     mod Lib do
-      needs IO.Network
-      fn connect(cap : Cap(IO.Network)) do cap end
+      needs IO.Console
+      fn connect() do println("x") end
     end
     mod Test do
       use Lib.*
@@ -10452,13 +10454,13 @@ let test_cap_transitive_missing_error () =
 let test_cap_transitive_supertype_ok () =
   let ctx = typecheck {|mod Outer do
     mod Lib do
-      needs IO.Network
-      fn connect(cap : Cap(IO.Network)) do cap end
+      needs IO.Console
+      fn connect() do println("x") end
     end
     mod Test do
       needs IO
       use Lib.*
-      fn run(cap : Cap(IO)) do cap end
+      fn run() do connect() end
     end
   end|} in
   Alcotest.(check bool) "parent cap covers transitive import" false (has_errors ctx)
@@ -10549,7 +10551,7 @@ let test_ffi_extern_default_symbol_ir () =
 let test_cap_effects_clean () =
   let src = {|mod Test do
     needs IO.Network
-    fn f(cap : Cap(IO.Network)) do cap end
+    fn f() needs IO.Network do () end
   end|} in
   let m = parse_and_desugar src in
   let ctx = March_effects.Effects.check_capabilities m in
