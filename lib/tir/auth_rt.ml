@@ -1024,6 +1024,8 @@ let captures (m : Tir.tir_module) ~(has_frames : bool) ~(repl : bool) : Tir.tir_
        without handing over a reference, so a capturing eta closure in their
        place was released once per message and underflowed. *)
     let actor_glue = actor_glue_of m in
+    (* Function-local names, numbered per top-level fn (reset in the loop at
+       the end): a fn's [$auth_cap1] must not depend on the fns before it. *)
     let counter = ref 0 in
     let fresh prefix ty =
       incr counter;
@@ -1276,6 +1278,7 @@ let captures (m : Tir.tir_module) ~(has_frames : bool) ~(repl : bool) : Tir.tir_
     let fns =
       List.map
         (fun (f : Tir.fn_def) ->
+           counter := 0;
            let init = Lower_state.is_module_init_fn f.Tir.fn_name in
            let bound = List.fold_right add f.Tir.fn_params SSet.empty in
            let body' = process_body ~init ~host:f.Tir.fn_name bound f.Tir.fn_body in

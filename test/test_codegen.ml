@@ -22801,5 +22801,6 @@ let codegen_suites =
   @ Test_dce_pre_mono.suites (* the pre-mono prune and Mono's pruned-name tripwire *)
   @ prune_roots_tests
   @ Test_provenance.suites (* A2: provenance side table + --debug-info *)
+  @ Test_fresh_names.suites (* function-local fresh-name counters *)
   @ Test_kind.suites (* type kinds: the per-type table (specs/2026-09-10-type-kinds-design.md) *)
   @ Test_rc_trace.suites (* --rc-trace site ids + scripts/gc-trace-report.py (plan §8 A3) *)

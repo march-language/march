@@ -296,9 +296,16 @@ let call_fn_typed_module_lets (lets : (string, Tir.ty) Hashtbl.t)
     (fn : Tir.fn_def) : Tir.fn_def =
   let module SSet = Set.Make (String) in
   let is_let bound name = Hashtbl.mem lets name && not (SSet.mem name bound) in
+  (* The temporaries are numbered per fn, under a prefix of their own: this
+     runs over every fn after lowering, outside any fn-body scope, and a name
+     from the lowering counters would either repeat one of [fn]'s own or
+     depend on how many lets the fns before it used. *)
+  let n_calls = ref 0 in
   let call_var (v : Tir.var) : Tir.var * Tir.expr =
     let ty = Hashtbl.find lets v.Tir.v_name in
-    (Lower_state.fresh_var ty, Tir.EApp ({ v with Tir.v_ty = Tir.TFn ([], ty) }, []))
+    incr n_calls;
+    ({ Tir.v_name = Printf.sprintf "$mlet%d" !n_calls; v_ty = ty; v_lin = Tir.Unr },
+     Tir.EApp ({ v with Tir.v_ty = Tir.TFn ([], ty) }, []))
   in
   let rec mentions bound (e : Tir.expr) =
     let atom = function Tir.AVar v -> is_let bound v.Tir.v_name | _ -> false in

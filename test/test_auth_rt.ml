@@ -373,6 +373,68 @@ let capture_src = {|mod K do
 end
 |}
 
+(* The temporaries [captures] mints ($auth_cap1, $auth_saved2, …) are numbered
+   per top-level function: a function's text must not change because another
+   function, declared before it, also captures
+   (specs/progress/2026-11-26-function-local-fresh-counters.md). *)
+let test_capture_names_are_per_function () =
+  let prog extra = Printf.sprintf {|mod K do
+  needs IO.Console
+  needs IO.FileRead
+  fn read_in(p : String) : String needs IO.FileRead("/a/") do
+    p
+  end
+%s
+  fn target() needs IO.Console, IO.FileRead("/a/") do
+    let f = fn x -> println(x)
+    let ys = List.map(["/a/x"], File.read)
+    f(read_in("/a/x"))
+    f(int_to_string(List.length(ys)))
+  end
+  fn main() needs IO.Console, IO.FileRead("/a/") do
+    target()
+  end
+end
+|} extra in
+  let other = {|  fn other() needs IO.Console, IO.FileRead("/a/") do
+    let f = fn x -> println(x)
+    let e = fn p -> File.read(p)
+    let ys = List.map(["/a/y"], File.read)
+    f(e("/a/z"))
+    f(int_to_string(List.length(ys)))
+  end|} in
+  (* An unresolved type variable prints with the typechecker's id for it
+     ('_322), which does move with the source in front; it is not a name
+     this pass mints, and Mono resolves it. *)
+  let mask_tvar_ids (s : string) : string =
+    let b = Buffer.create (String.length s) and n = String.length s in
+    let i = ref 0 in
+    while !i < n do
+      if !i + 2 < n && s.[!i] = '\'' && s.[!i + 1] = '_'
+         && s.[!i + 2] >= '0' && s.[!i + 2] <= '9' then begin
+        Buffer.add_string b "'_#";
+        i := !i + 2;
+        while !i < n && s.[!i] >= '0' && s.[!i] <= '9' do incr i done
+      end else begin Buffer.add_char b s.[!i]; incr i end
+    done;
+    Buffer.contents b in
+  let text src =
+    let _, out, has = captures src in
+    Alcotest.(check bool) "has_frames" true has;
+    (* [target] is the frame wrapper; its lambdas are in [target$auth]. *)
+    mask_tvar_ids @@ String.concat "\n"
+      (List.filter_map (fun (fd : Tir.fn_def) ->
+           let n = fd.Tir.fn_name in
+           if String.length n >= 6 && String.sub n 0 6 = "target"
+           then Some (Pp.string_of_fn_def fd) else None) out.Tir.tm_fns) in
+  let alone = text (prog "") and after_other = text (prog other) in
+  let mentions s sub =
+    let n = String.length sub and h = String.length s in
+    let rec go i = i + n <= h && (String.sub s i n = sub || go (i + 1)) in go 0 in
+  Alcotest.(check bool) "target mints capture temporaries" true (mentions alone "$auth_cap1");
+  Alcotest.(check string) "target's text ignores a capturing fn declared before it"
+    alone after_other
+
 let no_frames_src = {|mod K0 do
   needs IO.Console
   needs IO.FileRead
@@ -1430,7 +1492,9 @@ let tests =
         Alcotest.test_case "module-level function values capture nothing" `Quick
           test_capture_not_module_level;
         Alcotest.test_case "the REPL captures without frames" `Quick
-          test_capture_repl_without_frames ] );
+          test_capture_repl_without_frames;
+        Alcotest.test_case "capture temporaries are numbered per function" `Quick
+          test_capture_names_are_per_function ] );
     ( "auth_rt_runtime",
       [ Alcotest.test_case "frames enforce the clause in every runtime" `Quick
           test_frames_every_runtime;

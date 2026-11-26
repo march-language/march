@@ -24,23 +24,43 @@ module Typecheck = March_typecheck.Typecheck
 
 (* ── Fresh name generation ──────────────────────────────────────── *)
 
-(** Monotonic fresh-name counter ($lamN/$tN/$pN/$jpN/…).
+(** Fresh names for a body's temporaries ([$t7], [$f3], [$p1], [$guard2],
+    [$jp_clo4], …): FUNCTION-LOCAL names, numbered per top-level function.
 
-    NOT converted to an env field (Wave 3 Task 8): a pure accumulator —
-    mutated without restore across the entire module traversal, reset to 0
-    exactly once per [lower_module] call via [reset_counter ()] (that
-    per-call restart is load-bearing: the TIR snapshot corpus and the REPL
-    JIT's per-fragment numbering both depend on it — see
-    test/test_snapshots.ml's determinism note). The direct lower.ml
-    analogue of perceus's [_rc_fresh_ctr], which chunk-1 Task 4 kept as a
-    ref under the same "accumulator/table-build semantics" law clause. *)
-let _lower_counter = ref 0
+    [_fn_counter] restarts at 0 for each top-level fn's body
+    ([enter_fn_body] below), so the names in a function depend on that
+    function alone, not on how many functions were lowered before it or in
+    which order (specs/progress/2026-11-26-function-local-fresh-counters.md;
+    a module-wide counter renumbered every later function when one was
+    added, and would renumber the whole program under on-demand lowering).
+
+    Code lowered OUTSIDE any function body (the initialiser of an
+    entry-module `let`) draws from [_module_counter] and spells its names
+    [$top_t7]: [lower_module] folds such an initialiser into every function
+    that uses the let, where a plain [$t7] could meet the function's own.
+    Nothing else mints a [$top_] name, so the two sequences cannot collide.
+
+    Both are reset per [lower_module] call ([reset_counter]); a REPL fragment
+    is one such call.  Names that must be unique across the module (a lambda,
+    a join point, a restrict layer: anything that becomes a symbol) do not
+    come from here: [fresh_nested_name]. *)
+let _fn_counter = ref 0
+let _module_counter = ref 0
+let _in_fn_body = ref false
 
 let fresh_name (prefix : string) : string =
-  incr _lower_counter;
-  Printf.sprintf "$%s%d" prefix !_lower_counter
+  if !_in_fn_body then begin
+    incr _fn_counter;
+    Printf.sprintf "$%s%d" prefix !_fn_counter
+  end else begin
+    incr _module_counter;
+    Printf.sprintf "$top_%s%d" prefix !_module_counter
+  end
 
-let reset_counter () = _lower_counter := 0
+let reset_counter () =
+  _fn_counter := 0;
+  _module_counter := 0;
+  _in_fn_body := false
 
 (* ── Structural names for nested functions (B1) ──────────────────────────
    Every function minted while lowering a body (a lambda, an `own(...)` drop
@@ -119,10 +139,6 @@ let current_host ~(mod_prefix : string) () : string =
 let fresh_nested_name ~(host : string) (prefix : string) : string =
   let k = Option.value ~default:0 (Hashtbl.find_opt _nested_ordinals (host, prefix)) in
   Hashtbl.replace _nested_ordinals (host, prefix) (k + 1);
-  (* Still tick the temp counter, as the old [fresh_name "lam"] did: a
-     function-local [$t<n>] never reaches a symbol, and keeping its numbering
-     unchanged keeps the snapshot and IR diffs of this rename symbol-only. *)
-  incr _lower_counter;
   Printf.sprintf "$%s%d_%s" prefix k (Tir_names.structural_tag host)
 
 let fresh_var ?(lin = Tir.Unr) (ty : Tir.ty) : Tir.var =
@@ -132,14 +148,28 @@ let fresh_var ?(lin = Tir.Unr) (ty : Tir.ty) : Tir.var =
    Whatever lowers the body of ONE top-level fn (a parsed fn, a module-level
    let's zero-arg fn, an actor handler or spawn glue, a test) brackets it
    with [enter_fn_body] / [leave_fn_body], or [with_fn_body].  The scope
-   collects the local named fns met inside it; the caller attaches them to
-   the fn ([Provenance.attach_locals]) under the name it has then. *)
-type fn_body_scope = { fb_locals : Provenance.locals }
+   - numbers the body's temporaries from 1 ([_fn_counter]), and
+   - collects the local named fns met inside it; the caller attaches them to
+     the fn ([Provenance.attach_locals]) under the name it has then.
+   Scopes nest (a module lowered lazily in the middle of a body lowers its
+   own functions): each saves and restores the enclosing one, so the outer
+   body's numbering is the same whether or not that happened inside it. *)
+type fn_body_scope = {
+  fb_locals : Provenance.locals;
+  fb_counter : int;
+  fb_in_fn : bool;
+}
 
 let enter_fn_body () : fn_body_scope =
-  { fb_locals = Provenance.enter_locals () }
+  let s = { fb_locals = Provenance.enter_locals ();
+            fb_counter = !_fn_counter; fb_in_fn = !_in_fn_body } in
+  _fn_counter := 0;
+  _in_fn_body := true;
+  s
 
 let leave_fn_body (s : fn_body_scope) : Provenance.locals =
+  _fn_counter := s.fb_counter;
+  _in_fn_body := s.fb_in_fn;
   Provenance.leave_locals s.fb_locals
 
 let with_fn_body (f : unit -> 'a) : 'a * Provenance.locals =

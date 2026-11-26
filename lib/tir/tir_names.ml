@@ -220,6 +220,32 @@ let clo_struct_name ~(fn_name : string) ~(lam_uid : string) : string =
 let apply_fn_name ~(fn_name : string) ~(lam_uid : string) : string =
   Printf.sprintf "%s$apply$%s" fn_name lam_uid
 
+(** An order on variable names that does not move when a function's
+    compiler-minted names are renumbered: a name is its stem and a trailing
+    decimal counter, and names compare by stem ([String.compare]) and then
+    by the counter as a NUMBER.  A pass that must put names in some order
+    (Perceus's cross-branch releases) uses this instead of string order,
+    under which [$f10] sorts before [$f9], so the result depended on where
+    the counter happened to stand.  Counters are minted in increasing order,
+    so for one stem this is minting order whatever the numbering.  For names
+    without a counter it is [String.compare]. *)
+let compare_minted_order (a : string) (b : string) : int =
+  (* [name] = stem ^ trailing decimal counter (possibly none). *)
+  let split (s : string) : string * int option =
+    let n = String.length s in
+    let rec start i = if i > 0 && s.[i - 1] >= '0' && s.[i - 1] <= '9' then start (i - 1) else i in
+    let d = start n in
+    (* More than 15 digits is not a counter; keep it in the stem. *)
+    if d = n || n - d > 15 then (s, None)
+    else (String.sub s 0 d, Some (int_of_string (String.sub s d (n - d))))
+  in
+  (* By stem, then counter (none first), then the spelling ([$f07] / [$f7]):
+     a total order, as [List.sort] requires. *)
+  let (sa, na) = split a and (sb, nb) = split b in
+  match String.compare sa sb with
+  | 0 -> (match compare na nb with 0 -> String.compare a b | c -> c)
+  | c -> c
+
 (** A lambda's uid (B1, specs/plans/incremental-codegen-cas-plan.md §14):
     the ordinal [k] of the lambda among those of its top-level host fn, in
     defun's traversal order, then the host spelled with ['_'] for every

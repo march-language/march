@@ -1468,7 +1468,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     let iface = !_iface_methods and use_aliases = !_use_aliases
     and module_aliases = !_module_aliases and dispatch = !_default_dispatch
     and lowered = !_lowered_modules and module_fns = !_current_module_fns
-    and counter = ref !Lower_state._lower_counter
+    and counter = ref !Lower_state._module_counter
     and lets = List.rev !top_lets in
     _resume := Some (fun decls ->
         _iface_methods := iface;
@@ -1476,9 +1476,13 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         _module_aliases := module_aliases;
         _default_dispatch := dispatch;
         _lowered_modules := lowered;
-        (* Fresh names continue after every earlier one ($lamN, ...), so the
-           new fns never collide with the module's. *)
-        Lower_state._lower_counter := max !Lower_state._lower_counter !counter;
+        (* Module-initialiser names ([$top_t7]) continue after the module's:
+           its lets are folded into the new fns below.  A fn's own
+           temporaries are numbered per fn ([Lower_state.enter_fn_body]).
+           A call that raised mid-body must not leave the next one inside a
+           function scope. *)
+        Lower_state._in_fn_body := false;
+        Lower_state._module_counter := max !Lower_state._module_counter !counter;
         Lower_state.reset_restricts ();
         let fns = ref [] and types = ref [] in
         _fns_ref := fns;
@@ -1493,7 +1497,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
            call reaching them would find them neither lowered nor lowerable. *)
         let lowered_before = Hashtbl.copy lowered in
         try Fun.protect ~finally:(fun () ->
-            counter := !Lower_state._lower_counter;
+            counter := !Lower_state._module_counter;
             _saved_iface_methods := Hashtbl.copy !_iface_methods;
             _iface_methods := Hashtbl.create 0;
             _use_aliases := Hashtbl.create 0;

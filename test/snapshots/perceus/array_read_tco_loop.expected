@@ -259,11 +259,11 @@ fn NativeArray.u8_to_int_arr(arr : '_) : '_ =
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
   let a : NativeU8Arr = NativeArray.make_u8(4, 7) in
-let $t6 : Int = let $t5 : Int = NativeArray.length_u8(a) in
-let $rc_1 : Int = sum_bytes(a, 0, $t5, 0) in
+let $t2 : Int = let $t1 : Int = NativeArray.length_u8(a) in
+let $rc_1 : Int = sum_bytes(a, 0, $t1, 0) in
 dec_rc a;
 $rc_1 in
-println($t6)
+println($t2)
 
 ## sum_bytes
 fn sum_bytes(a : NativeU8Arr, i : Int, n : Int, acc : Int) : Int =

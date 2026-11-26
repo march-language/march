@@ -6,8 +6,8 @@ fn run(n : Int) : () =
   0() -> wrap(1)
   _ -> wrap(2) in
 dec_rc $rc_1;
-let $p3 : Result(Int, String) = wrap(3) in
-dec_rc $p3;
+let $p2 : Result(Int, String) = wrap(3) in
+dec_rc $p2;
 :unit
 
 ## wrap
