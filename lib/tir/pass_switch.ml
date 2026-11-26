@@ -15,7 +15,7 @@
 
 let known : (string * string) list = [
   "lazy-lower",      "lower only the stdlib fn bodies the pre-mono prune can reach (compile time only; needs dce-pre-mono)";
-  "fusion",         "Fusion.run: list map/filter/fold chain fusion (pre-defun)";
+  "fusion",          "Fusion.run: list map/filter/fold chain fusion (pre-defun)";
   "nativearr-fusion","Fusion.run_nativearr: NativeArray map chain fusion";
   "dce-early",       "Dce.prune_unreachable right after Defun (compile time only)";
   "dce-pre-mono",    "prune functions unreachable from the roots before Mono (compile time only)";
