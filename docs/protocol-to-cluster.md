@@ -223,11 +223,12 @@ name roles and steps instead of generated types.</p>
 </div>
 
 <div class="mx-step" data-state="grants">
-<p>The line <code>role Stock needs IO.Mut</code> becomes a parameter. Stock's body is
-handed a capability for exactly that, and the compiler checks that everything the body
-reaches fits under it.</p>
+<p>The line <code>role Stock needs IO.Mut</code> is Stock's grant. The body takes no
+capability for it: the compiler checks that everything the body reaches fits under the
+grant, and refuses the program if it does not.</p>
 <pre><code class="language-march">{{ x.excerpts.stock_signature | escape }}</code></pre>
-<p>A role with no <code>needs</code> line is handed its session and nothing else.</p>
+<p>Every role's body has this shape, with a <code>needs</code> line or without one: its
+environment, its session and its entry state.</p>
 </div>
 
 <div class="mx-step" data-state="main">

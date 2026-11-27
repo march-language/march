@@ -97,7 +97,8 @@ mod LabApp do
     end
 
     -- Order.Stock, bound to a function: the pool's environment, the session,
-    -- the role's grant (`role Stock needs IO.Mut`), the entry state.
+    -- the entry state.  Its grant (`role Stock needs IO.Mut`) is checked at
+    -- compile time against everything it reaches; it takes no capability.
     fn stock(env : Env, s : Cap(Session.Live), st : Order_Stock.Entry) : Order_Stock.Yield do
       Order_Stock.recv_Want(s, st, fn (n, st1) ->
         if n < 3 do
