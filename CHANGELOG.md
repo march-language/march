@@ -101,6 +101,11 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A warning when a `Listener`'s last use is `Socket.local_port`.** A compiled program
+  closes a handle right after the last line that mentions it, so a later connect to the
+  listener's port is refused, while the interpreter keeps it open. The new
+  `listener_closed_early` warning points at the call; the handles chapter of the
+  capabilities reference explains it.
 - **`mock` blocks for tests** (object capabilities, phase 7). In a test build (`march test`,
   `forge test`, `--test`), `mock SCOPE with HANDLER do ... end` sends the scope's
   interceptable IO operations to the handler record, whose literal names only the
