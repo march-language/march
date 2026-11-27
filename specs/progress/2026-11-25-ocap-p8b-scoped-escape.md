@@ -126,6 +126,18 @@ rejected, and three message and syntax-error roughnesses.
   `lab_app`. Wall-time ratios of `--check` with it forced on: 0.97 to 1.11, inside the noise at
   that load.
 
+## Tests moved by the check (CI, 2026-11-27)
+
+Three stdlib tests returned a scoped handle from its callback to show it was closed
+afterwards (`test_file_handle.march`: "with_open closes", "with_open_write closes";
+`test_socket.march`: "passes a Socket and closes it"). Those programs are now compile errors,
+which CI found (`scripts/run-tests.sh` does not run the dune-rule `march test` runs). The checks
+moved to escape pairs, `test/captures/escape/returned.march` (already there),
+`returned_write.march` and `returned_socket.march`: the checker rejects each, and built with
+the check off each prints that the handle is closed. Shown red: with the close taken out of
+`with_open_write`, `returned_write` prints "the handle still worked". A sweep of `test/stdlib`,
+`test/native`, `examples` and `bench` found no other program the check rejects.
+
 ## What is not covered
 
 - `HttpClient.with_connection` hands its callback a function, not a handle:

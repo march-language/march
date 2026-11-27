@@ -1,0 +1,31 @@
+-- A scoped socket returned from its callback (ocap phase 8b).  The checker
+-- rejects this; with the check off, the run shows why: the socket is closed.
+-- (Moved here from test/stdlib/test_socket.march, "passes a Socket and closes
+-- it", which can no longer be written as an ordinary test.)  The listener
+-- binds port 0, so parallel runs do not collide.
+mod EscapeReturnedSocket do
+  needs IO.NetListen, IO.NetConnect, IO.Console
+
+  fn main() do
+    match Authority.must(Socket.listen(0)) do
+      Err(_) -> println("listen failed")
+      Ok(l) ->
+        match Socket.local_port(l) do
+          Err(_) -> println("local_port failed")
+          Ok(port) ->
+            match Socket.with_connection("127.0.0.1", port, fn s ->
+              match Socket.write(s, "hi") do
+                Ok(_) -> Ok(s)
+                Err(e) -> Err(e)
+              end) do
+              Ok(Ok(s)) ->
+                match Socket.write(s, "x") do
+                  Err(Socket.Closed) -> println("used after close: Err(Closed)")
+                  _ -> println("the socket still worked")
+                end
+              _ -> println("connect failed")
+            end
+        end
+    end
+  end
+end
