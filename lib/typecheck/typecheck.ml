@@ -13733,6 +13733,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      shared key or print (specs/progress/2026-11-16-race-warnings.md). *)
   Typecheck_races.check_module ~iter_expr
     ~own_exprs:Typecheck_caps.module_own_exprs final_env.errors m.Ast.mod_decls;
+  (* A Listener whose last use is Socket.local_port (decision D-a). *)
+  Listener_lint.check_module ~iter_expr
+    ~own_exprs:Typecheck_caps.module_own_exprs final_env.errors m.Ast.mod_decls;
   check_cap_narrow_sites final_env;
   (* Validate capability declarations for the top-level module *)
   (* The entry module's own name is NOT a prefix segment for cap-closure keys:
