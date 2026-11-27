@@ -335,7 +335,14 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
       fn_kind = Tir.FnNormal }
   in
 
-  let handler_fns = List.map lower_handler actor.actor_handlers in
+  (* Each handler is one top-level fn. *)
+  let lower_handler ?on_stop ?inspect (h : Ast.actor_handler) : Tir.fn_def =
+    let fn, locals =
+      Lower_state.with_fn_body (fun () -> lower_handler ?on_stop ?inspect h) in
+    Provenance.attach_locals fn.Tir.fn_name locals;
+    fn
+  in
+  let handler_fns = List.map (fun h -> lower_handler h) actor.actor_handlers in
   let on_stop_fns =
     match actor.actor_on_stop with
     | None -> []
@@ -432,6 +439,7 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
             Hashtbl.remove Lower_state._fn_param_types v.Tir.v_name) init_params;
         List.iter (fun (n, ty) -> Hashtbl.replace Lower_state._fn_param_types n ty) saved)
   in
+  let spawn_scope = Lower_state.enter_fn_body () in
   let init_lowered = with_init_params (fun () -> Lower_match.lower_expr env actor.actor_init) in
   (* A supervised child's `init` arguments (`Child f(e1, e2)`), each lowered
      once and bound to a named var `$sup_init_arg_<f>_<i>` in the glue, so the
@@ -756,6 +764,8 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
     in
     wrap spawn_body_final
   in
+  Provenance.attach_locals (name ^ Tir_names.actor_spawn_suffix)
+    (Lower_state.leave_fn_body spawn_scope);
   let spawn_fn : Tir.fn_def = {
     fn_name   = name ^ Tir_names.actor_spawn_suffix;
     fn_params = init_params;

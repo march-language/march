@@ -3,9 +3,9 @@ type P2 = P2(Float, Float)
 -- fns (3) --
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t14 : String = let $t13 : Float = spin(10, 0.) in
-float_to_string($t13) in
-println($t14)
+  let $t2 : String = let $t1 : Float = spin(10, 0.) in
+float_to_string($t1) in
+println($t2)
 
 ## psum
 fn psum(p : P2) : Float =
@@ -17,16 +17,16 @@ let a : Float = $f1 in
 
 ## spin
 fn spin(i : Int, acc : Float) : Float =
-  let $t7 : Bool = ==(i, 0) in
-case $t7 of
+  let $t1 : Bool = ==(i, 0) in
+case $t1 of
   True() -> acc
-  _ -> let p : P2 = let $t9 : Bool = let $t8 : Int = %(i, 2) in
-==($t8, 0) in
-case $t9 of
+  _ -> let p : P2 = let $t3 : Bool = let $t2 : Int = %(i, 2) in
+==($t2, 0) in
+case $t3 of
   True() -> alloc P2.P2(1., 2.)
   _ -> alloc P2.P2(3., 4.) in
-let $t10 : Int = -(i, 1) in
-let $t12 : Float = let $t11 : Float = psum(p) in
-+.(acc, $t11) in
-spin($t10, $t12)
+let $t4 : Int = -(i, 1) in
+let $t6 : Float = let $t5 : Float = psum(p) in
++.(acc, $t5) in
+spin($t4, $t6)
 

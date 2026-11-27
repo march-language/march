@@ -20,20 +20,20 @@ panic("non-exhaustive pattern match")
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t16 : String = let $t15 : (Int, Int) = (0, 0) in
-describe($t15) in
-let $rc_3 : () = println($t16) in
-dec_rc $t16;
+  let $t2 : String = let $t1 : (Int, Int) = (0, 0) in
+describe($t1) in
+let $rc_3 : () = println($t2) in
+dec_rc $t2;
 $rc_3;
-let $t18 : String = let $t17 : Atom = :ok in
-let $rc_2 : String = tag_name($t17) in
-dec_rc $t17;
+let $t4 : String = let $t3 : Atom = :ok in
+let $rc_2 : String = tag_name($t3) in
+dec_rc $t3;
 $rc_2 in
-let $rc_1 : () = println($t18) in
-dec_rc $t18;
+let $rc_1 : () = println($t4) in
+dec_rc $t4;
 $rc_1;
-let $t19 : Int = word("yes") in
-println($t19)
+let $t5 : Int = word("yes") in
+println($t5)
 
 ## tag_name
 fn tag_name(t : Atom) : String =

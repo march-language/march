@@ -10,11 +10,11 @@ alloc Option.Some(h)
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t9 : Option(Int) = let $t8 : List(Int) = let $t7 : List(Int) = alloc List.Nil(Int)() in
-alloc List.Cons(3, $t7) in
-head_opt($t8) in
-case $t9 of
-  Some($f10) -> let v : Int = $f10 in
+  let $t3 : Option(Int) = let $t2 : List(Int) = let $t1 : List(Int) = alloc List.Nil(Int)() in
+alloc List.Cons(3, $t1) in
+head_opt($t2) in
+case $t3 of
+  Some($f4) -> let v : Int = $f4 in
 println(v)
   None() -> println(0)
   _ -> panic("non-exhaustive pattern match")

@@ -64,9 +64,9 @@ $rc_4
 fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) : () =
   let p : Pid({ n : Int }) = let $raw_actor : Ptr(Unit) = Bump_spawn() in
 spawn($raw_actor) in
-let $rc_5 : Option(Unit) = let $t11 : Bump_Msg = let $t10 : Int = two_reads(1) in
-alloc Bump_Msg.Hit($t10) in
-let $rc_6 : Option(Unit) = send(p, $t11) in
+let $rc_5 : Option(Unit) = let $t2 : Bump_Msg = let $t1 : Int = two_reads(1) in
+alloc Bump_Msg.Hit($t1) in
+let $rc_6 : Option(Unit) = send(p, $t2) in
 dec_rc p;
 $rc_6 in
 dec_rc $rc_5;
@@ -75,14 +75,14 @@ println("ok")
 
 ## two_reads
 fn two_reads(i : Int) : Int =
-  let r : Pair = let $t3 : String = int_to_string(i) in
-let $t5 : String = let $t4 : Int = +(i, 1) in
-int_to_string($t4) in
-{ a = $t3, b = $t5 } in
-let $t7 : Int = let $t6 : String = r.a in
+  let r : Pair = let $t1 : String = int_to_string(i) in
+let $t3 : String = let $t2 : Int = +(i, 1) in
+int_to_string($t2) in
+{ a = $t1, b = $t3 } in
+let $t5 : Int = let $t4 : String = r.a in
+string_length($t4) in
+let $t7 : Int = let $t6 : String = r.b in
 string_length($t6) in
-let $t9 : Int = let $t8 : String = r.b in
-string_length($t8) in
 dec_rc r;
-+($t7, $t9)
++($t5, $t7)
 

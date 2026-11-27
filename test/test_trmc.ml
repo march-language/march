@@ -579,8 +579,9 @@ let test_transform_is_idempotent_on_a_transformed_module () =
     (List.length once.Tir.tm_fns) (List.length twice.Tir.tm_fns)
 
 (* ── Fresh-name determinism ──────────────────────────────────────────────────
-   [Trmc.fresh_var] mints "$trmcN" from a module-level counter.  If that
-   counter is not reset per module, a function's emitted TIR depends on how
+   [Trmc.fresh_var] mints "$trmcN" from a counter [transform_module] resets
+   before each top-level function (test/test_fresh_names.ml pins the
+   per-function half).  If it is not reset, a function's emitted TIR depends on how
    many OTHER modules the same process transformed first — which corrupts the
    CAS cache key (a digest of emitted code) and makes any TRMC golden
    order-dependent.  [Perceus] resets its own counter for the same reason.

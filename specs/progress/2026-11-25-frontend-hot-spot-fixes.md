@@ -86,10 +86,10 @@ to the last stage it does print. Every one of the 9 pairs showed the saving (sma
     cover fix 4's digests.
 - The new line table against the old scan on 960,000 random (text, line) pairs, lines from
   -2 to past the end: equal on all.
-- **Not done when this was committed:** `scripts/run-tests.sh compiler eval codegen stdlib`
-  and `scripts/run-tests.sh refinecheck`. The machine went to sleep during `run_compiler`
-  (about 225 cases in, none failing) and the run had not finished. Run both, and
-  `test/test_refine.exe` and `test/test_z3_lookup.exe`, before merging: `test_refine`'s
-  `key_changes_with_version`, `key_changes_with_rlimit` and `key_has_no_path` are the cases
-  that swap z3 and move the rlimit inside one process, which is what fix 3's memo key has
-  to survive.
+- `scripts/run-tests.sh compiler eval codegen stdlib`: all four pass (1,773 + 309 + 821 +
+  923 tests). `scripts/run-tests.sh refinecheck`: all 223 groups pass (2,715 tests).
+- `test/test_refine.exe` (41 tests) and `test/test_z3_lookup.exe` (22 tests) pass.
+  `test_refine`'s `key_changes_with_version`, `key_changes_with_rlimit` and
+  `key_has_no_path` are the cases that swap z3 and move the rlimit inside one process,
+  which is what fix 3's memo key has to survive. `test_z3_lookup` needs
+  `test/z3_lookup_helper.exe` built beside it, or two of its cases die with `Sys_error`.

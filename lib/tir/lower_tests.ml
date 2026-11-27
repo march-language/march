@@ -64,8 +64,10 @@ let run
        2-arg stdlib [Bytes.list_len]).  Without this the local def is shadowed
        by the import BEFORE [qualify_locals] can prefix it, producing a call to
        the wrong-arity stdlib function (arg dropped → uninitialized param). *)
-    let body' = Lower_state.with_current_module_fns direct_fn_names
-        (fun () -> Lower_match.lower_expr test_env body) in
+    let body', locals = Lower_state.with_fn_body (fun () ->
+        Lower_state.with_current_module_fns direct_fn_names
+          (fun () -> Lower_match.lower_expr test_env body)) in
+    Provenance.attach_locals fn_name locals;
     (* First thing the test does: hand the runner its panic header (the
        `test "..."` line under a caret, lib/errors/test_report.ml), which
        march_test_run fills with the message if the body panics. *)
@@ -111,8 +113,10 @@ let run
         collect_tests test_env new_prefix ~mod_prefix ~direct_fn_names inner
       | Ast.DSetup (body, _) ->
         (* Per-test setup: lower to __march_setup__ (overwritten by last decl) *)
-        let body' = Lower_state.with_current_module_fns direct_fn_names
-            (fun () -> Lower_match.lower_expr test_env body) in
+        let body', locals = Lower_state.with_fn_body (fun () ->
+            Lower_state.with_current_module_fns direct_fn_names
+              (fun () -> Lower_match.lower_expr test_env body)) in
+        Provenance.attach_locals Tir_names.setup_fn_name locals;
         let fn : Tir.fn_def = {
           fn_name   = Tir_names.setup_fn_name;
           fn_params = [];
@@ -122,8 +126,10 @@ let run
         } in
         fns := qualify_locals mod_prefix direct_fn_names fn :: !fns
       | Ast.DSetupAll (body, _) ->
-        let body' = Lower_state.with_current_module_fns direct_fn_names
-            (fun () -> Lower_match.lower_expr test_env body) in
+        let body', locals = Lower_state.with_fn_body (fun () ->
+            Lower_state.with_current_module_fns direct_fn_names
+              (fun () -> Lower_match.lower_expr test_env body)) in
+        Provenance.attach_locals Tir_names.setup_all_fn_name locals;
         let fn : Tir.fn_def = {
           fn_name   = Tir_names.setup_all_fn_name;
           fn_params = [];

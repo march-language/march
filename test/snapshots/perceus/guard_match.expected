@@ -3,19 +3,19 @@
 ## classify
 fn classify(x : Int) : String =
   let n : Int = x in
-let $guard8 : Bool = >(n, 0) in
-case $guard8 of
+let $guard5 : Bool = >(n, 0) in
+case $guard5 of
   true() -> "pos"
   _ -> let n$sh1 : Int = x in
-let $guard3 : Bool = <(n$sh1, 0) in
-case $guard3 of
+let $guard2 : Bool = <(n$sh1, 0) in
+case $guard2 of
   true() -> "neg"
   _ -> "zero"
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t11 : String = classify(5) in
-let $rc_1 : () = println($t11) in
-dec_rc $t11;
+  let $t1 : String = classify(5) in
+let $rc_1 : () = println($t1) in
+dec_rc $t1;
 $rc_1
 

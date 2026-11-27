@@ -13,7 +13,8 @@
 # compiler's numbered names, sorts the chunks, and diffs the result.
 #
 # Masked: the counter of a compiler-generated name (`$lam3`, `$nafuse_lam12`,
-# `$t7`, `$jp4`, `$rc_2`, `$f1`, `$dx66`: the list is GEN below);
+# `$t7`, `$top_t7`, `$jp4`, `$jp_clo4`, `$rc_2`, `$f1`, `$f_name3`, `$p2`,
+# `$guard5`, `$trmc8`, `$auth_cap1`, `$mlet1`, `$dx66`: the list is GEN below);
 # the trailing counter of every register and label (`%ld355`, `case_br30:`);
 # string-pool and record-shape global indices (`@.str121`, `@.fnt.s7`); the
 # inliner's instance suffix (`_i85`); metadata numbers.  NOT masked: opcodes,
@@ -61,9 +62,14 @@ if cur:
     chunks.append("\n".join(cur))
 # Compiler-generated numbered names only.  A `$` followed by anything else is
 # part of a symbol (`Ord$Tuple2.compare`, `f$Int64`) and is left alone.
-GEN = r"nafuse_lam|lam|jp|t|rc_|f|dx|df|dfree|dlast|dp|db|cres|cfree"
+# Lowering's temporaries ($t $p $f $f_<field> $guard $jp_clo $spawned
+# $mbox_set, and $top_<any of those> outside a function body), TRMC's $trmc,
+# the authority passes' $auth_<kind>, the module-let call temporary $mlet,
+# Fusion's $nafuse_<kind>, Perceus's $rc_ and Drop's $d*/$c*.
+GEN = (r"nafuse_lam|nafuse_[a-z]+?|lam|jp_clo|jp|trmc|t|rc_|f_[A-Za-z_]\w*?|f|p|guard|"
+       r"spawned|mbox_set|mlet|auth_[a-z_]+?|dx|df|dfree|dlast|dp|db|cres|cfree")
 mask = [
-    (re.compile(r"\$(" + GEN + r")\d+"), r"$\1N"),   # $nafuse_lam12, $lam3, $t7
+    (re.compile(r"\$((?:top_)?(?:" + GEN + r"))\d+"), r"$\1N"),   # $nafuse_lam12, $lam3, $t7
     (re.compile(r"%\d+\b"), "%N"),                 # numbered locals
     (re.compile(r"!\d+\b"), "!N"),                 # numbered metadata
     (re.compile(r"@\.fnt\.s\d+"), "@.fnt.sN"),      # fn-table string pool index

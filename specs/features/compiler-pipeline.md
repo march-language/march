@@ -388,7 +388,7 @@ Hashtbl mapping expression span → inferred type. Used by lowering to produce c
 
 ### Data Structures
 
-- `_lower_counter` (line 20): Fresh name generation
+- `_fn_counter` / `_module_counter` (`lib/tir/lower_state.ml`): fresh names for temporaries, numbered per top-level function (`$t7`) or, outside any function body, per module (`$top_t7`)
 - `_type_map_ref` (line 101): Typecheck type_map option (set at module entry)
 - `_use_aliases` (line 121): Maps unqualified → qualified names
 - `_iface_methods` (line 133): Maps method names → (type, impl_fn) lists

@@ -27,12 +27,12 @@
 # change, is therefore a finding, not noise; if a legitimate difference ever
 # appears, add the smallest sed here and list it in this header.
 #
-# Symbols still carry global fresh-name counters ($lam<n>, $apply$<n>, see
-# specs/plans/incremental-codegen-cas-plan.md §14), so identity is only
-# expected when the compiler's whole process state is identical — which is
-# exactly the property this oracle tests.  That is also why --self-test can
-# force a red: compiling conditions 3/4 against a stdlib copy with one extra
-# lambda shifts every counter after it.
+# --self-test forces a red by compiling conditions 3/4 against a stdlib copy
+# in which a function the program reaches (List.map) is changed.  An extra
+# UNREACHABLE function no longer works: fresh local names are numbered per
+# function and unreached stdlib bodies are not lowered
+# (specs/progress/2026-11-26-function-local-fresh-counters.md,
+# 2026-11-26-lazy-stdlib-lowering.md), so it changes nothing emitted.
 #
 # A second leg covers diagnostics: every test/errors program is run with
 # `--check` under the same four conditions, and the rendered text (stdout and
@@ -215,24 +215,32 @@ rm -rf "$WORK/out" "$WORK/cwdX" "$WORK/cwdY" "$WORK/homeA" "$WORK/homeB"
 mkdir -p "$WORK/out"
 
 # ── --self-test: the oracle must go RED on a deliberate perturbation ────────
-# Conditions 3/4 compile against a copy of stdlib with one extra lambda in
-# List; the fresh-name counters shift, so .ll and .hashes must differ from
-# conditions 1/2.  A GREEN here means the oracle is broken (compare the two
-# shipped-broken oracles in CLAUDE.md), and the script exits 1.
+# Conditions 3/4 compile against a copy of stdlib in which List.map's
+# recursive call passes `fn y -> f(y)` instead of `f`: a closure more in a
+# function the program reaches, so .ll and .hashes must differ from
+# conditions 1/2.  The copy sits in a directory named `stdlib`, as the real
+# one does, so the stdlib file names embedded in the fn table read
+# `stdlib/list.march` either way and only the edit can make a difference.  A
+# GREEN here means the oracle is broken (compare the two shipped-broken
+# oracles in CLAUDE.md), and the script exits 1.
 if [ "$SELF_TEST" -eq 1 ]; then
   rm -rf "$WORK/stdlib_perturbed"
-  cp -R "$ROOT/stdlib" "$WORK/stdlib_perturbed"
-  lst="$WORK/stdlib_perturbed/list.march"
-  grep -q '^  fn map(' "$lst" || { echo "FATAL: stdlib/list.march has no 'fn map(' to perturb next to"; exit 2; }
-  awk 'BEGIN{done=0} /^  fn map\(/ && !done {print "  pfn det_oracle_perturb(xs : List(Int)) : List(Int) do"; print "    List.map(xs, fn x -> x + 1)"; print "  end"; print ""; done=1} {print}' \
+  mkdir -p "$WORK/stdlib_perturbed"
+  cp -R "$ROOT/stdlib" "$WORK/stdlib_perturbed/stdlib"
+  lst="$WORK/stdlib_perturbed/stdlib/list.march"
+  rec='    Cons(h, t) -> Cons(f(h), map(t, f))'
+  grep -qxF "$rec" "$lst" || { echo "FATAL: stdlib/list.march's map has no '$rec' to perturb"; exit 2; }
+  awk -v rec="$rec" 'BEGIN{done=0} $0 == rec && !done {print "    Cons(h, t) -> Cons(f(h), map(t, fn y -> f(y)))"; done=1; next} {print}' \
     "$lst" > "$lst.tmp" && mv "$lst.tmp" "$lst"
-  grep -q det_oracle_perturb "$lst" || { echo "FATAL: perturbation did not land in $lst"; exit 2; }
-  prog="$ROOT/test/snapshots/src/closure_hof.march"
+  grep -qF 'map(t, fn y -> f(y))' "$lst" || { echo "FATAL: perturbation did not land in $lst"; exit 2; }
+  # A program that reaches List.map (closure_hof, used before, reaches no
+  # stdlib body at all).
+  prog="$ROOT/test/native/closure_scalar_abi.march"
   [ -f "$prog" ] || { echo "FATAL: self-test program $prog missing"; exit 2; }
   mkdir -p "$WORK/args"
-  printf '%s\n%s\n%s\n' src_closure_hof "$prog" "" > "$WORK/args/src_closure_hof"
-  MARCH_DET_PERTURB_STDLIB="$WORK/stdlib_perturbed" "$0" --one "$WORK" "$WORK/args/src_closure_hof"
-  res="$(cat "$WORK/out/src_closure_hof/result")"
+  printf '%s\n%s\n%s\n' native_closure_scalar_abi "$prog" "" > "$WORK/args/native_closure_scalar_abi"
+  MARCH_DET_PERTURB_STDLIB="$WORK/stdlib_perturbed/stdlib" "$0" --one "$WORK" "$WORK/args/native_closure_scalar_abi"
+  res="$(cat "$WORK/out/native_closure_scalar_abi/result")"
   echo "self-test: $res"
   case "$res" in
     FAIL*) echo "self-test RED as required: the oracle detects a perturbed stdlib."; rc=0 ;;

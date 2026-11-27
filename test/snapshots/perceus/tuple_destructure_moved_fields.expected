@@ -5,12 +5,12 @@ type Raw = Raw(String, Int, String)
 ## from_ctor
 fn from_ctor(r : Raw) : Box =
   case r of
-  Raw($f14, $f15, $f16) -> dec_rc r;
-let c : String = $f16 in
-let n : Int = $f15 in
-let a : String = $f14 in
-let $t13 : Box = alloc Box.Box(a, c) in
-keep($t13)
+  Raw($f2, $f3, $f4) -> dec_rc r;
+let c : String = $f4 in
+let n : Int = $f3 in
+let a : String = $f2 in
+let $t1 : Box = alloc Box.Box(a, c) in
+keep($t1)
   _ -> dec_rc r;
 panic("non-exhaustive pattern match")
 
@@ -32,11 +32,11 @@ fn keep(b : Box) : Box =
 
 ## main
 fn main(_c : Cap(IO.Console)) : () =
-  let $p28 : Box = let $t25 : (String, Int, String) = ("a", 1, "b") in
-from_tuple($t25) in
-dec_rc $p28;
-let $p27 : Box = let $t26 : Raw = alloc Raw.Raw("a", 1, "b") in
-from_ctor($t26) in
-dec_rc $p27;
+  let $p4 : Box = let $t1 : (String, Int, String) = ("a", 1, "b") in
+from_tuple($t1) in
+dec_rc $p4;
+let $p3 : Box = let $t2 : Raw = alloc Raw.Raw("a", 1, "b") in
+from_ctor($t2) in
+dec_rc $p3;
 println("done")
 

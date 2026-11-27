@@ -16,14 +16,14 @@ let x : Int = $f1 in
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t16 : String = let $t15 : (Int, Int) = (0, 0) in
-describe($t15) in
-println($t16);
-let $t18 : String = let $t17 : Atom = :ok in
-tag_name($t17) in
-println($t18);
-let $t19 : Int = word("yes") in
-println($t19)
+  let $t2 : String = let $t1 : (Int, Int) = (0, 0) in
+describe($t1) in
+println($t2);
+let $t4 : String = let $t3 : Atom = :ok in
+tag_name($t3) in
+println($t4);
+let $t5 : Int = word("yes") in
+println($t5)
 
 ## tag_name
 fn tag_name(t : Atom) : String =

@@ -75,3 +75,13 @@ val grants :
     that the most recent [Lower.lower_module] left, reset by the next one:
     call it on that module, with no other lowering in between. *)
 val captures : Tir.tir_module -> has_frames:bool -> repl:bool -> Tir.tir_module
+
+(** The functions [restricts], [frames], [grants] and [captures] may add a
+    call of, given the tables they run on, that lowering did not already
+    write.  Lazy lowering ([Lower.lower_module ~lazy_bodies]) roots them,
+    since these passes run between lowering and the pre-mono prune.  Builtins
+    are not listed. *)
+val minted_callees :
+  needs:(string, Lower_state.fn_needs) Hashtbl.t ->
+  sites:(string, Lower_state.restrict_site) Hashtbl.t ->
+  grants:(string, Lower_state.fn_grant) Hashtbl.t -> string list
