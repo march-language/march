@@ -18,5 +18,5 @@ mod Main do
     let st2 = Relay_A.send_Third(s, st1, "skipped the reply")
     Relay_A.recv_Fourth(s, st2, fn (_ok, st3) -> Relay_A.close(s, st3))
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

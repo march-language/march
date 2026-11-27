@@ -535,28 +535,6 @@ type env = {
       Marshals a cached stdlib env, which loses physical identity, and a
       structural compare would mistake a user function of the same name and
       type for the builtin. *)
-  root_cap_allowed : bool;
-  (** True where naming [root_cap] is still permitted (R2, 2026-08-05).
-
-      [root_cap] used to be an ordinary global of type [Cap(IO)] in scope in
-      every module, which is no-authority-from-nothing violated at the source:
-      a module declaring no [needs] at all could hold the root and narrow it to
-      any descendant, legitimately, because [cap_narrow] demands exactly the
-      parent it now had.  The root is now granted to [main] instead (see
-      [Desugar.check_main_signature]; the runtime already passed it).
-
-      Two contexts keep it, both deliberate and both scoped by ENCLOSING
-      CONTEXT rather than by the checker declining to look — the distinction
-      matters, because "we never checked here" and "we decided not to check
-      here" are indistinguishable from the passing test:
-
-      - [test]/[describe]/[setup] bodies, which have no [main] to be granted
-        from.  Without this, capability behaviour would not be testable from
-        March at all.  It is ambient authority, in a context that cannot reach
-        production code: a dependency's test blocks do not run in a consumer's
-        build.
-      - the REPL, which likewise has no entry point.  Carried by
-        [check_module_with_env], whose only caller is [lib/jit/repl_jit.ml]. *)
   cur_fn_public : bool;
   (** True while checking the body of a PUBLIC (fn, not pfn) function — read by
       the proof-cap mint gate. Lambdas inherit it; nested named fns/modules reset
@@ -864,9 +842,7 @@ type env = {
       once the line has passed its own checks (a real role, a known
       capability, before any message step); read by [check_role_grants],
       which bounds each role's bodies by it the way [check_main_grant] bounds
-      the program by `main`'s parameters, and by the generator's caller
-      through [Desugar_endpoints.grants_of] (the generator runs before the
-      typechecker, so it reads the raw steps itself).  Shared (mutated in
+      the program by `main`'s request.  Shared (mutated in
       place) across every env copy, like the closure tables above. *)
   fn_grant_points : (string, string list * Ast.span) Hashtbl.t;
   (** Functions whose signature carries a concrete [Cap(P)] parameter —
@@ -979,7 +955,6 @@ let make_env errors type_map = {
   always_linear_types = ["RingBuf"];
   current_module = "";
   gated_shadowed = StringSet.empty;
-  root_cap_allowed = false;
   cur_fn_public = false;
   cap_qual_prefix = "";
   enclosing_package = "";

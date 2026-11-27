@@ -91,7 +91,7 @@ mod HostedProtocolChange do
   end
 
   -- A session of client [n] at fingerprint [fp].
-  pfn session(c : Cap(IO), h : Cap(ClusterNode.Live), fp : String, n : Int, gate : Vault(Int)) : () do
+  pfn session(h : Cap(ClusterNode.Live), fp : String, n : Int, gate : Vault(Int)) : () do
     match SessionNode.initiate(h, "Hold", fp, Hold_Msg.role_names(), Nil, Hold_Msg.role_Client(), Hold_Msg.peers_Client(),
                                Hold_Msg.others_Client(), fn _ -> (),
                                fn s ->
@@ -137,7 +137,7 @@ mod HostedProtocolChange do
     a
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "hpc-secret", 1)
     match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
@@ -165,7 +165,7 @@ mod HostedProtocolChange do
         let gate : Vault(Int) = Authority.must(Vault.new("hpc_gate"))
         let olds = List.map(Cons(1, Cons(2, Cons(3, Nil))), fn n ->
           let t = Authority.must(Task.async(fn () -> do
-            session(c, h, "hold-v1", n, gate)
+            session(h, "hold-v1", n, gate)
             0
           end))
           wait_until("hello " ++ int_to_string(n), fn _ -> Topology.running(h) >= n, 10000)
@@ -190,10 +190,10 @@ mod HostedProtocolChange do
         let fresh : Vault(Int) = Authority.must(Vault.new("hpc_gate_new"))
         Vault.set(fresh, "open4", 1)
         Vault.set(fresh, "open5", 1)
-        session(c, h, "hold-v2", 4, fresh)
+        session(h, "hold-v2", 4, fresh)
         println("old host alive while its sessions run: " ++ bool_to_string(is_alive(old_host)))
         -- An old-version client finds no old offer any more.
-        session(c, h, "hold-v1", 5, fresh)
+        session(h, "hold-v1", 5, fresh)
         -- The old sessions finish, one at a time; the old actor is stopped
         -- once they have.
         release(gate, 1, olds)

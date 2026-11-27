@@ -1264,7 +1264,7 @@ let $t3 : '_ = alloc Cons(i, acc) in
 call_ptr go($t2, $t3)
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let pair : (String, String) = ("hello", "world") in
 let $t2 : String = let $t1 : Int = process_pairs(pair, 3, 0) in
 int_to_string($t1) in

@@ -27,7 +27,7 @@ mod Main do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_process : Cap(IO.Process)) : () do
+  fn main() : () needs IO.Console, IO.Process do
     let i = 1000000
     match selector() do
       "int_get"   -> println(int_to_string(NativeArray.get_int(NativeArray.make_int(4, 7), i)))

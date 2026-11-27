@@ -2690,9 +2690,8 @@ let shell_compile ?triple ?ident ?(force = false) ctx ~tc_env ~(program_name : s
     let acc = Hashtbl.create 8 in
     let rec of_ty (t : March_tir.Tir.ty) =
       match t with
-      (* The root, `Cap(IO)`, only appears where the client narrows it into
-         a pre-bound name (`Actor.introspect(root_cap)`, `cap_narrow`): an
-         input that mentions root_cap is refused, so no input holds it. *)
+      (* `Cap(IO)` is a retired value (ocap phase 7b): no input can hold
+         one, and `root_cap` is refused by the checker. *)
       | March_tir.Tir.TCon ("Cap", [ March_tir.Tir.TCon ("IO", []) ]) -> ()
       | March_tir.Tir.TCon ("Cap", [ March_tir.Tir.TCon (c, []) ]) -> Hashtbl.replace acc c ()
       | March_tir.Tir.TCon (_, args) -> List.iter of_ty args

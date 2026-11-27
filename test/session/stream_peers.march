@@ -143,7 +143,7 @@ mod StreamPeers do
 
   pfn count(tally : Vault(Int), key : String) : Int do Vault.get_or(tally, key, 0) end
 
-  pfn stream_seeds(c : Cap(IO), tally : Vault(Int), seed : Int, mode : Int) : () do
+  pfn stream_seeds(tally : Vault(Int), seed : Int, mode : Int) : () do
     if seed == 50 do ()
     else
       let t = counting(tally)
@@ -165,11 +165,11 @@ mod StreamPeers do
       let _ = if t.queued(()) > 0 do
         Authority.ignore(IO.puts("seed " ++ int_to_string(seed) ++ " mode " ++ int_to_string(mode) ++ ": " ++ int_to_string(t.queued(())) ++ " left queued"))
       else () end
-      stream_seeds(c, tally, seed + 1, mode)
+      stream_seeds(tally, seed + 1, mode)
     end
   end
 
-  pfn fan_seeds(c : Cap(IO), tally : Vault(Int), seed : Int) : () do
+  pfn fan_seeds(tally : Vault(Int), seed : Int) : () do
     if seed == 50 do ()
     else
       let t = counting(tally)
@@ -178,11 +178,11 @@ mod StreamPeers do
       let _ = Fan_A.chaos(s, Fan_A.register(s, 0), seed + 100)
       let _ = Fan_B.chaos(s, Fan_B.register(s, 0), seed + 200)
       t.drain(())
-      fan_seeds(c, tally, seed + 1)
+      fan_seeds(tally, seed + 1)
     end
   end
 
-  pfn logging_seeds(c : Cap(IO), tally : Vault(Int), seed : Int) : () do
+  pfn logging_seeds(tally : Vault(Int), seed : Int) : () do
     if seed == 50 do ()
     else
       let t = counting(tally)
@@ -191,11 +191,11 @@ mod StreamPeers do
       let _ = Logging_L.chaos(s, Logging_L.register(s, 0), seed)
       let _ = Logging_C.chaos(s, Logging_C.register(s, 0), seed + 500)
       t.drain(())
-      logging_seeds(c, tally, seed + 1)
+      logging_seeds(tally, seed + 1)
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     IO.puts("-- scripted Cons against the real Prod")
     let t1 = Session.in_process()
     let s1 = Authority.must(Session.attach(t1.ops))
@@ -235,21 +235,21 @@ mod StreamPeers do
 
     IO.puts("-- chaos: Stream, 50 seeds each way and both ways")
     let tally = Authority.must(Vault.new("stream_peers_tally"))
-    stream_seeds(c, tally, 0, 0)
-    stream_seeds(c, tally, 0, 1)
-    stream_seeds(c, tally, 0, 2)
+    stream_seeds(tally, 0, 0)
+    stream_seeds(tally, 0, 1)
+    stream_seeds(tally, 0, 2)
     IO.puts("closes: " ++ int_to_string(count(tally, "close")) ++ " of 300, cancels: "
       ++ int_to_string(count(tally, "cancel")) ++ ", stalls: " ++ int_to_string(count(tally, "stalled")))
 
     IO.puts("-- chaos: Fan, all three roles, 50 seeds")
     let tally2 = Authority.must(Vault.new("stream_peers_tally_fan"))
-    fan_seeds(c, tally2, 0)
+    fan_seeds(tally2, 0)
     IO.puts("closes: " ++ int_to_string(count(tally2, "close")) ++ " of 150, cancels: "
       ++ int_to_string(count(tally2, "cancel")) ++ ", stalls: " ++ int_to_string(count(tally2, "stalled")))
 
     IO.puts("-- chaos: Logging, C may crash, 50 seeds")
     let tally3 = Authority.must(Vault.new("stream_peers_tally_logging"))
-    logging_seeds(c, tally3, 0)
+    logging_seeds(tally3, 0)
     IO.puts("normal: " ++ int_to_string(count(tally3, "normal")) ++ ", crashed: " ++ int_to_string(count(tally3, "crashed"))
       ++ ", crash branches: " ++ int_to_string(count(tally3, "crash_branch")) ++ ", stalls: " ++ int_to_string(count(tally3, "stalled")))
     let _ = if count(tally3, "normal") + count(tally3, "crashed") == 50 do IO.puts("every Logging session decided") else IO.puts("MISSING Logging sessions") end

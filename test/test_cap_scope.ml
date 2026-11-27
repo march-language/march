@@ -181,7 +181,7 @@ let test_literal_outside_scope_is_rejected () =
 mod ScopeViol do
   needs IO.Console
   needs IO.FileRead("/etc/myapp")
-  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     match Authority.must(File.read("/etc/shadow")) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
@@ -196,7 +196,7 @@ let test_literal_inside_scope_is_accepted () =
 mod ScopeOkay do
   needs IO.Console
   needs IO.FileRead("/etc/myapp")
-  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     match Authority.must(File.read("/etc/myapp/db.conf")) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
@@ -213,7 +213,7 @@ let test_dotdot_escape_is_rejected () =
 mod ScopeEscape do
   needs IO.Console
   needs IO.FileRead("/etc/myapp")
-  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     match Authority.must(File.read("/etc/myapp/../shadow")) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
@@ -237,7 +237,7 @@ mod ScopeDyn do
       Err(_) -> ""
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     println(load("/anything/at/all"))
     ()
   end
@@ -252,7 +252,7 @@ let test_unscoped_declaration_permits_any_path () =
 mod ScopeUnscoped do
   needs IO.Console
   needs IO.FileRead
-  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     match Authority.must(File.read("/etc/shadow")) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
@@ -267,7 +267,7 @@ let test_scope_union () =
 mod ScopeUnion do
   needs IO.Console
   needs IO.FileRead("/etc/app"), IO.FileRead("/usr/share/app")
-  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     match Authority.must(File.read("/usr/share/app/x")) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
@@ -285,7 +285,7 @@ mod ScopeParent do
   needs IO.Console
   needs IO.FileSystem("/srv")
   needs IO.FileRead
-  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     match Authority.must(File.read("/srv/data/x")) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
@@ -302,7 +302,7 @@ let test_second_path_argument_is_checked () =
 mod ScopeTwoPath do
   needs IO.Console
   needs IO.FileWrite("/var/tmp")
-  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+  fn main() : () needs IO.Console, IO.FileWrite do
     match Authority.must(File.rename("/var/tmp/a", "/etc/passwd")) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
@@ -321,7 +321,7 @@ let csv_open_src path =
 mod ScopeCsv do
   needs IO.Console
   needs IO.FileRead("/srv/data")
-  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+  fn main() : () needs IO.Console, IO.FileRead do
     match csv_open("%s", ",", :simple) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
@@ -367,7 +367,7 @@ let scope_decl_src decl =
 mod ScopeDecl do
   needs IO.Console
   %s
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println("x")
     ()
   end

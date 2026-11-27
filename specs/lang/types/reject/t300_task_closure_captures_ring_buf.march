@@ -8,7 +8,7 @@
 -- (accept/t164).
 mod Main do
   needs IO.Spawn
-  fn main(_s : Cap(IO.Spawn)) : Int do
+  fn main() : Int needs IO.Spawn do
     let rb = RingBuf.make(4)
     let t1 = Authority.must(Task.async(fn () -> RingBuf.drop(RingBuf.push(rb, 1))))
     let t2 = Authority.must(Task.async(fn () -> RingBuf.drop(RingBuf.push(rb, 2))))

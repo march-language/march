@@ -1,6 +1,44 @@
 exit: 1
 -- CAPABILITY --------------- errors/cap_mismatch_3.march
 
+`tidy` takes a `Cap(IO.FileSystem)` parameter, but capability values were retired: a function no longer receives its authority, it uses the current authority, which `main`'s `needs` clause asks for and each operation checks. [cap_param_retired]
+help: remove the parameter and the argument at each call; to state what `tidy` may use, give it a `needs` clause.
+
+9 |   fn tidy(fs : Cap(IO.FileSystem), path : String) : String do
+                   ^^^^^^^^^^^^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+ 9 -   fn tidy(fs : Cap(IO.FileSystem), path : String) : String do
+ 9 +   fn tidy(path : String) : String do
+14 -     let _ = tidy(fr, "/tmp/x")
+14 +     let _ = tidy("/tmp/x")
+
+    run `march --explain cap_param_retired`
+
+
+-- WARNING: CAPABILITY ------ errors/cap_mismatch_3.march
+
+`main` asks for its authority with `Cap` parameters, which are deprecated and will be removed in the next release: a capability value grants nothing since the current authority replaced it. [deprecated_main_cap]
+help: request it with a `needs` clause: `fn main() needs IO.FileRead do`.
+
+13 |   fn main(fr : Cap(IO.FileRead)) do
+                    ^^^^^^^^^^^^^^^^
+
+
+    possible fix (a guess: check it before applying it):
+
+13 -   fn main(fr : Cap(IO.FileRead)) do
+13 +   fn main() do
+13 -   fn main(fr : Cap(IO.FileRead)) do
+13 +   fn main(fr : Cap(IO.FileRead)) needs IO.FileRead do
+
+    run `march --explain deprecated_main_cap`
+
+
+-- CAPABILITY --------------- errors/cap_mismatch_3.march
+
 `tidy` needs file-system access, but `fr` is the file-read capability. [cap_mismatch]
 
 14 |     let _ = tidy(fr, "/tmp/x")
@@ -33,4 +71,5 @@ exit: 1
 
 
 
-after fix: exit 0
+after fix: exit 1
+This string is never closed: I reached the end of the file inside it. [lex_error]

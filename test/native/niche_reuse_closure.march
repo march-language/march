@@ -37,7 +37,7 @@ mod NicheReuseClosure do
     entry(mod_name, "module", mod_name, "", comment_opt)
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     match module_entries("MyMod", Some("First line.\nSecond line.")) do
     JObj(fields) -> Authority.ignore(IO.puts("ok, fields=" ++ String.from_int(List.length(fields))))
     _ -> Authority.ignore(IO.puts("?"))

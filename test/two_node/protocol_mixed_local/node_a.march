@@ -105,7 +105,7 @@ mod ProtocolMixedLocal do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let v2 = Order_Msg.fingerprint()
     -- Version 1's fingerprint, from the table itself: the one Buyer accepts.
     let v1 = match List.find(Order_Msg.compat(), fn row -> match row do (_, r, _) -> r == "Buyer" end) do

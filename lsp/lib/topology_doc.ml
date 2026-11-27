@@ -539,12 +539,19 @@ let definition_at ~path ~line ~utf16_char : Lsp.Types.Location.t option =
     capability, one [Cap(P)] per grant path in declaration order, then the
     role's entry state, returning the role module's [Yield]. Spelled with
     the [Entry] alias, the name a body's signature uses. *)
-let body_type ~proto ~role ~(grants : string list) =
+let body_type ~proto ~role =
   let m = proto ^ "_" ^ role in
-  Printf.sprintf "(%s) -> %s.Yield"
-    (String.concat ", "
-       (("Cap(Session.Live)" :: List.map (fun p -> "Cap(" ^ p ^ ")") grants) @ [ m ^ ".Entry" ]))
-    m
+  Printf.sprintf "(Cap(Session.Live), %s.Entry) -> %s.Yield" m m
+
+(* A role's `role R needs ...` line, as written. Since ocap phase 7b it adds
+   no parameter to the body: it bounds what the body's code reaches. *)
+let grants_of_role (steps : Ast.protocol_step list) (role : string) : string list option =
+  List.find_map
+    (function
+      | Ast.ProtoRoleNeeds (r, caps, _) when r.Ast.txt = role ->
+        Some (List.map (fun (c : Ast.name) -> c.Ast.txt) caps)
+      | _ -> None)
+    steps
 
 let role_hover idx (name : string) : string option =
   match split_role name with
@@ -556,7 +563,7 @@ let role_hover idx (name : string) : string option =
        if not (List.mem role (T.proto_roles def)) then None
        else begin
          let grants =
-           List.assoc_opt role (March_desugar.Desugar_endpoints.grants_of def.Ast.proto_steps)
+           grants_of_role def.Ast.proto_steps role
          in
          let grant =
            match grants with
@@ -565,21 +572,17 @@ let role_hover idx (name : string) : string option =
            | None ->
              Printf.sprintf "No `role %s needs ...` grant in protocol `%s`." role short
          in
-         let grants = Option.value ~default:[] grants in
-         (* step 3: the generated main passes `fn (s, c1..ck, st) ->
-            f(env, s, c1..ck, st)`, so a topology-bound body is the runner's
-            body with the pool's environment in front. *)
-         let bound_params =
-           String.concat "" (List.mapi (fun i _ -> Printf.sprintf ", c%d" (i + 1)) grants)
-         in
+         (* step 3: the generated main passes `fn (s, st) -> f(env, s, st)`,
+            so a topology-bound body is the runner's body with the pool's
+            environment in front. *)
          Some (Printf.sprintf
                  "**`%s`**: role `%s` of protocol `%s`\n\n%s\n\n\
                   Body type (`%s_Run.run_%s`):\n\n```march\n%s\n```\n\n\
                   A `body` bound here takes the pool's environment first \
                   (the hook's return type, `()` without a hook): \
-                  `f(env, s%s, st)`."
+                  `f(env, s, st)`."
                  name role q grant short role
-                 (body_type ~proto:short ~role ~grants) bound_params)
+                 (body_type ~proto:short ~role))
        end)
 
 let hover_at ~path ~line ~utf16_char : Lsp.Types.Hover.t option =

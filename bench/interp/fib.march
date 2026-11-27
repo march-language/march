@@ -7,7 +7,7 @@ mod Fib do
     if n < 2 do n else fib(n - 1) + fib(n - 2) end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println("checksum=" ++ int_to_string(fib(25)))
     ()
   end

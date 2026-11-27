@@ -51,7 +51,7 @@ mod CertRoleDeniedB do
       Thumbs_Render.close(s, Thumbs_Render.send_Msg_Render_Client_1(s, st1, n * 10)))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let pki = Authority.must(Env.require("PKI"))
     Process.set_env("MARCH_NODE_NAME", me())
     Process.set_env("MARCH_NODE_PORT", int_to_string(Authority.must(Env.require_int("MARCH_PORT_B"))))

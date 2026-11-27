@@ -1,6 +1,33 @@
 exit: 1
 -- CAPABILITY ------------------ errors/cap_widen_2.march
 
+`sideways` takes a `Cap(IO.FileRead)` parameter, but capability values were retired: a function no longer receives its authority, it uses the current authority, which `main`'s `needs` clause asks for and each operation checks. [cap_param_retired]
+help: remove the parameter and the argument at each call; to state what `sideways` may use, give it a `needs` clause.
+
+17 |   pfn sideways(r : Cap(IO.FileRead)) : Cap(IO.FileWrite) do
+                        ^^^^^^^^^^^^^^^^
+
+
+    possible fix (a guess: check it before applying it):
+
+17 -   pfn sideways(r : Cap(IO.FileRead)) : Cap(IO.FileWrite) do
+17 +   pfn sideways() : Cap(IO.FileWrite) do
+
+    run `march --explain cap_param_retired`
+
+
+-- CAPABILITY ------------------ errors/cap_widen_2.march
+
+`Cap(IO.FileWrite)` was retired: capability values grant nothing since the current authority replaced them. [cap_param_retired]
+help: remove it; code uses the current authority, which `main`'s `needs` clause asks for and each operation checks.
+
+17 |   pfn sideways(r : Cap(IO.FileRead)) : Cap(IO.FileWrite) do
+                                            ^^^^^^^^^^^^^^^^^
+
+
+
+-- CAPABILITY ------------------ errors/cap_widen_2.march
+
 `Cap(IO.FileRead)` cannot be widened to `Cap(IO.FileWrite)` — `cap_narrow` only attenuates, so the source capability must subsume the target. [cap_widen]
 help: `Cap(IO.FileWrite)` is not below `Cap(IO.FileRead)` in the capability lattice. Receive it from a caller that holds an ancestor of it.
 
@@ -10,3 +37,35 @@ help: `Cap(IO.FileWrite)` is not below `Cap(IO.FileRead)` in the capability latt
     run `march --explain cap_widen`
 
 
+-- CAPABILITY ------------------ errors/cap_widen_2.march
+
+`cap_narrow` was retired with the capability values it narrowed. [cap_narrow_retired]
+help: remove the call; to run code under less authority, use `restrict SCOPE do ... end`.
+
+18 |     cap_narrow(r)
+         ^^^^^^^^^^^^^
+
+
+
+-- WARNING: CAPABILITY --------- errors/cap_widen_2.march
+
+`main` asks for its authority with `Cap` parameters, which are deprecated and will be removed in the next release: a capability value grants nothing since the current authority replaced it. [deprecated_main_cap]
+help: request it with a `needs` clause: `fn main() needs IO do`.
+
+21 |   fn main(cap : Cap(IO)) do
+                     ^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+21 -   fn main(cap : Cap(IO)) do
+21 +   fn main() do
+21 -   fn main(cap : Cap(IO)) do
+21 +   fn main(cap : Cap(IO)) needs IO do
+
+    run `march --explain deprecated_main_cap`
+
+
+
+after fix: exit 1
+`sideways` takes a `Cap(IO.FileRead)` parameter, but capability values were retired: a function no longer receives its authority, it uses the current authority, which `main`'s `needs` clause asks for and each operation checks. [cap_param_retired]

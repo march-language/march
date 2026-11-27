@@ -52,7 +52,7 @@ mod Main do
       Other_B.close(s, Other_B.send_Msg_B_A_1(s, st1, "ok")))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let t1 = Session.in_process()
     let s1 = Authority.must(Session.attach(t1.ops))
     let _ = cons(s1, Stream_Cons.register(s1, 0))

@@ -10,7 +10,7 @@ mod EnqueueNoCodec do
 
   type Ping = { n : Int }
 
-  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
+  fn main() needs IO.Console, IO.NetConnect, IO.Mut do
     let q = NodeQueue.start_local(fn _ -> ())
     let p : Ping = { n: 1 }
     let _ = Node.enqueue(q, GlobalPid.make("b", 1, 1), p, NodeQueue.DropNew)

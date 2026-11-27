@@ -28,7 +28,7 @@ mod Main do
     println("hello, " ++ name)
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     greet("world")
   end
 end
@@ -49,7 +49,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     greet("world")
   end
 end

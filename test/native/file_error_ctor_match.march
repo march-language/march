@@ -31,7 +31,7 @@ mod FileErrorCtorMatch do
     end
   end
 
-  fn main(_cap : Cap(IO)) do
+  fn main() needs IO do
     println(classify(Authority.must(File.read("/nonexistent/zzz"))))
     println(dir_kind(Authority.must(Dir.list("/nonexistent/zzz"))))
   end

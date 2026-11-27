@@ -13,7 +13,7 @@ mod M do
   needs IO.Mut
   needs IO.Process
 
-  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut), _p : Cap(IO.Process)) do
+  fn main() needs IO.Console, IO.Mut, IO.Process do
     let k = Config.key(:config_erased_witness, :value, Config.int())
     Config.put(k, 42)
     match Config.get(k) do

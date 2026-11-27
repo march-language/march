@@ -11,7 +11,7 @@ mod TopologyHookTimeout do
   needs IO.Spawn
   needs IO.Process
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let n = Topology.hook("Quick.start", fn () -> 41 + 1)
     println("Quick.start returned " ++ int_to_string(n))
     let _ = Topology.hook("Stuck.start", fn () -> do

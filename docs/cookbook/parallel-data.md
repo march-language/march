@@ -324,7 +324,7 @@ mod ChunkSum do
       end)
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let v = RRB.from_list([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
     println(float_to_string(parallel_sum(v, 4)))   -- 36.
   end

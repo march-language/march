@@ -8,7 +8,7 @@ mod LeaksADescriptor do
   needs IO.Console
   needs IO.NetConnect
 
-  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect)) do
+  fn main() needs IO.Console, IO.NetConnect do
     match Authority.must(Socket.connect("127.0.0.1", 1)) do
     Ok(s) -> println(int_to_string(Socket.raw_fd(s)))
     Err(e) -> println(Socket.error_message(e))

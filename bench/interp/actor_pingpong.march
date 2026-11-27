@@ -28,7 +28,7 @@ mod PingPong do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let pid = spawn(Counter)
     pump(pid, 20000)
     run_until_idle()

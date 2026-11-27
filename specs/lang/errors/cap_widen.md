@@ -6,6 +6,12 @@ permalink: /docs/errors/cap_widen/
 
 # `cap_widen`: `cap_narrow` was asked to produce a capability its input does not cover
 
+> **Retired with `cap_narrow`** (object capabilities, phase 7b). `Cap(IO.X)` values and
+> `cap_narrow` were retired, so code that could draw this error now draws
+> [`cap_param_retired`](cap_param_retired.md) and `cap_narrow_retired` first. To run code
+> under less authority, use `restrict SCOPE do ... end`. The rest of this page describes
+> the rule as it was.
+
 `cap_narrow(c)` turns a capability into a smaller one: `Cap(IO)` into
 `Cap(IO.Console)`, `Cap(IO.FileSystem)` into `Cap(IO.FileRead)`. The result
 type must be at or below the input in the capability lattice. Asking for a

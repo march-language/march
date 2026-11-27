@@ -10,7 +10,7 @@ permalink: /docs/errors/role_grant_exceeded/
 
 In an `@[endpoints]` protocol, `role R needs IO.X, ...` is that role's grant:
 the body passed to `run_R`, and everything it calls, may use only those
-capabilities, the way `main`'s parameters bound the whole program. This error
+capabilities, the way `main`'s request bounds the whole program. This error
 points at a use outside the grant and, when it can, labels each call from the
 body to it.
 
@@ -29,9 +29,9 @@ mod Main do
     Prod -> Cons : Int
   end
 
-  fn main(c : Cap(IO)) do
-    let _ = Stream_Run.run_Cons(c, "cons", "secret", Stream_Run.addrs_from_env(),
-      fn (s, con, st) ->
+  fn main() needs IO do
+    let _ = Stream_Run.run_Cons("cons", "secret", Stream_Run.addrs_from_env(),
+      fn (s, st) ->
         Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
           Authority.ignore(File.write("/tmp/n", int_to_string(n)))
           Stream_Cons.close(s, st1)))
@@ -45,10 +45,8 @@ The body of role `Cons` writes a file, but `Cons` is granted only
 
 ## The fix
 
-Add the capability to the grant. The body receives one `Cap` per granted
-capability, in the order the grant lists them, between the session capability
-and the state, so widening the grant also adds a parameter to the body (and to
-any function the body passes its capabilities to):
+Add the capability to the grant. The grant adds no parameters (since
+object-capability phase 7b), so widening the grant line is the whole edit:
 
 ```march
 mod Main do
@@ -63,9 +61,9 @@ mod Main do
     Prod -> Cons : Int
   end
 
-  fn main(c : Cap(IO)) do
-    let _ = Stream_Run.run_Cons(c, "cons", "secret", Stream_Run.addrs_from_env(),
-      fn (s, con, fw, st) ->
+  fn main() needs IO do
+    let _ = Stream_Run.run_Cons("cons", "secret", Stream_Run.addrs_from_env(),
+      fn (s, st) ->
         Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
           Authority.ignore(File.write("/tmp/n", int_to_string(n)))
           Stream_Cons.close(s, st1)))

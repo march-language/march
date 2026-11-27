@@ -7,7 +7,7 @@ mod Main do
     on Bump(k : Int) do state.n + k end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let c = spawn(Counter)
     send(c, Bump(1))
   end

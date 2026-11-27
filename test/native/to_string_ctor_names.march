@@ -35,7 +35,7 @@ mod ToStringCtorNames do
   type Holder = Holder(List(Int)) | Tally(Int)
   type Pt = { x : Int, y : Int }
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println("ts=" ++ to_string(Circle(7)))
     println(Circle(7))
     println(Square(0 - 3))

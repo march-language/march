@@ -19,25 +19,22 @@
 -- Read with reject/t153 (widening), reject/t154 (siblings) and reject/t155
 -- (the deferred case). This file alone cannot tell a working subsumption
 -- check from one that permits everything.
+-- Ocap phase 7b retired `Cap(IO.X)` values and `cap_narrow`; the narrowing this
+-- fixture witnesses is now written with `restrict`, which the run time enforces.
 mod ChainedAttenuation do
   needs IO
-
-  -- The middle hop: holds FileSystem, hands out something strictly narrower.
-  pfn reader_from(fs : Cap(IO.FileSystem)) : Cap(IO.FileRead) do
-    cap_narrow(fs)
+  -- The middle hop: runs under FileSystem, hands its callee something
+  -- strictly narrower.
+  pfn reader_from() : () do
+    restrict IO.FileRead do same_level() end
   end
-
-  -- Identity: a capability subsumes ITSELF, so narrowing to the same level is
-  -- legal. `cap_subsumes p p` is true, and a check written with a strict
-  -- ancestor test would wrongly reject this.
-  pfn same_level(r : Cap(IO.FileRead)) : Cap(IO.FileRead) do
-    cap_narrow(r)
+  -- Identity: restricting to the level already in force is legal; the
+  -- intersection of a scope with itself is the scope.
+  pfn same_level() : () do
+    restrict IO.FileRead do () end
   end
-
-  fn main(cap : Cap(IO)) do
-    let fs : Cap(IO.FileSystem) = cap_narrow(cap)
-    let r  = reader_from(fs)
-    let r2 = same_level(r)
+  fn main() needs IO do
+    restrict IO.FileSystem do reader_from() end
     println("attenuation chained two hops below the root")
   end
 end

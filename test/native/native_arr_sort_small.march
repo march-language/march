@@ -49,7 +49,7 @@ mod NativeArrSortSmall do
       match c do (n, p) -> if ok(n, p) do acc + 1 else acc end end)
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let int_ok = score(fn (n, p) ->
       let xs = pattern(p, n)
       NativeArray.to_list_int(NativeArray.sort_int(NativeArray.from_list_int(xs))) == asc(xs))

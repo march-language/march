@@ -33,7 +33,7 @@ mod ClusterQueueLimitB do
           Bulk_Server.close(s, Bulk_Server.send_Msg_Server_Client_2(s, st4, 2)))))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let seed = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A")))
     let cfg = ClusterNode.config("node-b", Authority.must(Env.require_int("MARCH_PORT_B")), "", Cons(seed, Nil), "ql-secret", 1)
     -- SWIM's suspect timeout is raised to 15 s here: this scenario is about

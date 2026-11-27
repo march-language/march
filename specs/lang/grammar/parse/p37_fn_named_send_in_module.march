@@ -14,7 +14,7 @@ mod FnNamedSend do
     fn twice(to : String, body : String) : String do send_twice(to, body) end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(Mailer.send("a", "hi"))
     println(Mailer.twice("b", "yo"))
   end

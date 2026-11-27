@@ -183,7 +183,7 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO), _cap_debug : Cap(Actor.Debug), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Debug, Actor.Introspect do
     let d = Authority.must(Actor.debug())
     let p = spawn(Parent)
     let pi = pid_to_int(p)

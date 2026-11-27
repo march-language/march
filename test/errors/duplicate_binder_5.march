@@ -2,7 +2,7 @@
 mod Main do
   needs IO.Console
   type P = Pair(Int, Int)
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let r = match Pair(5, 6) do
       Pair(x, x) -> x
     end

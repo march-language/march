@@ -98,8 +98,7 @@ mod TlsSigpipeProbe do
     end
   end
 
-  fn main(_c1 : Cap(IO.NetConnect), _c2 : Cap(IO.NetConnect.TLS), _c3 : Cap(IO.NetListen),
-          _c4 : Cap(IO.Process), _c5 : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.NetListen, IO.Process, IO.Console do
     let port = env_int("MARCH_TLS_PORT")
     if env_or("MARCH_TLS_ROLE", "client") == "server" do
       match Authority.must(Tls.server_ctx(Tls.server_config(env_or("MARCH_TLS_CERT", ""), env_or("MARCH_TLS_KEY", "")))) do

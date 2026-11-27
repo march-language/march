@@ -1,7 +1,7 @@
 -- The app of scenario "hcr_role_policy": a topology app (no `main`; it is
 -- generated from the topology the scenario writes) with two pools. `back`
 -- serves Echo.Server, bound to the function Back.serve_one, whose own caps
--- hold the session it is handed (caps=...,Session.Live in the manifest);
+-- hold the session it is handed (caps=Session.Live in the manifest);
 -- `front` asks it for 4 every 150 ms and prints each new answer, until the
 -- stop file exists.
 --
@@ -60,7 +60,7 @@ mod RoleApp do
 
     type Env = { factor : Int }
 
-    fn start(_con : Cap(IO.Console), _node : Cap(ClusterNode.Live)) : Env do
+    fn start(_node : Cap(ClusterNode.Live)) : Env do
       Authority.ignore(println("back: hook ran"))
       { factor: 10 }
     end
@@ -83,7 +83,7 @@ mod RoleApp do
       end
     end
 
-    fn serve_one(env : Env, s : Cap(Session.Live), _con : Cap(IO.Console), _mut : Cap(IO.Mut), st : Echo_Server.Entry) : Echo_Server.Yield do
+    fn serve_one(env : Env, s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
       Echo_Server.recv_Ask(s, st, fn (n, st1) ->
         let m = mark()
         let a = n * env.factor + m * 0 -- ANSWER
@@ -144,20 +144,20 @@ mod RoleApp do
 
     type Env = { started : Bool }
 
-    fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Env do
-      let _ = Task.async(fn () -> run(io, node, 0, 0))
+    fn start(node : Cap(ClusterNode.Live)) : Env do
+      let _ = Task.async(fn () -> run(node, 0, 0))
       { started: true }
     end
 
     -- Ask, print an answer that differs from the last one printed, and go
     -- again, until $ROLE_APP_STOP exists.
-    fn run(io : Cap(IO), node : Cap(ClusterNode.Live), last : Int, hosted_last : Int) : Int do
+    fn run(node : Cap(ClusterNode.Live), last : Int, hosted_last : Int) : Int do
       let stop = Authority.must(Env.get("ROLE_APP_STOP", ""))
       if stop != "" && Authority.must(File.exists(stop)) do
         Authority.ignore(println("front: done"))
         Back.audit(stop) * 0
       else
-        let next = match echo(io, node, 4) do
+        let next = match echo(node, 4) do
           Some(v) ->
             if v != last do
               Authority.ignore(println("front: answer " ++ int_to_string(v)))
@@ -165,14 +165,14 @@ mod RoleApp do
             else last end
           None -> last
         end
-        let hosted_next = match hosted_echo(io, node) do
+        let hosted_next = match hosted_echo(node) do
           Some(v) ->
             if v != hosted_last do Authority.ignore(println("front: hosted answer " ++ int_to_string(v))) else () end
             v
           None -> hosted_last
         end
         sleep_ms(150)
-        run(io, node, next, hosted_next)
+        run(node, next, hosted_next)
       end
     end
 
@@ -185,7 +185,7 @@ mod RoleApp do
           HostedEcho_Client.close(s, st2))
     end
 
-    fn hosted_echo(io : Cap(IO), node : Cap(ClusterNode.Live)) : Option(Int) do
+    fn hosted_echo(node : Cap(ClusterNode.Live)) : Option(Int) do
       let got = Authority.must(Vault.new("front_hosted_echo"))
       match HostedEcho_Run.initiate_Client(node, fn (s, st) -> hosted_client(s, st, got, 3)) do
         Ok(_) -> Vault.get(got, "v")
@@ -193,7 +193,7 @@ mod RoleApp do
       end
     end
 
-    fn echo(io : Cap(IO), node : Cap(ClusterNode.Live), n : Int) : Option(Int) do
+    fn echo(node : Cap(ClusterNode.Live), n : Int) : Option(Int) do
       let got = Authority.must(Vault.new("front_echo"))
       match Echo_Run.initiate_Client(node, fn (s, st) ->
           Echo_Client.recv_Answer(s, Echo_Client.send_Ask(s, st, n), fn (m, st2) ->

@@ -55,7 +55,7 @@ mod NativeArrSortPresorted do
       match c do (n, s) -> if ok(n, s) do acc + 1 else acc end end)
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let int_ok = score(fn (n, s) ->
       let xs = shape(s, n)
       NativeArray.to_list_int(NativeArray.sort_int(NativeArray.from_list_int(xs))) == asc(xs))

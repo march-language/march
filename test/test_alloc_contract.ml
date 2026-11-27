@@ -226,7 +226,7 @@ fn bump_copied(b : Box) : Int do
       first(updated) + old_x
   end
 end
-fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(int_to_string(bump_copied(Box(1, "two"))))) end
+fn main() : Unit needs IO do Authority.ignore(println(int_to_string(bump_copied(Box(1, "two"))))) end
 end|}
 
 let test_reject_live_scrutinee () =
@@ -247,7 +247,7 @@ fn format_row(xs : List(String)) : String do
 end
 @[no_alloc]
 fn render(xs : List(String)) : String do format_row(xs) end
-fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(render(["a", "b"]))) end
+fn main() : Unit needs IO do Authority.ignore(println(render(["a", "b"]))) end
 end|}
 
 let test_reject_transitive_names_callee () =
@@ -258,7 +258,7 @@ let concat_src = {|mod Main do
 needs IO
 @[no_alloc]
 fn greet(s : String) : String do "hi " ++ s end
-fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(greet("x"))) end
+fn main() : Unit needs IO do Authority.ignore(println(greet("x"))) end
 end|}
 
 let test_reject_string_concat () = rejects "concat" concat_src "string concatenation"
@@ -267,7 +267,7 @@ let callptr_src = {|mod Main do
 needs IO
 @[no_alloc]
 fn process(f : Int -> Int, x : Int) : Int do f(x) end
-fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(int_to_string(process(fn y -> y, 1)))) end
+fn main() : Unit needs IO do Authority.ignore(println(int_to_string(process(fn y -> y, 1)))) end
 end|}
 
 let test_reject_callptr_without_assume () =
@@ -386,7 +386,7 @@ fn sum(t : Tree) : Int do
     Node(l, r) -> sum(l) + sum(r)
   end
 end
-fn main(cap : Cap(IO)) : Unit do
+fn main() : Unit needs IO do
   println(int_to_string(sum(inc_leaves(Node(Leaf(1), Leaf(2))))))
   ()
 end
@@ -403,7 +403,7 @@ fn rev_inc(xs : List(Int), acc : List(Int)) : List(Int) do
     Cons(h, t) -> rev_inc(t, Cons(h + 1, acc))
   end
 end
-fn main(cap : Cap(IO)) : Unit do
+fn main() : Unit needs IO do
   println(int_to_string(List.sum_int(rev_inc([1, 2, 3], Nil))))
   ()
 end
@@ -424,7 +424,7 @@ fn inc_all(xs : List(Int)) : List(Int) do
     Cons(h, t) -> Cons(h + 1, inc_all(t))
   end
 end
-fn main(cap : Cap(IO)) : Unit do
+fn main() : Unit needs IO do
   println(int_to_string(List.sum_int(inc_all([1, 2, 3]))))
   ()
 end
@@ -449,7 +449,7 @@ fn pairs(xs : List(Int)) : List((Int, Int)) do
     Cons(h, t) -> Cons((h, h), pairs(t))
   end
 end
-fn main(cap : Cap(IO)) : Unit do
+fn main() : Unit needs IO do
   println(int_to_string(List.length(pairs([1, 2, 3]))))
   ()
 end
@@ -489,7 +489,7 @@ fn score(m : Mode, p : P) : Int do
     end
   end
 end
-fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(int_to_string(score(Fast, P(3, 4))))) end
+fn main() : Unit needs IO do Authority.ignore(println(int_to_string(score(Fast, P(3, 4))))) end
 end|}
 
 let test_accept_scalars_and_nullary_ctors () = accepts "scalars" scalar_src "10\n"
@@ -500,7 +500,7 @@ needs IO
 fn apply_twice(f : Int -> Int, x : Int) : Int do f(f(x)) end
 @[no_alloc]
 fn use_it(x : Int) : Int do apply_twice(fn y -> y + 1, x) end
-fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(int_to_string(use_it(1)))) end
+fn main() : Unit needs IO do Authority.ignore(println(int_to_string(use_it(1)))) end
 end|}
 
 let test_accept_assume_and_its_caller () = accepts "assume" assume_src "3\n"
@@ -514,7 +514,7 @@ fn bump(o : Option(Int)) : Option(Int) do
     None -> None
   end
 end
-fn main(cap : Cap(IO)) : Unit do
+fn main() : Unit needs IO do
   match bump(Some(2)) do
     Some(v) -> Authority.ignore(println(int_to_string(v)))
     None -> Authority.ignore(println("none"))
@@ -535,7 +535,7 @@ fn bump(o : Option(Float)) : Option(Float) do
     None -> None
   end
 end
-fn main(cap : Cap(IO)) : Unit do
+fn main() : Unit needs IO do
   match bump(Some(1.5)) do
     Some(v) -> Authority.ignore(println(float_to_string(v)))
     None -> Authority.ignore(println("none"))
@@ -575,7 +575,7 @@ fn energy(yaw : Float) : Float do
   let v = forward(yaw, 0.25)
   dot(v, v)
 end
-fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(int_to_string(float_round(energy(0.0) *. 1000.0)))) end
+fn main() : Unit needs IO do Authority.ignore(println(int_to_string(float_round(energy(0.0) *. 1000.0)))) end
 end|}
 
 let test_accept_unboxed_aggregate () =
@@ -649,7 +649,7 @@ fn label_len(i : Int) : Int do
     Box(_, s) -> String.byte_size(s)
   end
 end
-fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(int_to_string(label_len(42)))) end
+fn main() : Unit needs IO do Authority.ignore(println(int_to_string(label_len(42)))) end
 end|}
 
 let test_transient_accept_dead_allocation () =
@@ -661,7 +661,7 @@ needs IO
 ptype Box = Box(Int, String)
 @[no_alloc(transient)]
 fn make(i : Int) : Box do Box(i, "x") end
-fn main(cap : Cap(IO)) : Unit do
+fn main() : Unit needs IO do
   match make(1) do Box(n, _) -> Authority.ignore(println(int_to_string(n))) end
 end
 end|}
@@ -682,7 +682,7 @@ fn describe(i : Int) : String do "n=" ++ int_to_string(i) end
 fn width(i : Int) : Int do String.byte_size(describe(i)) end
 @[no_alloc]
 fn width_hard(i : Int) : Int do String.byte_size(describe(i)) end
-fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(int_to_string(width(42)))) end
+fn main() : Unit needs IO do Authority.ignore(println(int_to_string(width(42)))) end
 end|}
 
 let test_transient_accepts_what_no_alloc_rejects () =
@@ -707,7 +707,7 @@ extern "m" : Cap(Ffi) do
 end
 @[no_alloc(transient)]
 fn keep(i : Int) : Int do stash("n=" ++ int_to_string(i)) end
-fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(int_to_string(keep(1)))) end
+fn main() : Unit needs IO do Authority.ignore(println(int_to_string(keep(1)))) end
 end|}
 
 let test_transient_reject_extern () =
@@ -724,7 +724,7 @@ end
 fn inner(i : Int) : Int do stash("n=" ++ int_to_string(i)) end
 @[no_alloc(transient)]
 fn outer(i : Int) : Int do inner(i) + 1 end
-fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(int_to_string(outer(1)))) end
+fn main() : Unit needs IO do Authority.ignore(println(int_to_string(outer(1)))) end
 end|}
 
 let test_transient_reject_transitive () =
@@ -737,7 +737,7 @@ let test_transient_bad_payload_is_parse_error () =
 needs IO
 @[no_alloc(transiant)]
 fn f(i : Int) : Int do i end
-fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(int_to_string(f(1)))) end
+fn main() : Unit needs IO do Authority.ignore(println(int_to_string(f(1)))) end
 end|}
     "`@[no_alloc(transient)]`"
 
@@ -766,7 +766,7 @@ fn bump(_tag : Tagged(DSP, NoAlloc), b : Box) : Box do
     Box(x, y) -> Box(x + 1, y)
   end
 end
-fn main(cap : Cap(IO)) : Unit do Authority.ignore(println("ok")) end
+fn main() : Unit needs IO do Authority.ignore(println("ok")) end
 end|}
 
 let test_policy_accepts_reused_ctor () =
@@ -792,7 +792,7 @@ fn bump(_tag : Tagged(DSP, NoAlloc), b : Box) : Int do
       first(updated) + old_x
   end
 end
-fn main(cap : Cap(IO)) : Unit do Authority.ignore(println("ok")) end
+fn main() : Unit needs IO do Authority.ignore(println("ok")) end
 end|}
 
 let test_policy_still_rejects_plain_alloc () =
@@ -805,7 +805,7 @@ let policy_unreached_src body = Printf.sprintf {|mod Pol do
 needs IO.Console
 type NoPanic = NoPanic
 %s
-fn main(_cap : Cap(IO.Console)) : Unit do Authority.ignore(println("ok")) end
+fn main() : Unit needs IO.Console do Authority.ignore(println("ok")) end
 end|} body
 
 let test_policy_rejects_unreached_nopanic () =
@@ -834,7 +834,7 @@ fn bump(b : Box) : Box do
   end
 end
 fn add(a : Int, b : Int) : Int do a + b end
-fn main(cap : Cap(IO)) : Unit do
+fn main() : Unit needs IO do
   match bump(Box(1, "two")) do
     Box(x, _) -> Authority.ignore(println(int_to_string(x + add(1, 2))))
   end
@@ -1116,7 +1116,7 @@ let unlowerable_src = {|mod WorkerDsl do
   end
   @[no_alloc]
   fn add(a : Int, b : Int) : Int do a + b end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let _spec = worker(Counter)
     println(int_to_string(add(1, 2)))
     ()

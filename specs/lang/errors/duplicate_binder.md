@@ -14,7 +14,7 @@ binding is underlined, and a label points at the first.
 ```march
 mod Main do
   needs IO.Console
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let pick = fn (a, a) -> a
     println(int_to_string(pick(1, 2)))
   end
@@ -33,7 +33,7 @@ Give each binder its own name, or write `_` for a value you don't use:
 ```march
 mod Main do
   needs IO.Console
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let pick = fn (_, b) -> b
     println(int_to_string(pick(1, 2)))
   end

@@ -19,7 +19,7 @@ mod TrmcSharedTailReuse do
 
   pfn sum(xs : List(Int)) : Int do List.fold_left(xs, 0, fn (a, b) -> a + b) end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let shared = List.map(List.range(0, 4), fn i -> i * 5)
     let front = lapp(Cons(1, Cons(2, Nil)), shared)
     let again = lapp(front, Cons(9, Nil))

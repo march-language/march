@@ -1,17 +1,35 @@
 exit: 1
--- HINT: CAPABILITY ------- errors/cap_root_broad_3.march
+-- CAPABILITY ------------- errors/cap_root_broad_3.march
 
-This function takes `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]
+`attack` takes a `Cap(IO)` parameter, but capability values were retired: a function no longer receives its authority, it uses the current authority, which `main`'s `needs` clause asks for and each operation checks. [cap_param_retired]
+help: remove the parameter and the argument at each call; to state what `attack` may use, give it a `needs` clause.
 
 26 |     fn attack(cap : Cap(IO)) : Int do consume(cap_narrow(cap)) end
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                         ^^^^^^^
 
+
+    possible fix (a guess: check it before applying it):
+
+26 -     fn attack(cap : Cap(IO)) : Int do consume(cap_narrow(cap)) end
+26 +     fn attack() : Int do consume(cap_narrow(cap)) end
+
+    run `march --explain cap_param_retired`
 
 
 -- CAPABILITY ------------- errors/cap_root_broad_3.march
 
 `cap_narrow` cannot produce `Cap(Db.P)` — `Cap(Db.P)` is a proof capability, not an IO capability. [cap_narrow_invalid]
 hint: a proof capability may only be minted by a public function of its declaring module via `mint_cap`; cap_narrow only attenuates IO capabilities.
+
+26 |     fn attack(cap : Cap(IO)) : Int do consume(cap_narrow(cap)) end
+                                                   ^^^^^^^^^^^^^^^
+
+
+
+-- CAPABILITY ------------- errors/cap_root_broad_3.march
+
+`cap_narrow` was retired with the capability values it narrowed. [cap_narrow_retired]
+help: remove the call; to run code under less authority, use `restrict SCOPE do ... end`.
 
 26 |     fn attack(cap : Cap(IO)) : Int do consume(cap_narrow(cap)) end
                                                    ^^^^^^^^^^^^^^^

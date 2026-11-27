@@ -67,7 +67,7 @@ mod HostedNodeB do
     end end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-b: up")
     let _ = Vault.new("hosted_holds")
     let pc = spawn(ConsActor)
@@ -77,7 +77,7 @@ mod HostedNodeB do
     let deliver = fn (s, from, msg, ep) ->
       let _ = send(pc, DeliverC(s, from, msg, ep))
       ()
-    match Stream_Run.host_Cons(c, "node-b", "stream-secret", Stream_Run.addrs_from_env(), pc, start, deliver) do
+    match Stream_Run.host_Cons("node-b", "stream-secret", Stream_Run.addrs_from_env(), pc, start, deliver) do
       Ok(_) ->
         println("Cons holds after finish: " ++ int_to_string(holds_after_finish(10000)))
         println("Cons: closed")

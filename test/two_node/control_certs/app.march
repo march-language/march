@@ -11,7 +11,7 @@ mod CtlApp do
   needs Session.Live
   needs ClusterNode.Live
 
-  fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : () do
+  fn start(node : Cap(ClusterNode.Live)) : () do
     let me = Topology.node_name(node)
     let _ = ClusterNode.subscribe(node, fn ev ->
       match ev do

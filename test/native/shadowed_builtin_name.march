@@ -31,7 +31,7 @@ mod ShadowedBuiltinName do
     if a < 1 do b + 10 else int_and(a - 1, b) end
   end
 
-  fn main(cap : Cap(IO)) do
+  fn main() needs IO do
     IO.write(int_to_string(int_mod(17, 5)))
     IO.write(" ")
     IO.write(int_to_string(int_not(5)))

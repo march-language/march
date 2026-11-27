@@ -24,7 +24,7 @@ mod Main do
     end
   end
 
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let t = Node(Leaf, 1, Node(Leaf, 2, Leaf))
     let u = bump(t)
     let a = size(t)

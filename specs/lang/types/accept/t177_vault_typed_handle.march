@@ -6,7 +6,7 @@
 mod M do
   needs IO.Mut
 
-  fn main(_m : Cap(IO.Mut)) : Int do
+  fn main() : Int needs IO.Mut do
     let names = Authority.must(Vault.new("names"))
     Vault.set(names, "a", "alice")
     Vault.set_ttl(names, "b", "bob", 60)

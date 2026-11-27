@@ -51,7 +51,7 @@ mod Test do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     -- String arg
     println(int_to_string(slen("hello")))
     println(int_to_string(slen("")))

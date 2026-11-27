@@ -294,7 +294,7 @@ let hcr_src ?(used = true) ~opaque k =
   needs IO.Console
   %sfn inc(n : Int) : Int do n + %d end
   fn need_big(n : {Int | _ > 1}) : Int do n end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("${%s}")
   end
 end
@@ -869,7 +869,7 @@ end
       end
     end
   end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(B.f(B.Z)))
     ()
   end
@@ -890,7 +890,7 @@ end
       _ -> need1(0)
     end
   end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(f(None)))
     ()
   end
@@ -917,7 +917,7 @@ end
     fn c(x : Tq) : Int do need_ka(x) end
     fn d() : Int do need_ka(Z) end
   end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(B.c(B.Z)))
     ()
   end
@@ -938,7 +938,7 @@ end
       _ -> need1(0)
     end
   end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(f(DownReason.Killed)))
     ()
   end
@@ -976,7 +976,7 @@ let ctor_review3 =
       _ -> need1(n)
     end
   end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(f(mk(), 0)))
     ()
   end
@@ -1003,7 +1003,7 @@ end
       end
     end
   end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(A.f(A.mk(), 0)))
     ()
   end
@@ -1026,7 +1026,7 @@ end
       end
     end
   end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(Membership.f(Alive, 0)))
     ()
   end
@@ -1052,7 +1052,7 @@ end
       _ -> need1(n)
     end
   end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(f(Inc(), 0)))
     ()
   end
@@ -1071,7 +1071,7 @@ end
   fn needi(x : {Int | is_Rz(_)}) : Int do 1 end
   fn d(n : Int) : Int do needi(n) end
   fn e() : Int do need(None) end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(c(None)))
     ()
   end
@@ -1124,7 +1124,7 @@ let ctor_review4 =
   fn need(m : Counter.Msg, n : {Int | is_Zap(m)}) : Int do n end
   fn c(m : Counter.Msg) : Int do need(m, 1) end
   fn d() : Int do need(Inc(), 1) end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(c(Inc())))
     ()
   end
@@ -1147,7 +1147,7 @@ end
   end
   fn need(x : {Counter.Msg | is_Zap(_)}, n : {Int | _ > 0}) : Int do n end
   fn c(m : Counter.Msg) : Int do need(m, 1) end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(c(Inc())))
     ()
   end
@@ -1172,7 +1172,7 @@ end
   fn d(y : Option(Int)) : Int do need(y, 1) end
   fn e() : Int do need(None, 1) end
   fn f() : Int do need(5, 1) end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(c(None)))
     ()
   end
@@ -1188,7 +1188,7 @@ end
   type CancelToken = Tok(Int)
   fn need(m : CancelToken, n : {Int | is_Tok(m)}) : Int do n end
   fn c(t : CancelToken) : Int do need(t, 1) end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     let t = task_cancel_token_new()
     println(int_to_string(c(t)))
     ()
@@ -1219,7 +1219,7 @@ end
       None -> 1
     end
   end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     let t = task_cancel_token_new()
     println(int_to_string(c2(Some(t))))
     ()
@@ -1258,7 +1258,7 @@ end
   fn d(y : Option(Int)) : Int do need(y, 1) end
   fn d2(y : Int) : Int do need(y, 1) end
   fn e() : Int do need(None, 1) end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(c(None)))
     ()
   end
@@ -1276,7 +1276,7 @@ end
   type CancelTokn = Tok(Int)
   fn need(m : CancelTokn, n : {Int | is_Tok(m)}) : Int do n end
   fn c(t : CancelTokn) : Int do need(t, 1) end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     let t = Tok(3)
     println(int_to_string(c(t)))
     ()
@@ -1301,7 +1301,7 @@ end
   fn need(x : {U.Msg | is_Zap(_)}) : Int do 1 end
   fn c(m : U.Msg) : Int do need(m) end
   fn d() : Int do need(U.Zap(1)) end
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(c(U.Zap(2))))
     ()
   end

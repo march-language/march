@@ -94,7 +94,7 @@ mod Main do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     -- Two draws printed verbatim, so a divergence is readable and not just a
     -- checksum delta: seed 1 takes the mode-A branch, seed 3 the mode-B
     -- (boundary) branch, whose lanes are exactly where the old

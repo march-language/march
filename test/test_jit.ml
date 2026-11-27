@@ -640,7 +640,7 @@ let jit_file_fib_src = {|mod JitFileTest do
     if n < 2 do n else fib(n - 1) + fib(n - 2) end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println("checksum=" ++ int_to_string(fib(20)))
     ()
   end
@@ -685,7 +685,7 @@ let jit_file_atoms_src = {|mod JitFileAtoms do
     if b do :left_side else :right_side end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println("bare=" ++ to_string(:zz))
     println("fn=" ++ to_string(pick(true)) ++ "," ++ to_string(pick(false)))
     println("ok=" ++ to_string(:ok))
@@ -739,7 +739,7 @@ let jit_file_actor_src = {|mod JitFileActorTest do
 
   type TotalReq = TotalReq
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let pid = spawn(Counter)
     send(pid, Ping(1))
     send(pid, Ping(1))
@@ -792,7 +792,7 @@ let jit_file_warn_then_panic_src = {|mod JitFileWarnPanic do
     if n < 2 do n else fib(n - 1) + fib(n - 2) end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println("checksum=" ++ int_to_string(fib(10)))
     panic_("boom")
   end
@@ -879,7 +879,7 @@ let test_jit_file_no_main () =
    program the compiler had correctly refused. *)
 let jit_file_unlowerable_src = {|mod Main do
   needs IO.Console
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("before")
     App.stop()
     println("after")
@@ -916,7 +916,7 @@ let test_jit_file_unlowerable_is_a_diagnostic () =
 let jit_file_shadow_entry_src = {|mod JitFileShadowEntry do
   needs IO.Console
 
-  fn main(_cap : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(Json.greet())
   end
 end
@@ -1113,7 +1113,7 @@ pfn build_records(n, acc) do
   end
 end
 
-fn main(_cap_console : Cap(IO.Console)) do
+fn main() needs IO.Console do
   let n = 2000
   let src = string_join(build_records(n, Nil), "")
   let total = run_chunked(src, 0, JsonStream.start_ndjson(), 0)
@@ -1323,7 +1323,7 @@ let test_check_registry_fn_is_typed () =
   let oc = open_out f in
   output_string oc {|mod Main do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(to_string(LazyNicheProbe.first_or(true, "x")))
   end
 end
@@ -1639,7 +1639,7 @@ let test_repl_negative_ints_interp () =
    REPL printer), and matches the interpreter and --compile. *)
 let jit_file_to_string_src = {|mod JitFileToString do
   needs IO.Console
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let xs = NativeArray.to_list_float(NativeArray.from_list_float([3.5, 1.25, 2.0]))
     println(to_string(xs))
     println(to_string([1, 2, 3]))
@@ -1747,7 +1747,7 @@ let option_atom_src = {|mod OptionAtom do
   fn pick(b : Bool) : Option(Atom) do
     if b do Some(:a) else None end
   end
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     match pick(true) do
       Some(x) -> println("matched=" ++ to_string(x == :a))
       None -> println("matched=none")

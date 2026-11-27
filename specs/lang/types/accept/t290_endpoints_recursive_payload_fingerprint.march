@@ -31,5 +31,5 @@ mod Main do
       fn (_t, st1) -> Sync_B.close(s, Sync_B.send_Msg_B_A_1(s, st1, 1)))
   end
 
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

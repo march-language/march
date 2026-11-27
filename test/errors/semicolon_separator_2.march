@@ -1,6 +1,6 @@
 mod Main do
   needs IO.Console
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let x = 1;
     println(int_to_string(x))
   end

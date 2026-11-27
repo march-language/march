@@ -130,14 +130,14 @@ mod CertAuthz do
       Checkout_Client.close(s, st1))
   end
 
-  pfn initiate(io : Cap(IO), c : Cap(ClusterNode.Live)) : String do
+  pfn initiate(c : Cap(ClusterNode.Live)) : String do
     match Checkout_Run.initiate_Client(c, fn (s, st) -> client(s, st)) do
       Ok(_) -> "formed"
       Err(e) -> Checkout_Run.error_message(e)
     end
   end
 
-  pfn open_ledger(io : Cap(IO), c : Cap(ClusterNode.Live), capacity : Int) : String do
+  pfn open_ledger(c : Cap(ClusterNode.Live), capacity : Int) : String do
     match Checkout_Run.offer_Ledger(c, capacity, fn (s, st) -> ledger(s, st)) do
       Ok(_) -> "offered"
       Err(e) -> Checkout_Run.error_message(e)
@@ -150,7 +150,7 @@ mod CertAuthz do
 
   pfn invites(net : Net, id : String) : Int do Vault.get_or(net.meta, "sent SessionAP.Invite to " ++ id, 0) end
 
-  fn main(io : Cap(IO)) do
+  fn main() needs IO do
     Process.set_env("MARCH_SESSION_CONNECT_MS", "3000")
 
     -- SessionAP.authorize, pure.
@@ -165,11 +165,11 @@ mod CertAuthz do
     Vault.set(n1.certs, "b1", cert("b1", ["Thumbs.Render:offer"]))
     let a1 = Authority.must(ClusterNode.attach(fake_ops(n1, "a1", true)))
     let b1 = Authority.must(ClusterNode.attach(fake_ops(n1, "b1", true)))
-    println("1 node-b1 offers Ledger: " ++ open_ledger(io, b1, 4))
+    println("1 node-b1 offers Ledger: " ++ open_ledger(b1, 4))
     -- A compromised node-b binds the offer name itself.
     let forged = spawn(Dummy)
     let _ = ClusterNode.register(b1, ledger_offer_name("b1"), forged)
-    println("1 initiator: " ++ initiate(io, a1))
+    println("1 initiator: " ++ initiate(a1))
     println("1 invitations sent to node-b1: " ++ int_to_string(invites(n1, "b1")))
 
     -- 3: node-a's certificate cannot initiate as Client.
@@ -178,8 +178,8 @@ mod CertAuthz do
     Vault.set(n3.certs, "b3", cert("b3", ["Checkout.Ledger:offer"]))
     let a3 = Authority.must(ClusterNode.attach(fake_ops(n3, "a3", true)))
     let b3 = Authority.must(ClusterNode.attach(fake_ops(n3, "b3", true)))
-    println("3 node-b offers Ledger: " ++ open_ledger(io, b3, 4))
-    println("3 initiator: " ++ initiate(io, a3))
+    println("3 node-b offers Ledger: " ++ open_ledger(b3, 4))
+    println("3 initiator: " ++ initiate(a3))
 
     -- 4: both certified; capacity 0, so an authorized initiator hears "full".
     let n4 = new_net("4")
@@ -187,15 +187,15 @@ mod CertAuthz do
     Vault.set(n4.certs, "b4", cert("b4", ["Checkout.Ledger:offer"]))
     let a4 = Authority.must(ClusterNode.attach(fake_ops(n4, "a4", true)))
     let b4 = Authority.must(ClusterNode.attach(fake_ops(n4, "b4", true)))
-    println("4 node-b offers Ledger: " ++ open_ledger(io, b4, 0))
-    println("4 initiator: " ++ initiate(io, a4))
+    println("4 node-b offers Ledger: " ++ open_ledger(b4, 0))
+    println("4 initiator: " ++ initiate(a4))
 
     -- 5: shared-secret mode: nobody has a certificate and nothing is checked.
     let n5 = new_net("5")
     let a5 = Authority.must(ClusterNode.attach(fake_ops(n5, "a5", false)))
     let b5 = Authority.must(ClusterNode.attach(fake_ops(n5, "b5", false)))
-    println("5 node-b offers Ledger: " ++ open_ledger(io, b5, 0))
-    println("5 initiator: " ++ initiate(io, a5))
+    println("5 node-b offers Ledger: " ++ open_ledger(b5, 0))
+    println("5 initiator: " ++ initiate(a5))
 
     -- 6: node-c (certified, no roles) squats the session's Ledger name; the
     -- session id is predictable (node, creation, counter).
@@ -206,10 +206,10 @@ mod CertAuthz do
     let a6 = Authority.must(ClusterNode.attach(fake_ops(n6, "a6", true)))
     let b6 = Authority.must(ClusterNode.attach(fake_ops(n6, "b6", true)))
     let c6 = Authority.must(ClusterNode.attach(fake_ops(n6, "c6", true)))
-    println("6 node-b offers Ledger: " ++ open_ledger(io, b6, 4))
+    println("6 node-b offers Ledger: " ++ open_ledger(b6, 4))
     let squat = spawn(Dummy)
     let _ = ClusterNode.register(c6, "session:a6.1.1/" ++ int_to_string(Checkout_Msg.role_Ledger()), squat)
-    println("6 initiator: " ++ initiate(io, a6))
+    println("6 initiator: " ++ initiate(a6))
     println("done")
   end
 end

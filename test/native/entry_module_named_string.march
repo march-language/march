@@ -7,7 +7,7 @@ mod String do
 
   fn byte_size(_s : String) : Int do 99 end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(to_string(String.byte_size("abc")))
     println(String.join(["x", "y"], "+"))
     println(to_string(String.last_index_of("a.b.c", ".")))

@@ -65,7 +65,7 @@ mod UdpLoopback do
     string_join(List.map(ps, fn p -> int_to_string(string_byte_length(p))), ",")
   end
 
-  fn main(_cap : Cap(IO)) : () do
+  fn main() : () needs IO do
     let rx = sock("127.0.0.1")
     let tx = sock("127.0.0.1")
     let dst = addr_of(rx)

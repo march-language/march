@@ -26,7 +26,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("-- stop drains what is queued")
     let s = spawn(Sink)
     send(s, Work("a"))

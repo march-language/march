@@ -30,7 +30,7 @@ mod P34ParenStmtAfterLiteral do
     ()
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     discard_int()
     discard_string()
     discard_bool()

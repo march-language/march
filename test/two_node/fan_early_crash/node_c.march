@@ -30,9 +30,9 @@ mod FanEarlyCrashNodeC do
           Fan_C.cancelled(s, cancel)))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-c: up")
-    match Fan_Run.run_C(c, "node-c", "fan-secret", Fan_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
+    match Fan_Run.run_C("node-c", "fan-secret", Fan_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
       Ok(_) -> println("C: closed")
       Err(SessionNode.Cancelled(role, cause)) ->
         println("C: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)

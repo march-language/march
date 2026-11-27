@@ -1,7 +1,7 @@
 mod HcrSmoke do
   needs IO.Console
 
-  fn main(cap : Cap(IO.Console)) : Int do
+  fn main() : Int needs IO.Console do
     println("hcr smoke")
     0
   end

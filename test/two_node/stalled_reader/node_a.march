@@ -38,9 +38,9 @@ mod StalledReaderA do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-a: up")
-    match Stall_Run.run_A(c, "node-a", "stall-secret", Stall_Run.addrs_from_env(), fn (s, st) ->
+    match Stall_Run.run_A("node-a", "stall-secret", Stall_Run.addrs_from_env(), fn (s, st) ->
       Stall_A.recv_Msg_B_A_1(s, st, fn (_go, st1) -> stream(s, st1, 0, 20000, pad(500, "")))) do
       Ok(_) -> println("A: closed")
       Err(e) -> panic(SessionNode.run_error_message(e))

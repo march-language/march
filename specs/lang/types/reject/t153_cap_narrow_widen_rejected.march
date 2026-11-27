@@ -24,7 +24,7 @@ mod Widen do
     cap_narrow(c)
   end
 
-  fn main(cap : Cap(IO)) do
+  fn main() needs IO do
     println("console cannot become file-write")
   end
 end

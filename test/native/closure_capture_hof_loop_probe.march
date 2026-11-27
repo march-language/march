@@ -61,7 +61,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = 5000
     let a = live_allocs()
     flat("map over a capturing lambda", a, leg_map_capture(n, 3, 0))

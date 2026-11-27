@@ -1,6 +1,6 @@
 mod M do
   needs IO.Console
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let p = { x: 1, y: 2 }
     let q = { p with x: 100 }
     println(int_to_string(q.x + q.y))

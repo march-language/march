@@ -42,7 +42,7 @@ mod Main do
   -- Never called; the prune removes it.
   fn unused(n : Int) : Int do n + 1 end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let a : Card = { rank: 3, suit: Hearts }
     let b : Card = { rank: 3, suit: Spades }
     println("tuple <   " ++ bool_to_string((1, "a") < (1, "b")))

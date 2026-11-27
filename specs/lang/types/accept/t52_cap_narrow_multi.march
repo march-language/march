@@ -9,23 +9,19 @@
 -- require, and `main`'s own signature carries no `Cap(X)` at all (so no
 -- Check 3 narrowing HINT fires here, unlike t51 where `boot` itself takes the
 -- root `Cap(IO)`). See core-march-types.md §2.8.8.
+-- Ocap phase 7b retired `Cap(IO.X)` values and `cap_narrow`; the narrowing this
+-- fixture witnesses is now written with `restrict`, which the run time enforces.
 mod App do
   needs IO
-
-  fn log(_cap : Cap(IO.Console), msg : String) : String do
+  fn log(msg : String) : String do
     msg
   end
-
-  fn run_step(_cap : Cap(IO.FileRead), path : String) : String do
+  fn run_step(path : String) : String do
     path
   end
-
-  fn main(cap : Cap(IO)) : String do
-    let root = cap
-    let console_cap = cap_narrow(root)
-    let file_cap = cap_narrow(root)
-    let a = log(console_cap, "starting")
-    let b = run_step(file_cap, "config.toml")
+  fn main() : String needs IO do
+    let a = restrict IO.Console do log("starting") end
+    let b = restrict IO.FileRead do run_step("config.toml") end
     a ++ b
   end
 end

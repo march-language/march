@@ -19,7 +19,7 @@ mod Main do
     if n <= 0 do acc else call2(f, n - 1, acc +. f(1.0, int_to_float(n))) end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(float_to_string(call2(ksnd, 3, 0.0)))
     println(float_to_string(call2(kfst, 3, 0.0)))
     println(float_to_string(call2(fadd, 3, 0.0)))

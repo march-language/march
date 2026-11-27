@@ -7,11 +7,20 @@
 -- the new body walk must run its findings through the SAME lattice
 -- subsumption that signature caps get, not a string comparison. A module
 -- declaring the root capability may narrow to any descendant.
+-- Ocap phase 7b retired `Cap(IO.X)` values, so these positions are now shown
+-- with a proof capability, which a module must still cover with `needs`. (The
+-- lattice-subsumption half no longer applies: proof capabilities are their
+-- own roots.)
 mod CoveredLetAnn do
-  needs IO
-
-  fn main(cap : Cap(IO)) do
-    let w : Cap(IO.FileWrite) = cap_narrow(cap)
-    println("narrowed within a declared ceiling")
+  mod Db do
+    proof cap Ready
+    fn ready() : Cap(Db.Ready) do mint_cap() end
+  end
+  needs IO.Console
+  needs Db.Ready
+  fn main() needs IO.Console do
+    let r : Cap(Db.Ready) = Db.ready()
+    let _ = r
+    println("annotated within a declared capability")
   end
 end

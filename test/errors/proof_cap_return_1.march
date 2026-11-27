@@ -20,6 +20,6 @@ mod Sys do
     needs IO
     needs Db.P
 
-    fn make(cap : Cap(IO)) : Cap(Db.P) do mint_cap(cap) end
+    fn make() : Cap(Db.P) do mint_cap() end
   end
 end

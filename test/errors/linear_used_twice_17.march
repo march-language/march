@@ -7,7 +7,7 @@ mod Main do
   fn sink(s : S1) : Int do match s do S1(e) -> e end end
   type R = { st : S1, n : Int }
   fn eat(r : R) : Int do sink(r.st) end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let r : R = { st: S1(0), n: 0 }
     println(int_to_string(eat(r) + eat(r)))
   end

@@ -138,7 +138,7 @@ mod TaskLifetimeLeakProbe do
       ++ "/" ++ sc(r1 +. r2)
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     println("double=" ++ double_witness())
     println("warm=" ++ int_to_string(unwrap_leg(50, 0) + result_leg(50, 0)))
     let before = live_allocs()

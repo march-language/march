@@ -8,7 +8,7 @@ mod Main do
     System.now_ms() + 1000
   end
 
-  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+  fn main() needs IO.Console, IO.Clock do
     println(later() > 0)
   end
 end

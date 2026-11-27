@@ -30,9 +30,9 @@ mod SlowStartA do
       Slow_A.close(s, st2))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-a: up")
-    match Slow_Run.run_A(c, "node-a", "slow-secret", Slow_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
+    match Slow_Run.run_A("node-a", "slow-secret", Slow_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
       Ok(_) -> println("A: closed")
       Err(e) -> println("A: " ++ SessionNode.run_error_message(e))
     end

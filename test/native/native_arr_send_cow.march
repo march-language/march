@@ -23,7 +23,7 @@ mod Main do
       { seen: NativeArray.sum_int(ys) }
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let xs = NativeArray.from_list_int([1, 2, 3])
     let s = spawn(Summer)
     send(s, AddArr(xs))

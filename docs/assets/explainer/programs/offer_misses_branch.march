@@ -26,5 +26,5 @@ mod Main do
       fn (_v, st2) -> Order_Shop.recv_Booked(s, st2, fn (_b, st3) -> shop(s, st3)))
   end
 
-  fn main(_c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

@@ -100,7 +100,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let log = spawn(Log)
 
     println("-- Actor.stop: on_stop runs after the drain, with the final state")

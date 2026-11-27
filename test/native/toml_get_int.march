@@ -19,7 +19,7 @@ mod TomlGetInt do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(get_int_or("port = 9000", "port"))
     println(get_int_or("port = 7", "port"))
     println(get_int_or("count = 123456", "count"))

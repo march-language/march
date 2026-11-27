@@ -30,7 +30,7 @@
 mod Main do
   needs IO
 
-  fn main(cap: Cap(IO)) do
+  fn main() needs IO do
     let t0 = Authority.must(System.now_ms())
     let secs = Authority.must(System.now())
 

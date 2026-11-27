@@ -35,21 +35,28 @@ let warnings_mentioning ctx needle =
    declaration covers it) and no "declared but never used" warning (the field
    IS the use). Before Check B the field was invisible to both questions, so
    this module would have warned that IO.FileWrite was declared and unused. *)
+(* Since ocap phase 7b a `Cap(IO.X)` value is retired, so the capability in
+   the type is a proof capability, which a module still covers with `needs`
+   (accept/t144 has the same shape). *)
 let test_type_decl_position_counts_as_a_use () =
   let ctx = typecheck {|mod DeclUse do
+  mod Db do
+    proof cap Ready
+    fn ready() : Cap(Db.Ready) do mint_cap() end
+  end
   needs IO.Console
-  needs IO.FileWrite
+  needs Db.Ready
 
-  type Handle = { id : Int, tok : Cap(IO.FileWrite) }
+  type Handle = { id : Int, tok : Cap(Db.Ready) }
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("declared and used")
   end
 end|} in
   Alcotest.(check bool) "covering needs: no error" false (has_errors ctx);
   Alcotest.(check int)
     "capability in a type declaration is a use, so no unused-needs warning"
-    0 (List.length (warnings_mentioning ctx "IO.FileWrite"))
+    0 (List.length (warnings_mentioning ctx "Db.Ready"))
 
 (* Same requirement for an annotation inside a BODY (reject/t151's shape),
    which is a different walk (cap_annots_in_expr, over expressions) from the
@@ -65,18 +72,23 @@ end|} in
    annotation. *)
 let test_body_annotation_position_counts_as_a_use () =
   let ctx = typecheck {|mod AnnUse do
+  mod Db do
+    proof cap Ready
+    fn ready() : Cap(Db.Ready) do mint_cap() end
+  end
   needs IO.Console
-  needs IO.FileWrite
+  needs Db.Ready
 
-  fn main(_cap_console : Cap(IO.Console)) do
-    let take = fn (w : Cap(IO.FileWrite)) -> 1
+  fn main() needs IO.Console do
+    let take = fn (w : Cap(Db.Ready)) -> 1
+    let _ = take
     println("declared and used")
   end
 end|} in
   Alcotest.(check bool) "covering needs: no error" false (has_errors ctx);
   Alcotest.(check int)
     "capability in a body annotation is a use, so no unused-needs warning"
-    0 (List.length (warnings_mentioning ctx "IO.FileWrite"))
+    0 (List.length (warnings_mentioning ctx "Db.Ready"))
 
 (* ── Check A: derive rejection is a DESUGAR-time error ────────────────── *)
 
@@ -94,7 +106,7 @@ let test_derive_json_over_cap_is_a_desugar_error () =
   needs IO.Console
   type Loot = Loot(Cap(IO))
   derive Json for Loot
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("x")
   end
 end|});
@@ -106,7 +118,7 @@ end|});
   needs IO.Console
   type Loot = Loot(Int)
   derive Json for Loot
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("x")
   end
 end|})
@@ -122,6 +134,8 @@ end|})
    gating is entirely compile-time. A property test over that runtime
    function would assert nothing; this pair is what actually holds the
    direction in place. *)
+(* Ocap phase 7b retired `cap_narrow`: the narrowing this pinned as accepted
+   is now refused, and `restrict` is how code runs under less authority. *)
 let test_attenuation_narrowing_is_accepted () =
   let ctx = typecheck {|mod Narrowing do
   needs IO
@@ -131,8 +145,8 @@ let test_attenuation_narrowing_is_accepted () =
     println("root narrows to a descendant")
   end
 end|} in
-  Alcotest.(check bool) "Cap(IO) -> Cap(IO.FileWrite) is accepted"
-    false (has_errors ctx)
+  Alcotest.(check bool) "cap_narrow is retired" true
+    (has_error_with ctx "`cap_narrow` was retired")
 
 let test_attenuation_widening_is_rejected () =
   let ctx = typecheck {|mod Widening do
@@ -143,13 +157,13 @@ let test_attenuation_widening_is_rejected () =
     cap_narrow(c)
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("should not typecheck")
   end
 end|} in
   Alcotest.(check bool)
     "Cap(IO.Console) -> Cap(IO.FileWrite) is rejected: a sibling is not a parent"
-    true (has_errors ctx)
+    true (has_error_with ctx "`Cap(IO.Console)` cannot be widened to `Cap(IO.FileWrite)`")
 
 (* ── R3 under return-type dispatch (2026-09-09) ───────────────────────────
 
@@ -198,7 +212,7 @@ let test_forge_direct_cap_result_with_dispatch_live () =
   type FjdBeta = { fjd_beta : Int }
   derive Json for A
   derive Json for FjdBeta
-  fn main(cap : Cap(IO)) do
+  fn main() needs IO do
     let forged : Cap(IO) = from_json("{}")
     println("forged")
   end
@@ -220,7 +234,7 @@ let test_forge_cap_hidden_in_a_record_field () =
   type A = { a : Int }
   type FjdHolder = { fjd_cap : Cap(IO), fjd_n : Int }
   derive Json for A
-  fn main(cap : Cap(IO)) do
+  fn main() needs IO do
     let h : FjdHolder = from_json("{}")
     println("forged")
   end
@@ -256,7 +270,7 @@ let tests =
       test_body_annotation_position_counts_as_a_use;
     Alcotest.test_case "derive Json over Cap is a desugar error" `Quick
       test_derive_json_over_cap_is_a_desugar_error;
-    Alcotest.test_case "attenuation: narrowing accepted" `Quick
+    Alcotest.test_case "attenuation: narrowing is retired (ocap phase 7b)" `Quick
       test_attenuation_narrowing_is_accepted;
     Alcotest.test_case "attenuation: widening rejected" `Quick
       test_attenuation_widening_is_rejected;

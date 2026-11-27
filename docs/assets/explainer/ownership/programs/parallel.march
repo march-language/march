@@ -34,7 +34,7 @@ mod Own do
     if depth == 0 do Leaf(seed) else Node(build(depth - 1, seed * 2), build(depth - 1, seed * 2 + 1)) end
   end
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Spawn do
     let t = build(4, 1)
     let t2 = inc_parallel(t)
     println(int_to_string(sum_leaves(t2)))

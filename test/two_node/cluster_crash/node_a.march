@@ -25,7 +25,7 @@ mod ClusterCrashA do
     end end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let port = Authority.must(Env.require_int("MARCH_PORT_A"))
     -- A long suspect timeout: this scenario pins the REFUSED path, and a
     -- false suspicion shortly before the kill (a slow ack on a loaded host)

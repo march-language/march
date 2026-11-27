@@ -311,7 +311,7 @@ the pool receives:
 mod Back do
   type Env = { factor : Int }
 
-  fn start(_con : Cap(IO.Console), _node : Cap(ClusterNode.Live)) : Env do
+  fn start(_node : Cap(ClusterNode.Live)) : Env do
     { factor: 10 }
   end
 end
@@ -323,12 +323,13 @@ initiates sessions) in a task or actor. A hook still running after
 
 ### Role bindings
 
-A **function** binding serves one session: the pool's environment, the session, the
-role's granted capabilities, the entry state:
+A **function** binding serves one session: the pool's environment, the session and
+the entry state. The role's grant (`role R needs ...`) is checked at compile time
+against everything the body reaches; the body takes no capability values:
 
 ```march
 -- protocol Echo do  role Server needs IO.Console  ...  end
-fn serve_one(env : Env, s : Cap(Session.Live), con : Cap(IO.Console),
+fn serve_one(env : Env, s : Cap(Session.Live),
              st : Echo_Server.Entry) : Echo_Server.Yield do ... end
 ```
 
@@ -340,7 +341,7 @@ each session to it:
 actor CounterActor do
   state { total : Int, sessions : LinearMap(String, Count_Counter.Parked_Counter) }
   init(env : Env) { total: 0, sessions: LinearMap.empty_string() }
-  on Start(sid : String, s : Cap(Session.Live)) do ... end   -- plus the role's granted caps
+  on Start(sid : String, s : Cap(Session.Live)) do ... end
   on Deliver(sid : String, s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do ... end
   on Cancel(sid : String, s : Cap(Session.Live), role : Int, cause : String, ep : Int) do ... end
 end

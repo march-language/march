@@ -23,7 +23,7 @@ let compiler_exe =
 let src = {|mod ReportBypassProbe do
   needs IO.Console
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let xs = [1, 2, 3]
     println(int_to_string(List.length(xs)))
     ()

@@ -83,7 +83,8 @@ let entry_src =
   {|
 mod PkgEntry do
   needs IO.Console
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  needs IO.FileRead
+  fn main() : () needs IO.Console, IO.FileRead do
     if PkgHelper.fetch("/nonexistent/cap_pkg") do
       println("y")
     else

@@ -41,7 +41,7 @@ mod ClusterJoinA do
     end end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let port = port_of(me())
     let cfg = ClusterNode.config(me(), port, "", Nil, "join-secret", 1)
     match ClusterNode.start(cfg) do

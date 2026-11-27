@@ -27,7 +27,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
+  fn main() needs IO.Console, IO.NetConnect, IO.Mut do
     ()
   end
 end
@@ -53,7 +53,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
+  fn main() needs IO.Console, IO.NetConnect, IO.Mut do
     ()
   end
 end

@@ -25,7 +25,7 @@ fn call_with_list(callback) do
   callback(Cons("a", Cons("b", Nil)))
 end
 
-fn main(_cap : Cap(IO.Console)) do
+fn main() needs IO.Console do
   show_it(Cons("a", Cons("b", Nil)))
   println("")
   call_with_list(fn x -> show_it(x))

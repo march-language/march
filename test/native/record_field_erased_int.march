@@ -31,7 +31,7 @@ pfn describe(r) do
   r.name ++ " odd=" ++ int_to_string(r.odd) ++ " even=" ++ int_to_string(r.even)
 end
 
-fn main(_cap_console : Cap(IO.Console)) : Unit do
+fn main() : Unit needs IO.Console do
   let rows = [{ name: "a", odd: 35, even: 32 },
               { name: "b", odd: 51, even: 54 }]
   List.each(rows, fn r -> println("direct " ++ describe(r)))

@@ -25,8 +25,8 @@ mod SetupTimeoutC do
         Tri_C.close(s, Tri_C.send_Msg_C_A_1(s, st2, a + b == 3))))
   end
 
-  fn main(c : Cap(IO)) do
-    match Tri_Run.run_C(c, "node-c", "tri-secret", Tri_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
+  fn main() needs IO do
+    match Tri_Run.run_C("node-c", "tri-secret", Tri_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
       Ok(_) -> Authority.ignore(println("C: closed"))
       Err(SessionNode.Connect(role, _)) ->
         Authority.ignore(println("C: could not connect to role " ++ int_to_string(role)))

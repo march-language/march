@@ -11,7 +11,7 @@ mod NoFFIService do
   cap no_extern
   needs IO.Network
 
-  fn ping(_cap : Cap(IO.Network), host : String) : Int do
+  fn ping(host : String) : Int do
     string_length(host)
   end
 end

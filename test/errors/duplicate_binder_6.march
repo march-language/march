@@ -1,7 +1,7 @@
 -- EXPECT-ERROR: `b` is bound twice
 mod Main do
   needs IO.Console
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let (b, b) = (3, 4)
     println(int_to_string(b))
   end

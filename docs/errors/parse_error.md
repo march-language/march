@@ -19,7 +19,7 @@ went wrong.)
 ```march
 mod Main
   needs IO.Console
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("hello")
   end
 end
@@ -33,7 +33,7 @@ is `mod Name do`, and the `do` was missing.
 ```march
 mod Main do
   needs IO.Console
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("hello")
   end
 end

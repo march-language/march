@@ -14,7 +14,7 @@ mod QualCtorPat do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(int_to_string(extract(A(7))))
     println(int_to_string(extract(B(9))))
     ()

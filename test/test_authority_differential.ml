@@ -226,7 +226,7 @@ let program () =
     Err(e) -> Authority.ignore(println("parse error: " ++ e))
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
 %s
   end
 end
@@ -717,7 +717,7 @@ let cwd_src = {|mod CwdFixture do
     Err(_) -> "refused"
     end
   end
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     let here = process_cwd()
     let r = Authority.enter_fn(Authority.frame_layer("g", "IO.FileRead(\"" ++ here ++ "\")"))
     let a = verdict(Authority.check("IO.FileRead", "x/y"))
@@ -756,7 +756,7 @@ let gone_src = {|mod GoneFixture do
     Err(_) -> "refused"
     end
   end
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     let r = Authority.enter_fn(Authority.frame_layer("g", "IO.FileRead(\"/\")"))
     let a = verdict(Authority.check("IO.FileRead", "srv/x"))
     let b = verdict(Authority.check("IO.FileRead", "/srv/x"))

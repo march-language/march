@@ -198,7 +198,7 @@ mod NativeArrSortNarrow do
       if acc == "" do s else acc ++ " " ++ s end)
   end
 
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println("i32 sorted: " ++ int_to_string(score_i32(sorted_l)))
     println("i32 reversed: " ++ int_to_string(score_i32(reversed_l)))
     println("i32 equal: " ++ int_to_string(score_i32(equal_l)))

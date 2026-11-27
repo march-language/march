@@ -16,7 +16,7 @@ mod FileCloseFlushError do
     if n <= 0 do acc else xs(n - 1, acc ++ "x") end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     let h = match Authority.must(File.open_write("file_close_flush_error.tmp", File.Truncate)) do
       Ok(h) -> h
       Err(_) -> panic("open_write failed")

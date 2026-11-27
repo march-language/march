@@ -26,26 +26,26 @@ mod SessionChurnA do
   end
 
   -- (finished, failed) over sessions [i, stop).
-  pfn cluster_runs(c : Cap(IO), h : Cap(ClusterNode.Live), i : Int, stop : Int, ok : Int, bad : Int) : (Int, Int) do
+  pfn cluster_runs(h : Cap(ClusterNode.Live), i : Int, stop : Int, ok : Int, bad : Int) : (Int, Int) do
     if i >= stop do (ok, bad) else
       match Echo_Run.cluster_A(h, "churn" ++ int_to_string(i), fn (s, st) -> role_a(s, st, i)) do
-        Ok(_) -> cluster_runs(c, h, i + 1, stop, ok + 1, bad)
+        Ok(_) -> cluster_runs(h, i + 1, stop, ok + 1, bad)
         Err(e) ->
           -- Only every third session is meant to fail (B leaves it): say why
           -- any other did (stderr, beside the logged split).
           if i % 3 != 2 do Authority.ignore(IO.warn("A: cluster session " ++ int_to_string(i) ++ " failed: " ++ Echo_Run.error_message(e))) else () end
-          cluster_runs(c, h, i + 1, stop, ok, bad + 1)
+          cluster_runs(h, i + 1, stop, ok, bad + 1)
       end
     end
   end
 
-  pfn direct_runs(c : Cap(IO), i : Int, stop : Int, ok : Int) : Int do
+  pfn direct_runs(i : Int, stop : Int, ok : Int) : Int do
     if i >= stop do ok else
-      match Echo_Run.run_A(c, "node-a", "churn-secret", Echo_Run.addrs_from_env(), fn (s, st) -> role_a(s, st, i)) do
-        Ok(_) -> direct_runs(c, i + 1, stop, ok + 1)
+      match Echo_Run.run_A("node-a", "churn-secret", Echo_Run.addrs_from_env(), fn (s, st) -> role_a(s, st, i)) do
+        Ok(_) -> direct_runs(i + 1, stop, ok + 1)
         Err(e) ->
           Authority.ignore(IO.warn("A: direct session " ++ int_to_string(i) ++ ": " ++ Echo_Run.error_message(e)))
-          direct_runs(c, i + 1, stop, ok)
+          direct_runs(i + 1, stop, ok)
       end
     end
   end
@@ -56,7 +56,7 @@ mod SessionChurnA do
     ()
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     -- The default SWIM timeouts, except under AddressSanitizer, where
     -- scenario.sh sets CHURN_SUSPECT_MS: see there.
     let base = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "churn-secret", 1)
@@ -68,10 +68,10 @@ mod SessionChurnA do
         Authority.ignore(println("node-a: up"))
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: never joined") end
         let n = 60
-        let _ = cluster_runs(c, h, 0, 6, 0, 0)
+        let _ = cluster_runs(h, 0, 6, 0, 0)
         let t0 = Vault.live_tables()
         let a0 = live_allocs()
-        match cluster_runs(c, h, 6, 6 + n, 0, 0) do
+        match cluster_runs(h, 6, 6 + n, 0, 0) do
           (ok, bad) ->
             -- B leaves 20 of the 60; under a slow (sanitizer) build an
             -- occasional clean session also ends cancelled, so the exact
@@ -81,10 +81,10 @@ mod SessionChurnA do
         end
         report("cluster", Vault.live_tables() - t0, live_allocs() - a0, n)
         let m = 20
-        let _ = direct_runs(c, 0, 3, 0)
+        let _ = direct_runs(0, 3, 0)
         let t1 = Vault.live_tables()
         let a1 = live_allocs()
-        println("A: direct sessions finished " ++ int_to_string(direct_runs(c, 3, 3 + m, 0)))
+        println("A: direct sessions finished " ++ int_to_string(direct_runs(3, 3 + m, 0)))
         report("direct", Vault.live_tables() - t1, live_allocs() - a1, m)
         ClusterNode.stop(h)
     end

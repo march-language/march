@@ -23,7 +23,7 @@ alloc List.Cons($t3, $t11) in
 alloc V.A($t12)
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let my_id : { name : String, node_id : String } = let $t1 : String = ++("node-", "b") in
 let $t2 : String = ++("pk-", "b") in
 { name = $t1, node_id = $t2 } in

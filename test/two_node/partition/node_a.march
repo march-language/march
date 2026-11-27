@@ -202,7 +202,7 @@ mod TwoNodePartitionA do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
+  fn main() needs IO.Console, IO.NetConnect, IO.Process, IO.Clock do
     let port = Authority.must(Env.require_int("MARCH_PEER_PORT"))
     let fd = match connect_with_retry("127.0.0.1", port, 100) do
       Ok(fd) -> fd

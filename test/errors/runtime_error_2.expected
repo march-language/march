@@ -5,7 +5,7 @@ The program stopped with a run-time error: division by zero [runtime_error]
 
     It was reached through these functions, innermost first:
 
-10 |   fn main(c : Cap(IO.Console)) do
+10 |   fn main() needs IO.Console do
 
     Each line is where that function starts: a compiled program does not record
     the line of each call, and leaves out functions the optimiser merged into

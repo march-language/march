@@ -16,7 +16,7 @@ mod FileRefused do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _fs : Cap(IO.FileSystem)) do
+  fn main() needs IO.Console, IO.FileSystem do
     println(verdict(File.read("/etc/hosts")))
     println(verdict(File.exists("/etc/hosts")))
     println(verdict(File.write("/tmp/march_conf_x", "x")))

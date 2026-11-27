@@ -165,7 +165,7 @@ mod ActorMonitorDownReason do
     end
   end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let watcher = spawn(Watcher)
     let boss = spawn(Boss)
     let crashed = Authority.must(Actor.pid_from_int(child_int(boss, "crashed")))

@@ -394,7 +394,7 @@ fn area(s : Shape) : Float do
   end
 end
 
-fn main(_cap_console : Cap(IO.Console)) : Unit do
+fn main() : Unit needs IO.Console do
   let s = Circle(5.0)
   let a = area(s)
   print(a)

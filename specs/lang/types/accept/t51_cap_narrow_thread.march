@@ -11,15 +11,16 @@
 -- (compiles to `null`/`VUnit`), so this narrowing has no runtime effect --
 -- it exists purely so the type system can express least-privilege threading.
 -- See core-march-types.md §2.8.8.
+-- Ocap phase 7b retired `Cap(IO.X)` values and `cap_narrow`; the narrowing this
+-- fixture witnesses is now written with `restrict`, which the run time enforces.
 mod Server do
   needs IO
-
-  fn listen(_cap : Cap(IO.Network), port : Int) : Int do
+  fn listen(port : Int) : Int do
     port
   end
-
-  fn boot(root : Cap(IO)) : Int do
-    let net_cap = cap_narrow(root)
-    listen(net_cap, 8080)
+  fn boot() : Int do
+    restrict IO.Network do
+      listen(8080)
+    end
   end
 end

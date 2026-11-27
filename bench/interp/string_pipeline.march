@@ -14,7 +14,7 @@ mod StringPipeline do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let xs = build(1, 10000, Nil)
     let ys = List.map(xs, double_str)
     let joined = string_join(ys, ",")

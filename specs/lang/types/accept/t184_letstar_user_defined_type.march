@@ -34,7 +34,7 @@ mod Main do
     Box.Box(y * 10)
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     match chain() do
       Box.Box(v) -> Authority.ignore(println(int_to_string(v)))
     end

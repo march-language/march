@@ -36,7 +36,7 @@ mod ShadowedNegateNot do
     a + b + 1000
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let y = string_length("q") - 95
     println(int_to_string(-y))
     println(int_to_string(negate(y)))

@@ -4,7 +4,7 @@
 mod Main do
   needs IO.Console
   needs IO.Spawn
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let arr = NativeArray.from_list_int([10, 20, 30, 40, 50, 60, 70, 80])
     let doubled = Parallel.pmap(RRB.range(0, 8), fn i -> NativeArray.get_int(arr, i) * 2)
     println(String.join(List.map(RRB.to_list(doubled), fn x -> int_to_string(x)), ","))

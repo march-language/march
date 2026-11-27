@@ -260,7 +260,7 @@ mod SocketTimeoutProbe do
     end
   end
 
-  fn main(_c1 : Cap(IO.NetConnect), _c2 : Cap(IO.Process), _c3 : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Process, IO.Console do
     let silent = port_from_env("MARCH_TEST_SILENT_PORT")
     let live   = port_from_env("MARCH_TEST_LIVE_PORT")
     if silent == 0 do
@@ -299,8 +299,7 @@ mod TlsTimeoutProbe do
     end
   end
 
-  fn main(_c1 : Cap(IO.NetConnect), _c2 : Cap(IO.NetConnect.TLS),
-          _c3 : Cap(IO.Process), _c4 : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Process, IO.Console do
     let port = port_from_env("MARCH_TEST_SILENT_PORT")
     match Authority.must(Socket.connect("127.0.0.1", port)) do
     Err(e) -> Authority.ignore(println("C FAIL connect " ++ Socket.error_message(e)))
@@ -348,8 +347,7 @@ mod TlsReadTimeoutProbe do
     end
   end
 
-  fn main(_c1 : Cap(IO.NetConnect), _c2 : Cap(IO.NetConnect.TLS),
-          _c3 : Cap(IO.Process), _c4 : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Process, IO.Console do
     let port = port_from_env("MARCH_TEST_TLS_PORT")
     match Authority.must(Socket.connect("127.0.0.1", port)) do
     Err(e) -> Authority.ignore(println("E FAIL connect " ++ Socket.error_message(e)))

@@ -71,9 +71,9 @@ const CASES = [
     output: "", error: null },
   { input: "depth(5000)",
     output: "5000\n", error: null },
-  // A main that declares its capability (the only form native March accepts
-  // for a main that does IO) gets an erased () per parameter, as natively.
-  { input: "fn main(io : Cap(IO)) do println(\"capped main\") end",
+  // A main that asks for its authority with a `needs` clause (ocap phase 7b;
+  // the `Cap(IO)` parameter form is deprecated) runs as natively.
+  { input: "fn main() needs IO do println(\"capped main\") end",
     output: "capped main\n", error: null },
   { input: "let = 1",
     output: "", error: "unexpected equals sign — did you mean: let name = expr\nlet = 1\n    ^" },
@@ -196,14 +196,17 @@ else if (!out.js || errs.length) { failures++; console.error(`FAIL marchCompileT
 
 // marchCheck, against the native `march --check` output docs/error-messages.md pins
 // (scripts/gen-error-tour.py). The header line names the file, which differs, and its
-// dashes pad that name to a fixed width; both are normalised away.
+// dashes pad that name to a fixed width; both are normalised away, as is the file name
+// inside a message (`file.march:6`).
 let checkCases = 0;
 if (typeof comp.marchCheck !== 'function') { failures++; console.error('FAIL march_compile.js does not export marchCheck'); }
 else {
   const docs = path.join(__dirname, '..', 'docs');
   const page = fs.readFileSync(path.join(docs, 'error-messages.md'), 'utf8');
   const include = fs.readFileSync(path.join(docs, '_includes', 'error-playground.html'), 'utf8');
-  const header = s => s.replace(/^(-- .*?) -+ \S+\.march$/gm, '$1 --- FILE').replace(/\s+$/, '');
+  // A message may name the file too (`the restrict at wrong-capability.march:6`).
+  const header = s => s.replace(/^(-- .*?) -+ \S+\.march$/gm, '$1 --- FILE')
+                       .replace(/\b[\w-]+\.march:(\d+)/g, 'FILE:$1').replace(/\s+$/, '');
   for (const [, name] of include.matchAll(/<option value="([\w-]+)"/g)) {
     checkCases++;
     const m = page.match(new RegExp(`<!-- error-tour: ${name} -->\\n[\\s\\S]*?\`\`\`text\\n([\\s\\S]*?)\`\`\`\\n<!-- /error-tour -->`));
@@ -242,7 +245,7 @@ function lemmaProgram(mode) { // 'lemma' | 'none' | 'plain' (boom not a lemma)
     keep ? '    assert cat(xs, xs) == xs' : '',
     keep ? '    ()' : '',
     keep ? '  end' : '',
-    '  fn main(_cap : Cap(IO.Console)) do',
+    '  fn main() needs IO.Console do',
     '    let xs = Cons(1, Cons(2, Nil))',
     keep ? '    boom(Cons(1, Nil))' : '',
     '    println(int_to_string(List.length(cat(xs, Nil))))',
@@ -271,7 +274,7 @@ function compileAndRun(src) {
 function replRun(src) {
   const body = src.split('\n').filter(l => !/^(mod Main do|end|  needs IO\.Console)$/.test(l))
                   .map(l => l.replace(/^  /, '')).join('\n')
-                  .replace('fn main(_cap : Cap(IO.Console))', 'fn main()');
+                  .replace('fn main() needs IO.Console', 'fn main()');
   repl.reset();
   const r = repl.run(body);
   return { ok: r.error === null, stdout: r.output, error: r.error };

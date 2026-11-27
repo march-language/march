@@ -64,7 +64,7 @@ mod RemoteDispatch do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let c = spawn(Counter)
     let hit : Msgs.Hit = { n: 5 }
     let note : Note = { text: "hello" }

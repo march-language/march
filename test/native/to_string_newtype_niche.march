@@ -31,7 +31,7 @@ mod Main do
   type Rec = { m : Meters, n : MaybeName }
   type Tree = Leaf | Node(Tree, Meters, Tree)
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     -- top level, newtypes
     println(to_string(Meters(7)))
     println(to_string(Name("bob")))

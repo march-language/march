@@ -76,7 +76,7 @@ mod Main do
     end
   end
 
-  fn main(_io : Cap(IO)) do
+  fn main() needs IO do
     let pong = spawn(Echo)
     let ping = spawn(PingA)
     let _r1 = Actor.register(pong, "pong")

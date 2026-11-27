@@ -35,8 +35,8 @@ let decl_ok = ok "cap declares a dictionary type" {|mod Session do
   type Ops = { tick : (Int) -> Int }
   proof cap Live with Ops
   needs IO
-  fn boot(c : Cap(IO)) : Cap(Session.Live) do
-    mint_cap(c)
+  fn boot() : Cap(Session.Live) do
+    mint_cap()
   end
 end|}
 
@@ -55,8 +55,8 @@ let impl_ok = ok "cap_impl in a public fn of the declaring module" {|mod Session
   type Ops = { tick : (Int) -> Int }
   proof cap Live with Ops
   needs IO
-  fn boot(c : Cap(IO)) : Cap(Session.Live) do
-    cap_impl(mint_cap(c), { tick: fn n -> n + 1 })
+  fn boot() : Cap(Session.Live) do
+    cap_impl(mint_cap(), { tick: fn n -> n + 1 })
   end
 end|}
 
@@ -64,8 +64,8 @@ let impl_pfn = bad "cap_impl in a private fn is rejected" {|mod Session do
   type Ops = { tick : (Int) -> Int }
   proof cap Live with Ops
   needs IO
-  pfn boot(c : Cap(IO)) : Cap(Session.Live) do
-    cap_impl(mint_cap(c), { tick: fn n -> n + 1 })
+  pfn boot() : Cap(Session.Live) do
+    cap_impl(mint_cap(), { tick: fn n -> n + 1 })
   end
 end|}
 
@@ -87,29 +87,35 @@ let impl_wrong_dict = bad "cap_impl with the wrong dictionary type is rejected" 
   type Other = { blah : Int }
   proof cap Live with Ops
   needs IO
-  fn boot(c : Cap(IO)) : Cap(Session.Live) do
-    cap_impl(mint_cap(c), { blah: 1 })
+  fn boot() : Cap(Session.Live) do
+    cap_impl(mint_cap(), { blah: 1 })
   end
 end|}
 
 let impl_no_dict_declared = bad "cap_impl on a cap with no `with` clause is rejected" {|mod Session do
   proof cap Live
   needs IO
-  fn boot(c : Cap(IO)) : Cap(Session.Live) do
-    cap_impl(mint_cap(c), { tick: 1 })
+  fn boot() : Cap(Session.Live) do
+    cap_impl(mint_cap(), { tick: 1 })
   end
 end|}
 
 (* An IO cap has no declaring module, so the declaring-module rule has nothing
    to bind to.  Outside a --test build this must be refused outright; the
    test-build admission is a separate, build-mode-gated path. *)
-let impl_io_cap = bad "cap_impl on an IO cap is rejected in a normal build" {|mod App do
+(* The `Cap(IO.Console)` parameter is itself retired (ocap phase 7b), so
+   "some error" would hold without the check this pins: assert its message. *)
+let impl_io_cap =
+  Alcotest.test_case "cap_impl on an IO cap is rejected in a normal build" `Quick (fun () ->
+      let ctx = typecheck {|mod App do
   needs IO.Console
   type Ops = { write : (String) -> () }
   fn boot(c : Cap(IO.Console)) : Cap(IO.Console) do
     cap_impl(c, { write: fn s -> println(s) })
   end
-end|}
+end|} in
+      Alcotest.(check bool) "an IO capability has no dictionary" true
+        (has_error_with ctx "an IO capability has no dictionary to attach"))
 
 (* Same forge vector [check_mint_cap_sites] rejects: a generalized let-bound
    lambda whose result cap never gets pinned is a supplier polymorphic in the
@@ -118,8 +124,8 @@ let impl_unpinned = bad "cap_impl with an unpinned (generalized) result is rejec
   type Ops = { tick : (Int) -> Int }
   proof cap Live with Ops
   needs IO
-  fn boot(c : Cap(IO)) do
-    let f = fn _ -> cap_impl(mint_cap(c), { tick: fn n -> n + 1 })
+  fn boot() do
+    let f = fn _ -> cap_impl(mint_cap(), { tick: fn n -> n + 1 })
     f
   end
 end|}
@@ -173,8 +179,8 @@ let two_mods_src = {|mod Top do
     type Ops = { tick : (Int) -> Int }
     proof cap Live with Ops
     needs IO
-    fn boot(c : Cap(IO)) : Cap(Alpha.Live) do
-      cap_impl(mint_cap(c), { tick: fn n -> n + 1 })
+    fn boot() : Cap(Alpha.Live) do
+      cap_impl(mint_cap(), { tick: fn n -> n + 1 })
     end
     fn run(c : Cap(Alpha.Live), n : Int) : Int do
       match cap_dict(c) do
@@ -187,8 +193,8 @@ let two_mods_src = {|mod Top do
     type Ops = { name : (Int) -> String }
     proof cap Live with Ops
     needs IO
-    fn boot(c : Cap(IO)) : Cap(Beta.Live) do
-      cap_impl(mint_cap(c), { name: fn n -> int_to_string(n) })
+    fn boot() : Cap(Beta.Live) do
+      cap_impl(mint_cap(), { name: fn n -> int_to_string(n) })
     end
     fn run(c : Cap(Beta.Live), n : Int) : String do
       match cap_dict(c) do
@@ -226,8 +232,8 @@ let two_mods_wrong_dict = bad "a same-named dictionary from the other module is 
     type Ops = { tick : (Int) -> Int }
     proof cap Live with Ops
     needs IO
-    fn boot(c : Cap(IO)) : Cap(Alpha.Live) do
-      cap_impl(mint_cap(c), { name: fn n -> int_to_string(n) })
+    fn boot() : Cap(Alpha.Live) do
+      cap_impl(mint_cap(), { name: fn n -> int_to_string(n) })
     end
   end
   mod Beta do
@@ -238,15 +244,20 @@ end|}
 
 (* ── attenuation propagates the dictionary, but cannot attach one ─────── *)
 
-let narrow_keeps_dict_type = ok "cap_narrow of a dictionaried cap still reads its dictionary" {|mod App do
+(* Ocap phase 7b retired `cap_narrow` with the IO capability values it
+   narrowed: the attenuation this case once typed is now refused. *)
+let narrow_keeps_dict_type =
+  Alcotest.test_case "cap_narrow is retired (ocap phase 7b)" `Quick (fun () ->
+      let ctx = typecheck {|mod App do
   needs IO
-  type Ops = { write : (String) -> () }
   fn go(c : Cap(IO)) : Int do
     let n = cap_narrow(c)
     consume(n)
   end
   fn consume(_c : Cap(IO.Console)) : Int do 1 end
-end|}
+end|} in
+      Alcotest.(check bool) "cap_narrow_retired" true (has_error_with ctx "`cap_narrow` was retired");
+      Alcotest.(check bool) "cap_param_retired" true (has_error_with ctx "takes a `Cap(IO)` parameter"))
 
 (* Under --test the gate now OPENS: an IO capability's dictionary type is
    derived from the compiler's own builtin tables ([Io_ops_gen]), so `cap_impl`
@@ -269,7 +280,8 @@ let impl_io_cap_test_build =
   end
 end|})
       in
-      Alcotest.(check bool) "refused under --test" true (has_errors ctx))
+      Alcotest.(check bool) "refused under --test" true
+        (has_error_with ctx "an IO capability has no dictionary to attach"))
 
 (* ── runtime: the dictionary actually dispatches ──────────────────────── *)
 
@@ -283,14 +295,14 @@ let dispatch_src = {|mod Session do
   needs IO
   type Ops = { tick : (Int) -> Int }
   proof cap Live with Ops
-  fn plain(c : Cap(IO)) : Cap(Session.Live) do
-    mint_cap(c)
+  fn plain() : Cap(Session.Live) do
+    mint_cap()
   end
-  fn with_add(c : Cap(IO), k : Int) : Cap(Session.Live) do
-    cap_impl(mint_cap(c), { tick: fn n -> n + k })
+  fn with_add(k : Int) : Cap(Session.Live) do
+    cap_impl(mint_cap(), { tick: fn n -> n + k })
   end
-  fn with_mul(c : Cap(IO), k : Int) : Cap(Session.Live) do
-    cap_impl(mint_cap(c), { tick: fn n -> n * k })
+  fn with_mul(k : Int) : Cap(Session.Live) do
+    cap_impl(mint_cap(), { tick: fn n -> n * k })
   end
   fn run(c : Cap(Session.Live), n : Int) : Int do
     match cap_dict(c) do
@@ -298,9 +310,9 @@ let dispatch_src = {|mod Session do
       None    -> n
     end
   end
-  fn swapped_add(n : Int, k : Int) : Int do run(with_add(root_cap, k), n) end
-  fn swapped_mul(n : Int, k : Int) : Int do run(with_mul(root_cap, k), n) end
-  fn defaulted(n : Int) : Int do run(plain(root_cap), n) end
+  fn swapped_add(n : Int, k : Int) : Int do run(with_add(k), n) end
+  fn swapped_mul(n : Int, k : Int) : Int do run(with_mul(k), n) end
+  fn defaulted(n : Int) : Int do run(plain(), n) end
 end|}
 
 let rt_dispatch =
@@ -337,17 +349,12 @@ let rt_default =
 (* Attenuation must carry the dictionary across: a narrowed capability is the
    SAME authority, reduced, not a different one.
 
-   [mint_cap]'s counterpart — that a mint does NOT inherit the dictionary of
-   the [Cap(IO)] it was minted from — is deliberately NOT tested here, because
-   it is unobservable in well-typed code: [mint_cap] takes [Cap(IO)], and an IO
-   capability cannot legally carry a dictionary (see [impl_io_cap]).  The
-   interpreter still implements non-inheritance defensively; it becomes
-   observable only if IO capabilities ever gain dictionaries.
-
-   These bodies name [root_cap] directly, which reject/t152 forbids outside a
-   test body.  That is fine HERE and only here: [eval_module] does not
-   typecheck, and the typing of every construct below is already pinned by the
-   accept/reject cases above. *)
+   Since ocap phase 7b `cap_narrow` is a retired builtin the checker refuses
+   ([narrow_keeps_dict_type]); this runs the interpreter's builtin directly,
+   [eval_module] does not typecheck, so the runtime behaviour stays pinned
+   until the builtin is removed
+   (specs/todos/2026-11-26-ocap-remove-deprecated-main-cap-form.md). A mint
+   takes no capability (`mint_cap()`), so it has no dictionary to inherit. *)
 let rt_narrow_propagates =
   Alcotest.test_case "cap_narrow propagates an attached dictionary" `Quick
     (fun () ->
@@ -356,7 +363,7 @@ let rt_narrow_propagates =
   proof cap A with Ops
   proof cap B with Ops
   fn mk() : Cap(Two.A) do
-    cap_impl(mint_cap(root_cap), { tick: fn n -> n + 100 })
+    cap_impl(mint_cap(), { tick: fn n -> n + 100 })
   end
   fn read_b(c : Cap(Two.B), n : Int) : Int do
     match cap_dict(c) do

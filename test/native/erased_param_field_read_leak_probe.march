@@ -80,7 +80,7 @@ mod ErasedParamFieldRead do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let w = fresh(5, 0) + shared(5, 0)
     let a0 = live_allocs()
     let x = fresh(200, 0)

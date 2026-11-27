@@ -24,7 +24,7 @@ mod Main do
 
   fn pass(x) do x end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let t = pass(Token(1))
     println(int_to_string(consume(t)))
   end
@@ -49,7 +49,7 @@ mod Main do
 
   fn pass(linear x : a) : a do x end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let t = pass(Token(1))
     println(int_to_string(consume(t)))
   end

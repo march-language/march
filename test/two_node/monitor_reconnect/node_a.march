@@ -93,7 +93,7 @@ mod MonitorReconnectA do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) do
+  fn main() needs IO.Console, IO.NetConnect, IO.Spawn, IO.Mut, IO.Process do
     let port = Authority.must(Env.require_int("MARCH_PEER_PORT"))
     let seen = Authority.must(Vault.new("monitor_reconnect_seen"))
     let watcher = spawn(Watcher)

@@ -7,7 +7,7 @@ mod Guard2 do
     end
   end
 
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     println(int_to_string(guarded(Cons(0 - 1, Nil))))
     ()
   end

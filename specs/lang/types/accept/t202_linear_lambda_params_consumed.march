@@ -28,7 +28,7 @@ mod Main do
     let g = fn (affine t : T) -> 0
     g(T(1))
   end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(once() + by_match() + nested() + local() + shadow_infer() + shadow_check() + affine_dropped()))
   end
 end

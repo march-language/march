@@ -102,7 +102,7 @@ end
 
 -- The Agent role of `Ctl`: say hello with a report, then answer every order
 -- ([apply]) and poll until the leader says bye.
-pfn ctl_agent_role(s : Cap(Session.Live), _nc : Cap(IO.NetConnect), _fr : Cap(IO.FileRead), _mu : Cap(IO.Mut), _ck : Cap(IO.Clock), st : Ctl_Agent.S_send_Hello, report : () -> Control.AgentReport, apply : Control.StepOrder -> Control.StepResult) : Ctl_Agent.Yield do
+pfn ctl_agent_role(s : Cap(Session.Live), st : Ctl_Agent.S_send_Hello, report : () -> Control.AgentReport, apply : Control.StepOrder -> Control.StepResult) : Ctl_Agent.Yield do
   ctl_agent_loop_(s, Ctl_Agent.send_Hello(s, st, ctl_wire_report(report())), report, apply)
 end
 
@@ -118,7 +118,7 @@ pfn ctl_agent_loop_(s : Cap(Session.Live), st : Ctl_Agent.S_offer_apply_observe_
 end
 
 -- The Control role of `Ctl` for one agent's session, driven by [ops].
-pfn ctl_control_role(s : Cap(Session.Live), _nc : Cap(IO.NetConnect), _fr : Cap(IO.FileRead), _fw : Cap(IO.FileWrite), _mu : Cap(IO.Mut), _ck : Cap(IO.Clock), st : Ctl_Control.S_recv_Hello, ops : Control.ControlOps) : Ctl_Control.Yield do
+pfn ctl_control_role(s : Cap(Session.Live), st : Ctl_Control.S_recv_Hello, ops : Control.ControlOps) : Ctl_Control.Yield do
   Ctl_Control.recv_Hello(s, st, fn (rep, st1) ->
     ops.report(ctl_report_of(rep))
     ctl_control_loop_(s, st1, rep.node, ops))
@@ -368,7 +368,7 @@ end
 -- checks against the certificate it starts on.
 pfn ctl_cert_floor_file() : String do ctl_cfg("cert_floor_file", "") end
 
-pfn ctl_load_cert_floor(_io : Cap(IO)) : () do
+pfn ctl_load_cert_floor() : () do
   let path = ctl_cert_floor_file()
   match Authority.must(File.read(path)) do
     Err(_) -> ()
@@ -383,7 +383,7 @@ pfn ctl_load_cert_floor(_io : Cap(IO)) : () do
   end
 end
 
-pfn ctl_persist_cert_floor(io : Cap(IO)) : () do
+pfn ctl_persist_cert_floor() : () do
   let floor = Control.cert_floor(ctl_memory())
   let saved = ctl_int(Vault.get_or(ctl_memory(), "cert_floor_saved", "0"))
   let path = ctl_cert_floor_file()
@@ -405,7 +405,7 @@ end
 -- Write a certificate this node took from a release to its MARCH_NODE_CERT
 -- file (a temporary file renamed into place). The node's own file watch then
 -- reads the same certificate back, which `replace_cert` takes as a no-op.
-pfn ctl_persist_cert(io : Cap(IO)) : () do
+pfn ctl_persist_cert() : () do
   match Vault.get(ctl_memory(), "cert_persist") do
     Option.None -> ()
     Option.Some(text) ->
@@ -491,7 +491,7 @@ end
 -- [wants] maps a hash to the time of its next attempt; a failed attempt waits
 -- twice as long as the one before (1 s up to 30 s), so an artifact no
 -- candidate can serve right now costs little.
-pfn ctl_prefetch_one(io : Cap(IO), node : Cap(ClusterNode.Live), h : String) : () do
+pfn ctl_prefetch_one(node : Cap(ClusterNode.Live), h : String) : () do
   let w = ctl_wants()
   let now = unix_time_ms()
   if now < Vault.get_or(w, h, 0) do ()
@@ -512,12 +512,12 @@ pfn ctl_prefetch_one(io : Cap(IO), node : Cap(ClusterNode.Live), h : String) : (
   end end
 end
 
-pfn ctl_prefetch_loop(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do
-  List.each(Vault.keys(ctl_wants()), fn h -> ctl_prefetch_one(io, node, h))
-  ctl_persist_cert_floor(io)
-  ctl_persist_cert(io)
+pfn ctl_prefetch_loop(node : Cap(ClusterNode.Live)) : Int do
+  List.each(Vault.keys(ctl_wants()), fn h -> ctl_prefetch_one(node, h))
+  ctl_persist_cert_floor()
+  ctl_persist_cert()
   sleep_ms(200)
-  ctl_prefetch_loop(io, node)
+  ctl_prefetch_loop(node)
 end
 
 pfn ctl_wait_for(ops : Control.AgentOps, o : Control.StepOrder, left_ms : Int) : Bool do
@@ -548,9 +548,9 @@ pfn ctl_apply_relayed(ops : Control.AgentOps, o : Control.StepOrder) : Control.S
   Control.agent_apply_recording(ops, ctl_memory(), o, ctl_cfg_int("placement_tick_ms", 200))
 end
 
-pfn ctl_agent_body(node : Cap(ClusterNode.Live), s : Cap(Session.Live), nc : Cap(IO.NetConnect), fr : Cap(IO.FileRead), mu : Cap(IO.Mut), ck : Cap(IO.Clock), st : Ctl_Agent.S_send_Hello) : Ctl_Agent.Yield do
+pfn ctl_agent_body(node : Cap(ClusterNode.Live), s : Cap(Session.Live), st : Ctl_Agent.S_send_Hello) : Ctl_Agent.Yield do
   let ops = ctl_agent_ops(node)
-  ctl_agent_role(s, nc, fr, mu, ck, st, fn -> ops.report(), fn o -> ctl_apply(node, ops, o))
+  ctl_agent_role(s, st, fn -> ops.report(), fn o -> ctl_apply(node, ops, o))
 end
 
 -- Keep a `Ctl` session open with whoever offers `Control` now. A session ends
@@ -565,20 +565,20 @@ end
 -- churn sessions for ever. The loop hands over to CtlRespawner instead, an
 -- actor that has passed the deploy's marker, and the loop it spawns runs the
 -- new code.
-pfn ctl_agent_loop(io : Cap(IO), node : Cap(ClusterNode.Live), backoff : Int) : Int do
-  match Ctl_Run.initiate_Agent(node, cap_narrow(io), cap_narrow(io), cap_narrow(io), cap_narrow(io),
-                               fn (s, nc, fr, mu, ck, st) -> ctl_agent_body(node, s, nc, fr, mu, ck, st)) do
+pfn ctl_agent_loop(node : Cap(ClusterNode.Live), backoff : Int) : Int do
+  match Ctl_Run.initiate_Agent(node,
+                               fn (s, st) -> ctl_agent_body(node, s, st)) do
     Result.Ok(Session.Drained(_)) ->
       sleep_ms(200)
       match Vault.get(ctl_respawners(), "r") do
         Option.Some(r) ->
-          let _ = send(r, CtlRespawn(io, node))
+          let _ = send(r, CtlRespawn(node))
           0
-        Option.None -> ctl_agent_loop(io, node, 250)
+        Option.None -> ctl_agent_loop(node, 250)
       end
     Result.Ok(_) ->
       sleep_ms(100)
-      ctl_agent_loop(io, node, 250)
+      ctl_agent_loop(node, 250)
     Result.Err(e) ->
       -- Said once per distinct reason: the leader may simply not be up yet.
       let why = SessionNode.run_error_message(e)
@@ -587,7 +587,7 @@ pfn ctl_agent_loop(io : Cap(IO), node : Cap(ClusterNode.Live), backoff : Int) : 
         Authority.ignore(println("control: no session with a leader: " ++ why))
       else () end
       sleep_ms(backoff)
-      ctl_agent_loop(io, node, if backoff * 2 > 5000 do 5000 else backoff * 2 end)
+      ctl_agent_loop(node, if backoff * 2 > 5000 do 5000 else backoff * 2 end)
   end
 end
 
@@ -596,8 +596,8 @@ type CtlRespawnerState = { ctl_respawns : Int }
 actor CtlRespawner do
   state { ctl_respawns : Int }
   init  { ctl_respawns: 0 }
-  on CtlRespawn(io : Cap(IO), node : Cap(ClusterNode.Live)) do
-    let _ = task_spawn(fn _ -> ctl_agent_loop(io, node, 250))
+  on CtlRespawn(node : Cap(ClusterNode.Live)) do
+    let _ = task_spawn(fn _ -> ctl_agent_loop(node, 250))
     { ctl_respawns: state.ctl_respawns + 1 }
   end
 end
@@ -888,9 +888,9 @@ pfn ctl_leader_ops(node : Cap(ClusterNode.Live)) : Control.ControlOps do
 end
 
 -- The body of the `Ctl.Control` role: one session per agent.
-pfn ctl_control_session(node : Cap(ClusterNode.Live), s : Cap(Session.Live), nc : Cap(IO.NetConnect), fr : Cap(IO.FileRead), fw : Cap(IO.FileWrite), mu : Cap(IO.Mut), ck : Cap(IO.Clock), st : Ctl_Control.S_recv_Hello) : Ctl_Control.Yield do
+pfn ctl_control_session(node : Cap(ClusterNode.Live), s : Cap(Session.Live), st : Ctl_Control.S_recv_Hello) : Ctl_Control.Yield do
   ctl_ensure_loaded()
-  ctl_control_role(s, nc, fr, fw, mu, ck, st, ctl_leader_ops(node))
+  ctl_control_role(s, st, ctl_leader_ops(node))
 end
 
 -- ── the control API (design section 9) ──────────────────────────────────────
@@ -1717,7 +1717,7 @@ end
 
 -- Called by the generated `main` after `Topology.place`: every node runs the
 -- Agent; a candidate (a node carrying [label]) also serves the control API.
-fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : Int) : () do
+fn ctl_start(node : Cap(ClusterNode.Live), label : String, port : Int) : () do
   ctl_init()
   let m = ctl_memory()
   Vault.set(m, "cfg:dir", Authority.must(Env.get("MARCH_CONTROL_DIR", "/tmp/march-control")))
@@ -1736,7 +1736,7 @@ fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : 
   Vault.set(m, "cfg:cert_file", if cert_env != "" && Authority.must(File.exists(cert_env)) do cert_env else "" end)
   Vault.set(m, "cfg:agent_grace_ms", Authority.must(Env.get("MARCH_CONTROL_AGENT_GRACE_MS", "20000")))
   Vault.set(m, "cfg:cert_floor_file", ctl_dir() ++ "/cert-floor-" ++ Topology.node_name(node))
-  ctl_load_cert_floor(io)
+  ctl_load_cert_floor()
   -- The control API's bounds (see "the control API" above).
   Vault.set(m, "cfg:max_conns", Authority.must(Env.get("MARCH_CONTROL_MAX_CONNS", "64")))
   Vault.set(m, "cfg:idle_ms", Authority.must(Env.get("MARCH_CONTROL_IDLE_MS", "30000")))
@@ -1749,8 +1749,8 @@ fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : 
   let respawner = spawn(CtlRespawner)
   Vault.set(ctl_respawners(), "r", respawner)
   ctl_mark_agent(node, respawner)
-  let _ = task_spawn(fn _ -> ctl_agent_loop(io, node, 250))
-  let _ = task_spawn(fn _ -> ctl_prefetch_loop(io, node))
+  let _ = task_spawn(fn _ -> ctl_agent_loop(node, 250))
+  let _ = task_spawn(fn _ -> ctl_prefetch_loop(node))
   let offset = ctl_cfg_int("port_offset", 0)
   let listen_port = if offset == 0 do port else ctl_int(Authority.must(Env.get("MARCH_NODE_PORT", "0"))) + offset end
   if List.member(Topology.node_labels(), label) do

@@ -16,7 +16,7 @@ mod SpawnMutSignalRefused do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _m : Cap(IO.Mut), _g : Cap(IO.Signal)) do
+  fn main() needs IO.Console, IO.Spawn, IO.Mut, IO.Signal do
     println(verdict(Task.async(fn () -> 1)))
     println(verdict(Task.async_stream([1, 2], fn n -> n)))
     println(List.pmap(List.range(0, 3000), fn x -> x * 2) == List.map(List.range(0, 3000), fn x -> x * 2))

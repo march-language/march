@@ -43,7 +43,7 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let sup = spawn(Sup)
     let perm1 = child_int(sup, "perm")
     let tmp1 = child_int(sup, "tmp")

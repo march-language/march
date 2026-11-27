@@ -195,7 +195,7 @@ mod NativeArrFoldAccLeakProbe do
     List.length(r)
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let before = live_allocs()
     println(f64_acc_leg())
     println(f32_acc_leg())

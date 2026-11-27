@@ -28,7 +28,7 @@ let $t3 : Float = -.(0., cp) in
 alloc Vec3.Vec3($t2, pitch, $t3)
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let v : Vec3 = forward(0.5, 0.25) in
 let $t2 : String = let $t1 : Float = dot(v, v) in
 float_to_string($t1) in

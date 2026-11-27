@@ -25,7 +25,7 @@ mod Main do
     Parser.repeat(Parser.lit("x"), n - 48)
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     match Parser.run_all(counted(), "3xxx") do
       Ok(xs) -> Authority.ignore(println(int_to_string(List.length(xs))))
       Err(e) -> Authority.ignore(println(Parser.render("3xxx", e)))

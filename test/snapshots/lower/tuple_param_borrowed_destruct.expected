@@ -1434,7 +1434,7 @@ fn String.trim_start(s : '_) : '_ =
   string_trim_start(s)
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let pair : (String, String) = ("hello", "world") in
 let $t2 : String = let $t1 : Int = process_pairs(pair, 3, 0) in
 int_to_string($t1) in

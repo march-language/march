@@ -3595,8 +3595,8 @@ let task_builtins : env =
      and inheriting that capability's dictionary would give it operations
      belonging to something else. *)
   ; ("mint_cap", VBuiltin ("mint_cap", function
-    | [_cap] -> VUnit
-    | _ -> eval_error "mint_cap: expected 1 argument"))
+    | [] | [VUnit] -> VUnit
+    | _ -> eval_error "mint_cap: expected no argument"))
   (* cap_impl: attach a dictionary.  The dictionary IS the capability's runtime
      value from here on; the capability argument carries no other content. *)
   ; ("cap_impl", VBuiltin ("cap_impl", function

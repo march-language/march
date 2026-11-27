@@ -28,7 +28,7 @@ mod ClusterStallA do
     end end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let port = Authority.must(Env.require_int("MARCH_PORT_A"))
     let cfg = ClusterNode.config("node-a", port, "", Nil, "stall-secret", 1)
     match ClusterNode.start(cfg) do

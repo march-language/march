@@ -3,7 +3,7 @@ mod Main do
   module Util do
     fn one() : Int do 1 end
   end
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(Util.one()))
   end
 end

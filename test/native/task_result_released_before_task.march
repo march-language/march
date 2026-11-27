@@ -41,7 +41,7 @@ mod TaskResultReleasedBeforeTask do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     println("tuples=" ++ int_to_string(tuple_leg(300, 0)))
     println("floats=" ++ float_to_string(float_leg(4, 0.0)))
     let b0 = live_allocs()

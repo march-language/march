@@ -31,7 +31,7 @@ mod UnboxedAggregateBranchJoin do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(float_to_string(spin(10, 0.0)))
   end
 end

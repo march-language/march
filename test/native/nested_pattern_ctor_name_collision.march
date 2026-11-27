@@ -89,7 +89,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println(int_to_string(leaves(shrink(make(2)))))
     println(int_to_string(leaves(shrink(make(3)))))
     println(if is_leaf(Leaf) do "leaf" else "node" end)

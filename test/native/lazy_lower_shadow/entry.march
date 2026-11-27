@@ -18,7 +18,7 @@ mod LazyLowerShadow do
     end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     match Result.collect([Ok(1), Ok(2), Ok(3)]) do
       Ok(xs) -> println("collected: " ++ show_list(xs))
       Err(e) -> println("error: " ++ e)

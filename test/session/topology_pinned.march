@@ -23,7 +23,7 @@ mod TopologyPinned do
       println(r.name ++ ": " ++ Topology.placement_text(r.place) ++ ", capacity " ++ int_to_string(r.capacity)))
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let base = [
       Topology.offer_role("Shop.Front", Topology.everywhere(), 16, never),
       Topology.offer_role("Shop.Ledger", Topology.count(1), 8, never),

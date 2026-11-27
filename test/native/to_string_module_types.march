@@ -23,7 +23,7 @@ mod Main do
     type Shape = Circle(Int) | Rect(Int, Int) | Dot
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     -- stdlib single-field types (declared Newtype, built Boxed)
     println(to_string(Duration.seconds(5)))
     println(to_string(UUID.UUID("abc")))

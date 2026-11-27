@@ -30,7 +30,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _r : Cap(IO.FileRead)) do
+  fn main() needs IO.Console, IO.FileRead do
     println(Config.motd())
   end
 end
@@ -56,7 +56,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _r : Cap(IO.FileRead)) do
+  fn main() needs IO.Console, IO.FileRead do
     println(Config.motd())
   end
 end

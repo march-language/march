@@ -37,7 +37,7 @@ mod Main do
     Vault.set(hits, page, n + 1)
   end
 
-  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) do
+  fn main() needs IO.Console, IO.Mut do
     let hits = Authority.must(Vault.new("hits"))
     record_visit(hits, "/")
     println(int_to_string(Vault.get_or(hits, "/", 0)))
@@ -67,7 +67,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) do
+  fn main() needs IO.Console, IO.Mut do
     let hits = Authority.must(Vault.new("hits"))
     record_visit(hits, "/")
     println(int_to_string(Vault.get_or(hits, "/", 0)))

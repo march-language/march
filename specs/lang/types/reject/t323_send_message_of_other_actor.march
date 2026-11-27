@@ -20,7 +20,7 @@ mod Main do
     on Note(t : String) do { state with s: t } end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let b = spawn(B)
     send(b, Poke(1))
   end

@@ -9,7 +9,7 @@
 mod Main do
   needs IO.Console
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     print("no newline")
     println("")
   end

@@ -72,7 +72,7 @@ mod ArraySort do
     ()
   end
 
-  fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Clock, IO.Console do
     let n = 1000000
     println("NativeArray.sort_int benchmark  (n = " ++ int_to_string(n) ++ ")")
     println("")

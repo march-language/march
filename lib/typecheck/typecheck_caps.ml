@@ -288,7 +288,6 @@ let fn_transitive_capability_closures_tbl (env : env)
 (** [check_module_needs env mod_name decls] validates capability declarations for a module:
     1. Every Cap(X) in any function signature must be covered by a [needs] declaration.
     2. Every [needs X] must be used by at least one function.
-    3. Hint when Cap(IO) (root) is used — narrower caps may be more appropriate.
 
     [cap_qname_prefix] is the fully-accumulated dotted path (from
     [env.cap_qual_prefix] extended by [mod_name.txt], or [mod_name.txt] alone
@@ -892,9 +891,20 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                      help: add `needs %s` to the module, or narrow the bound."
                     def.Ast.fn_name.txt (String.concat ", " bound) c c))
         bound;
-      Hashtbl.replace env.fn_bound_points qname
-        { fb_caps = List.sort_uniq String.compare bound; fb_span = nsp;
-          fb_site = def.Ast.fn_name.Ast.span; fb_origin = origin }
+      (* The top-level `main`'s clause is the program's request: its reach is
+         judged as its grant by [Typecheck.check_main_grant] (design §D3: at
+         `main` the program is closed), so it is not a bound point too.  Since
+         ocap phase 7b every program asks this way, and a bound point makes
+         [check_fn_bounds] solve rows over the whole environment, which grows
+         without limit in a long-lived env (the LSP, the property suite). *)
+      (* Under `march check` (each file wrapped in a synthetic [LibCheck]
+         module) a file's `main` is one level down, where [check_main_grant]
+         does not see it; there its clause stays a bound point, so it is
+         still judged. *)
+      if not (qname = "main" && origin = Fn_decl) then
+        Hashtbl.replace env.fn_bound_points qname
+          { fb_caps = List.sort_uniq String.compare bound; fb_span = nsp;
+            fb_site = def.Ast.fn_name.Ast.span; fb_origin = origin }
   in
   (* An interface method's bound limits OTHER modules' impls, so unlike a
      function's it need not lie within this module's [needs] (the impl's own
@@ -2209,7 +2219,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               | [] -> ""
               | os ->
                 Printf.sprintf "; its code also reaches %s"
-                  (String.concat ", " (List.map (fun c -> Printf.sprintf "`Cap(%s)`" c) os)))
+                  (String.concat ", " (List.map (fun c -> Printf.sprintf "`%s`" c) os)))
              (if others = [] then "this" else "these")
              display_lines })
   ;
@@ -2288,7 +2298,20 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                    List.exists (fun req_cap -> cap_subsumes need req_cap) req_caps
                  ) env.module_caps
               || List.exists (fun cap_path -> cap_subsumes need cap_path)
-                   (Lazy.force own_transitive_caps) in
+                   (Lazy.force own_transitive_caps)
+              (* A function's own `needs` clause must lie within the module's
+                 (`cap_bound_needs`), so a module line that a clause names is
+                 required by it, not unused.  Since ocap phase 7b this is how
+                 `main` asks for a kind the program reaches only through
+                 other modules (`IO.Foreign` behind `Js.Dom`, say), which a
+                 `Cap(IO.X)` parameter on `main` used to count for. *)
+              || List.exists (function
+                   | Ast.DFn (fd, _) ->
+                     (match fd.Ast.fn_needs with
+                      | Some (caps, _) ->
+                        List.exists (fun (names, _) -> cap_subsumes need (cap_path_of_names names)) caps
+                      | None -> false)
+                   | _ -> false) decls in
     if not used then
       (* A deferred Check-4 import (an importee not analysed yet) will require
          the importee's whole declared set (fail-closed, see
@@ -2301,41 +2324,10 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           (mod_name.txt, need, need_sp) :: !(env.deferred_unused_needs)
       else warn_unused_needs env mod_name.txt need need_sp
   ) (List.filter (fun need -> not (List.mem need unknown_needs)) declared_needs);
-  (* Check 3 (hint): Cap(IO) root — suggest narrowing.  Not on `main`: the
-     reference calls `fn main(cap : Cap(IO))` the entry-point convention, so
-     hinting there tells users to stop following the documented advice.  Not
-     on a proof-cap FACTORY either: a function whose declared return type
-     names a proof cap its own module declares (`Session.attach`,
-     `Actor.introspect`, `ClusterNode.start`) mints it, `mint_cap` is typed
-     `Cap(IO) -> Cap(a)`, and amplifying a narrowed cap is a type error, so
-     the root cap is the only parameter it can take and the hint could not be
-     acted on. *)
-  let own_proof_cap path =
-    match List.assoc_opt path env.proof_caps with
-    | Some m -> m <> "" && (m = mod_name.txt || m = env.current_module)
-    | None -> false
-  in
-  let proof_cap_factories =
-    List.filter_map (function
-      | Ast.DFn (def, _) ->
-        (match def.fn_ret_ty with
-         | Some t when List.exists own_proof_cap (cap_paths_in_surface_ty t) ->
-           Some def.fn_name.txt
-         | _ -> None)
-      | _ -> None) decls
-  in
-  List.iter (fun (cap_path, fn_name, sp) ->
-    if cap_path = "IO" && fn_name <> "main"
-       && not (List.mem fn_name proof_cap_factories) then
-      Err.hint ~code:Err.Code.cap_root_broad env.errors ~span:sp
-        (render_parts [
-          (* [fn_name] is "" for a type, extern, actor or interface. *)
-          MPText (if fn_name = "" then "This declaration uses " else "This function takes ");
-          cap "IO";
-          MPText " (the root capability); consider narrowing to e.g. ";
-          cap "IO.FileRead"; MPText " or "; cap "IO.Console";
-          MPText " for least-privilege." ])
-  ) used_caps;
+  (* Check 3 (the `cap_root_broad` hint, "narrow `Cap(IO)` to a sub-capability")
+     was removed in ocap phase 7b: a `Cap(IO)` parameter is now the error
+     `cap_param_retired`, and suggesting a narrower `Cap(...)` value would be
+     wrong advice beside it. *)
   (* Check 4: transitive — every module we `use` that declares `needs` must be covered *)
   List.iter (function
     | Ast.DUse (ud, sp) ->
@@ -2444,9 +2436,10 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     | _ -> ()
   ) decls;
   (* Check 7 — realtime exclusion.
-     A function with `Tagged(_, Realtime)` cannot also take `Cap(Alloc)`,
-     `Cap(IO)`, or `Cap(Panic)` as parameters — those capabilities are excluded
-     from realtime contexts by the narrowing rule in §3/§5. *)
+     A function with `Tagged(_, Realtime)` cannot also hold `Alloc`, `IO` or
+     `Panic` — those capabilities are excluded from realtime contexts by the
+     narrowing rule in §3/§5.  It holds one by a `Cap(K)` parameter or, since
+     ocap phase 7b retired those, by its `needs` clause. *)
   let is_realtime_tagged = function
     | Ast.TyCon ({txt="Tagged";_}, [_; Ast.TyCon ({txt="Realtime";_}, [])]) -> true
     | _ -> false
@@ -2465,25 +2458,37 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         ) c.Ast.fc_params
       ) def.fn_clauses in
       let has_realtime = List.exists is_realtime_tagged all_param_tys in
-      if has_realtime then
+      let realtime_mixed ~verb ~held ~sp =
+        Err.error ~code:Err.Code.realtime_mixed env.errors ~span:sp
+          (render_parts [
+            MPText "The function "; MPCode def.fn_name.txt;
+            MPText " takes "; MPCode "Tagged(_, Realtime)";
+            MPText (" but also " ^ verb ^ " "); MPCode held;
+            MPText ".";
+            MPBreak; MPText "Realtime functions cannot hold ";
+            MPCode held;
+            MPText " — allocation, IO, and panic are excluded from realtime contexts.";
+            MPBreak; MPText "hint: remove "; MPCode held
+          ])
+      in
+      if has_realtime then begin
         List.iter (fun t ->
           if is_excluded_cap t then begin
             let cap_name = match t with
               | Ast.TyCon (_, [Ast.TyCon ({txt;_}, [])]) -> txt
               | _ -> "?" in
-            Err.error ~code:Err.Code.realtime_mixed env.errors ~span:sp
-              (render_parts [
-                MPText "The function "; MPCode def.fn_name.txt;
-                MPText " takes "; MPCode "Tagged(_, Realtime)";
-                MPText " but also takes "; MPCode ("Cap(" ^ cap_name ^ ")");
-                MPText ".";
-                MPBreak; MPText "Realtime functions cannot hold ";
-                MPCode ("Cap(" ^ cap_name ^ ")");
-                MPText " — allocation, IO, and panic are excluded from realtime contexts.";
-                MPBreak; MPText "hint: remove "; MPCode ("Cap(" ^ cap_name ^ ")")
-              ])
+            realtime_mixed ~verb:"takes" ~held:("Cap(" ^ cap_name ^ ")") ~sp
           end
-        ) all_param_tys
+        ) all_param_tys;
+        match def.Ast.fn_needs with
+        | None -> ()
+        | Some (paths, nsp) ->
+          List.iter (fun (p, _) ->
+            match cap_path_of_names p with
+            | ("Alloc" | "IO" | "Panic") as c ->
+              realtime_mixed ~verb:"asks for" ~held:("needs " ^ c) ~sp:nsp
+            | _ -> ()) paths
+      end
     | _ -> ()
   ) decls;
   (* Check 8 - migrate_state must be IO-free, Phase5C-C.5.
@@ -3352,8 +3357,9 @@ let check_mint_cap_sites (env : env) : unit =
                  cap_narrow's job. *)
               Err.error ~code:Err.Code.mint_cap_invalid env.errors ~span:sp
                 (render_parts [
-                  MPText "mint_cap is only for proof capabilities; use ";
-                  MPCode "cap_narrow"; MPText " to attenuate IO capabilities." ]))
+                  MPText "mint_cap is only for proof capabilities; an IO capability is not a value: ";
+                  MPText "code uses the current authority, which "; MPCode "main"; MPText "'s ";
+                  MPCode "needs"; MPText " clause asks for." ]))
          | _ ->
            (* Result is not a concrete cap constructor — an unbound (generalized)
               cap var that never got pinned to a specific proof cap.  This

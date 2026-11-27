@@ -25,7 +25,7 @@ mod SessionRedialA do
     Echo_A.recv_Msg_B_A_1(s, Echo_A.send_Msg_A_B_1(s, st, n), fn (_m, st1) -> Echo_A.close(s, st1))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let base = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "redial-secret", 1)
     let suspect_ms = Authority.must(Env.get_int("REDIAL_SUSPECT_MS", 0))
     let cfg = if suspect_ms > 0 do { base with swim: Swim.config(500, suspect_ms, 2) } else base end

@@ -73,7 +73,7 @@ mod HttpExample do
     IO.write("")
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect)) do
+  fn main() needs IO.Console, IO.NetConnect do
     IO.write("March HTTP Library Demo")
     IO.write("=======================")
     IO.write("")

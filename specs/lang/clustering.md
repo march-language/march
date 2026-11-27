@@ -150,7 +150,7 @@ assemble by hand.
 -- MARCH_CLUSTER_SECRET=... MARCH_NODE_ADVERTISE=10.0.0.1:4001
 -- (or, instead of the secret, MARCH_NODE_CERT / MARCH_NODE_KEY /
 --  MARCH_CLUSTER_OPERATOR_PUBKEY: see "Authentication & Handshake")
--- inside `fn main(io : Cap(IO))`, in a module that declares `needs ClusterNode.Live`
+-- inside `fn main() needs IO`, in a module that declares `needs ClusterNode.Live`
 match ClusterNode.config_from_env() do
   Err(e) -> panic(e)
   Ok(cfg) ->
@@ -224,16 +224,15 @@ whose binding lost gets `Lost(name, winner)` on its watchers. It should stop act
 holder and must not unregister (the name is not its own any more). Use a global name for
 discovery, where a brief duplicate is harmless, and never for mutual exclusion.
 
-**The node is a capability.** `start(io, cfg)` returns a `Cap(ClusterNode.Live)`, minted
-from the program's `Cap(IO)`: code that holds it can use the cluster, and code that does not
-cannot. A module whose signatures name it declares `needs ClusterNode.Live`, as for any
-capability. Like every proof capability, only `ClusterNode` can create one, so your own
-function cannot return a node it started. Start the node in `main` (or wherever you hold
-`Cap(IO)`) and pass the capability down; a helper that waits for peers takes it as a
-parameter:
+**The node is a capability.** `start(cfg)` returns a `Cap(ClusterNode.Live)`, a checked
+operation under `IO.Cluster`: code that holds the node can use the cluster, and code that
+does not cannot. A module whose signatures name it declares `needs ClusterNode.Live`, as
+for any capability. Like every proof capability, only `ClusterNode` can create one, so your
+own function cannot return a node it started. Start the node in `main` and pass the
+capability down; a helper that waits for peers takes it as a parameter:
 
 ```march
-fn main(io : Cap(IO)) do
+fn main() needs IO do
   let node = match ClusterNode.start(cfg) do
     Ok(n) -> n
     Err(e) -> panic(e)
@@ -262,11 +261,11 @@ A zero-argument operation takes `()`: `members: fn _ -> ...`. This is how member
 reactions are tested with no sockets: `test/session/cluster_placement.march` injects
 `NodeDead` into a placement that moves roles off dead nodes.
 
-**What a node may do with the root capability.** `start` and `attach` both take `Cap(IO)`,
-and the node keeps one power from it: `ClusterNode.with_session(node, ops, body)` runs
+**What a node may do for its holder.** A node keeps one power from being started or
+attached under `IO.Cluster`: `ClusterNode.with_session(node, ops, body)` runs
 `body` with the `Cap(Session.Live)` that `Authority.must(Session.attach(ops))` would give. The session
 runners use it, which is why the generated `<P>_Run` entry points over a cluster node take
-the node and not `Cap(IO)` (see [Choreography]({{ site.baseurl }}/docs/choreography/#running-a-role-every-entry-point)).
+the node (see [Choreography]({{ site.baseurl }}/docs/choreography/#running-a-role-every-entry-point)).
 The capability is handed to `body` and never returned: only `Session` may return a
 `Cap(Session.Live)`, and the node's dictionary holds a closure over `Session.attach`, which
 `attach` sets itself, over whatever the dictionary passed in holds, so a test dictionary
@@ -892,14 +891,14 @@ tells the transport which role each receive expects, so this needs nothing from 
 **The role runner.** `SessionNode.run` does all of the above from a role, its peer set and
 a role→address table, in the one order that cannot deadlock (connect to every lower role,
 ascending, then accept every higher one), and the generator emits its typed front,
-`<P>_Run.run_<Role>(io, node_id, secret, addrs, body)`, where `body` takes the session
+`<P>_Run.run_<Role>(node_id, secret, addrs, body)`, where `body` takes the session
 capability and the role's entry state — a body written for another role, or for another
 point of this one, is a type error. A node is then its role's line and a match on the
 result:
 
 ```march
-fn main(c : Cap(IO)) do
-  match Relay_Run.run_Server(c, "node-b", secret, Relay_Run.addrs_from_env(), fn (s, st) -> server(s, st)) do
+fn main() needs IO do
+  match Relay_Run.run_Server("node-b", secret, Relay_Run.addrs_from_env(), fn (s, st) -> server(s, st)) do
     Ok(_) -> ()
     Err(SessionNode.Cancelled(role, _)) -> ...   -- this role was waiting on a role that failed
     Err(SessionNode.Protocol(role, why)) -> ...  -- a peer sent what the protocol cannot receive
@@ -932,7 +931,7 @@ parked endpoint awaits, `(s, from, msg, ep)`, which is what its resume handler t
 
 ```march
 let pc = spawn(ConsActor)
-Stream_Run.host_Cons(c, "node-b", secret, Stream_Run.addrs_from_env(), pc,
+Stream_Run.host_Cons("node-b", secret, Stream_Run.addrs_from_env(), pc,
   fn s -> send(pc, StartC(s)),
   fn (s, from, msg, ep) -> send(pc, DeliverC(s, from, msg, ep)))
 ```
@@ -1098,7 +1097,7 @@ mod NodeA do
   needs IO
   needs IO.Console
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     -- A node listens on its port and dials its seeds; ClusterNode owns the sockets,
     -- handshakes and registry (the raw descriptor plumbing under it is internal to the
     -- standard library). No seeds: this node waits to be dialled.
@@ -1121,7 +1120,7 @@ mod NodeB do
   needs IO
   needs IO.Console
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let secret = "shared-secret"  -- same secret as Node A
     -- Node A's address is a seed: B dials it and handshakes during `start`.
     let cfg = ClusterNode.config("b", 9001, "", Cons("127.0.0.1:9000", Nil), secret, 1)

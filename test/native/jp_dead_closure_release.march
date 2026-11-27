@@ -43,7 +43,7 @@ mod Main do
     else go_two(i - 1, acc + two(mk(i), 0) + two([[i]], 0) + two([[i], [i]], 0)) end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let _w1 = go_up(10, 0)
     let b1 = live_allocs()
     let r1 = go_up(400, 0)

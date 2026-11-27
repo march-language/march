@@ -10,7 +10,7 @@ mod JsMutualTail do
     if n == 0 do false else is_even(n - 1) end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(bool_to_string(is_even(1000000)))
     println(bool_to_string(is_odd(7)))
     ()

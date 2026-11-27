@@ -11,7 +11,7 @@ mod Main do
   fn pick(first : Bool, linear x : a, linear y : a) : (a, a) do
     if first do (x, y) else (y, x) end
   end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let s = id(S1(1))
     let (p, q) = pick(true, S1(2), S1(3))
     let o = Some(S1(4))

@@ -5,7 +5,7 @@ mod Main do
   -- two-argument function) singles out the two folds.
   needs IO.Console
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let xs = [1, 2, 3]
     let s = List.fodl(xs, 0, fn (a, b) -> a + b)
     println(int_to_string(s))

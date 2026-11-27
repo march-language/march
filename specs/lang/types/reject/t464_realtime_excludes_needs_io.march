@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: takes `Tagged(_, Realtime)` but also asks for `needs IO`
+-- Check 7, realtime exclusion, in the `needs` form (ocap phase 7b). Since
+-- `Cap(IO)` parameters were retired a function holds IO by its `needs`
+-- clause, so Check 7 reads the clause too: a function taking
+-- `Tagged(_, Realtime)` cannot ask for `needs IO` (nor `Alloc` or `Panic`),
+-- as it could not take `Cap(IO)` (reject/t41). `Realtime` is declared as an
+-- ordinary nullary type, as in t41. See core-march-types.md §2.8.9.
+mod RTNeeds do
+  type Realtime = Realtime
+
+  needs IO
+
+  fn step(_deadline : Tagged(Int, Realtime)) : Int needs IO do
+    1
+  end
+end

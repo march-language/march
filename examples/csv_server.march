@@ -134,7 +134,7 @@ pfn router(conn) do
   end
 end
 
-pfn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_filewrite : Cap(IO.FileWrite), _cap_netlisten : Cap(IO.NetListen)) do
+pfn main() needs IO.Console, IO.FileRead, IO.FileWrite, IO.NetListen do
   Authority.ignore(println("CSV server starting on port 9876 ..."))
   Authority.must(HttpServer.new(9876)
   |> HttpServer.plug(router)

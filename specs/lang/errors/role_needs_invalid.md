@@ -28,7 +28,7 @@ mod Main do
     I -> L : String
   end
 
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end
 ```
 
@@ -56,7 +56,7 @@ mod Main do
     I -> L : String
   end
 
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end
 ```
 

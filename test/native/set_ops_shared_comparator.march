@@ -19,7 +19,7 @@ mod SetOpsSharedComparator do
     to_string(Set.to_list(s))
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let lt = fn (x : Int) -> fn (y : Int) -> x < y
     let a = Set.from_list([1, 2], lt)
     let b = Set.from_list([2, 3], lt)

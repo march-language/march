@@ -30,7 +30,7 @@ mod Test do
       Err(e) -> e
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     let b = make(7)                       -- C-built Box, typed Option/Result fields
     println(int_to_string(b.tag))         -- 7
     println(opt_int(b.maybe))             -- 42

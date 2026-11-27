@@ -95,7 +95,7 @@ mod CertOrderC do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     match ClusterNode.start(config("node-c", "MARCH_PORT_C", "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A"))))) do
       Err(e) -> panic(e)
       Ok(h) ->

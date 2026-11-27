@@ -89,7 +89,7 @@ mod TopologyPlacement do
     end
   end
 
-  fn main(io : Cap(IO)) do
+  fn main() needs IO do
     let fk = { members: Authority.must(Vault.new("tp_members")), subs: Authority.must(Vault.new("tp_subs")),
                names: Authority.must(Vault.new("tp_names")), meta: Authority.must(Vault.new("tp_meta")) }
     List.each(["n0", "n1", "n2"], fn id -> Vault.set(fk.members, id, member(id, Membership.Alive)))

@@ -104,7 +104,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = 5000
     let a = live_allocs()
     let r1 = leg_or_pattern(n, 0)

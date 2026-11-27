@@ -85,7 +85,7 @@ mod Main do
     end
   end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let intro = Authority.must(Actor.introspect())
     let s1 = spawn(Sup)
     let before = List.length(Actor.list(intro))

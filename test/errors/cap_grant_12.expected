@@ -10,3 +10,13 @@ hint: `from_json` places no constraint on the type it produces, so it would fabr
     run `march --explain cap_deserialize`
 
 
+-- CAPABILITY ----------------- errors/cap_grant_12.march
+
+`cap_narrow` was retired with the capability values it narrowed. [cap_narrow_retired]
+help: remove the call; to run code under less authority, use `restrict SCOPE do ... end`.
+
+48 |     let w = cap_narrow(x)
+                 ^^^^^^^^^^^^^
+
+
+

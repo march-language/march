@@ -11,7 +11,7 @@ mod Own do
     String.byte_size(describe(i))
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(int_to_string(width(7)))
     ()
   end

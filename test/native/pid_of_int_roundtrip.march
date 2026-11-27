@@ -18,7 +18,7 @@ mod PidRoundtrip do
     Authority.must(Actor.pid_from_int(n))
   end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let intro = Authority.must(Actor.introspect())
     let p = spawn(Echo)
     println(bool_to_string(is_alive(p)))

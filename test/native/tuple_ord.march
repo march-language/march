@@ -15,7 +15,7 @@ mod Main do
   -- Generic: only Mono learns that `a` is a tuple here.
   fn gt(a, b) do a > b end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(sign(compare((1, 2), (1, 3)))))
     println(int_to_string(sign(compare((2, 0), (1, 9)))))
     println(int_to_string(sign(compare((1, 2), (1, 2)))))

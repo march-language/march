@@ -20,10 +20,10 @@ mod Main do
   end
 
   -- Stock tells Ledger to book before it has chosen `have` or `out`.
-  pfn stock(s : Cap(Session.Live), _m : Cap(IO.Mut), st : Order_Stock.Entry) : Order_Stock.Yield do
+  pfn stock(s : Cap(Session.Live), st : Order_Stock.Entry) : Order_Stock.Yield do
     Order_Stock.recv_Want(s, st, fn (n, st1) ->
-      stock(s, _m, Order_Stock.send_Book(s, st1, n)))
+      stock(s, Order_Stock.send_Book(s, st1, n)))
   end
 
-  fn main(_c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

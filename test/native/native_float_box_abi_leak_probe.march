@@ -189,7 +189,7 @@ mod NativeFloatBoxAbiLeakProbe do
     float_to_int(go(n, 0.0))
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let before = live_allocs()
     println(float_leg(1000000))
     println(fparam_leg(1000000))

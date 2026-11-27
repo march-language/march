@@ -88,7 +88,7 @@ mod UserFnNamedLikeBuiltin do
   -- A parameter named like the builtin is a local closure, not either fn.
   fn call_param(file_read : Int -> Int, x : Int) : Int do file_read(x) + 1 end
 
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println(int_to_string(file_read(4)))
     println(int_to_string(file_read(6)))
     println(int_to_string(apply_int(file_read, 5)))

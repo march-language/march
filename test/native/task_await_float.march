@@ -40,7 +40,7 @@ mod TaskAwaitFloat do
     int_to_string(float_to_int(f *. 100.0))
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Spawn do
     -- Task.await on Float: pre-fix this SIGSEGVed (after defect 2 was fixed)
     -- or failed to compile at all (before it).  1.5 * 100 = 150.
     let t = Authority.must(Task.async(fn () -> 1.5))

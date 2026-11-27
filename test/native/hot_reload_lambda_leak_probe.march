@@ -36,7 +36,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let xs = ["a", "b", "c"]
     let ns = [1, 2, 3]
     let a0 = live_allocs()

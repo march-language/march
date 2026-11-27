@@ -13,7 +13,7 @@ mod Main do
 
   type Meters = Meters(Int)
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(to_string([{ a: 1 }]))
     println(to_string(Some({ a: 1 })))
     println(to_string([{ a: [1, 2], b: "x" }, { a: [], b: "y" }]))

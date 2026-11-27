@@ -69,7 +69,7 @@ mod Main do
     A.describe(n) ++ " / " ++ B.describe(m) ++ " / " ++ show(t)
   end
 
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     IO.puts(A.describe(unwrap(A.wrap(A.make()))))
     IO.puts(pick(A.NB("x"), B.NC(true), Top(7)))
     IO.puts(show(A.make()) ++ " " ++ show(B.ND(1, 2)) ++ " " ++ show(Top(1)))

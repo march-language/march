@@ -1,4 +1,23 @@
 exit: 1
+-- WARNING: CAPABILITY --- errors/cap_deserialize_2.march
+
+`main` asks for its authority with `Cap` parameters, which are deprecated and will be removed in the next release: a capability value grants nothing since the current authority replaced it. [deprecated_main_cap]
+help: request it with a `needs` clause: `fn main() needs IO.Console do`.
+
+4 |   fn main(c : Cap(IO.Console)) do
+                  ^^^^^^^^^^^^^^^
+
+
+    possible fix (a guess: check it before applying it):
+
+4 -   fn main(c : Cap(IO.Console)) do
+4 +   fn main() do
+4 -   fn main(c : Cap(IO.Console)) do
+4 +   fn main(c : Cap(IO.Console)) needs IO.Console do
+
+    run `march --explain deprecated_main_cap`
+
+
 -- CAPABILITY ------------ errors/cap_deserialize_2.march
 
 `Cap(IO.Console)` cannot be serialized — a capability may only be received, never constructed. [cap_deserialize]

@@ -8,7 +8,7 @@ mod Main do
     List.head(xs) + 1
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(first([1, 2, 3])))
   end
 end

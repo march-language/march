@@ -13,7 +13,7 @@ mod M do
     Vault.get(t, "k")
   end
 
-  fn main(_m : Cap(IO.Mut)) : Bool do
+  fn main() : Bool needs IO.Mut do
     let x : Option(Int) = peek()
     let y : Option(String) = peek()
     match (x, y) do

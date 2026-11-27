@@ -95,7 +95,7 @@ mod Demo do
     fn shout(s: String): String = "demo_shout"
   end
 
-  fn main(_console : Cap(IO.Console), _foreign : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     println(int_to_string(add(2, 3)))    -- 5
     println(shout("hi"))                  -- HI
   end

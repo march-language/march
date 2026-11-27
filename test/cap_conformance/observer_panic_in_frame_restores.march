@@ -71,7 +71,7 @@ mod ObserverPanicInFrameRestores do
     end
   end
 
-  fn main(_io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let _a = Diagnostics.observe_crashes(fn _r -> observer_boom("/srv/x"))
     let _b = Diagnostics.observe_crashes(fn r ->
       Authority.ignore(println("second observer: \"" ++ r.message ++ "\" " ++ probe("/srv/x") ++ " / " ++ probe("/etc/hosts"))))

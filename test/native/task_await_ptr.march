@@ -9,7 +9,7 @@
 mod TaskAwaitPtr do
   needs IO.Console
   needs IO.Spawn
-  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Spawn do
     let s = Authority.must(Task.async(fn () -> "hello" ++ " world"))
     match Task.await(s) do
       Ok(v)  -> println("str=" ++ v)

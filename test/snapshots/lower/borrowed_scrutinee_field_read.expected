@@ -12,7 +12,7 @@ int_to_string($t5) in
 string_concat(head, $t6)
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let b : Box = alloc Box.Box("ab", "cde") in
 let $t1 : String = escapes(b) in
 println($t1)

@@ -65,11 +65,17 @@ class OrderFacts(unittest.TestCase):
         self.assertTrue(lines[-1].startswith("  init("))
         self.assertLessEqual(len(lines), 12)
 
-    def test_stock_signature_shows_its_grant(self):
+    def test_stock_signature_takes_no_grant_value(self):
+        # Since ocap phase 7b a role body takes no capability values: its
+        # grant is the protocol's `role Stock needs IO.Mut`, checked at
+        # compile time.
         sig = gen.excerpts(ROOT / "examples/lab_app/src/lab_app.march")["stock_signature"]
         self.assertTrue(sig.startswith("fn stock("))
-        self.assertIn("Cap(IO.Mut)", sig)
+        self.assertNotIn("Cap(IO.Mut)", sig)
+        self.assertIn("s : Cap(Session.Live)", sig)
         self.assertIn("Order_Stock.Entry", sig)
+        self.assertIn("role Stock needs IO.Mut",
+                      "\n".join(gen.order_source(ROOT / "examples/lab_app/src/lab_app.march")))
 
     def test_order_source_is_the_sixteen_lines(self):
         src = gen.order_source(ROOT / "examples/lab_app/src/lab_app.march")

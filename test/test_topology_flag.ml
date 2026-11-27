@@ -56,11 +56,11 @@ let entry_src ?(back = "") ?(extra = "") ?(needs = "") () =
     needs IO
     needs Session.Live
     needs ClusterNode.Live
-    fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do
-      let _ = Task.async(fn () -> buy(io, node))
+    fn start(node : Cap(ClusterNode.Live)) : Int do
+      let _ = Task.async(fn () -> buy(node))
       0
     end
-    fn buy(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do
+    fn buy(node : Cap(ClusterNode.Live)) : Int do
       match Checkout_Run.initiate_Client(node, fn (s, st) ->
           Checkout_Client.recv_Receipt(s, Checkout_Client.send_Order(s, st, 1), fn (_m, st2) ->
             Checkout_Client.close(s, st2))) do
@@ -74,11 +74,11 @@ end
 |} needs back extra
 
 let hook = {|
-    fn start(_c : Cap(IO.Console), _node : Cap(ClusterNode.Live)) : Env do { factor: 10 } end
+    fn start(_node : Cap(ClusterNode.Live)) : Env do { factor: 10 } end
 |}
 
 let serve_one = {|
-    fn serve_one(env : Env, s : Cap(Session.Live), _c : Cap(IO.Console), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
+    fn serve_one(env : Env, s : Cap(Session.Live), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
       Checkout_Ledger.recv_Order(s, st, fn (n, st1) ->
         Checkout_Ledger.close(s, Checkout_Ledger.send_Receipt(s, st1, n * env.factor)))
     end
@@ -88,7 +88,7 @@ let actor = {|
     actor Ledger do
       state { factor : Int }
       init(env : Env) { factor: env.factor }
-      on Start(_sid : String, _s : Cap(Session.Live), _c : Cap(IO.Console)) do state end
+      on Start(_sid : String, _s : Cap(Session.Live)) do state end
       on Deliver(_sid : String, _s : Cap(Session.Live), _from : Int, _msg : Bytes, _ep : Int) do state end
       on Cancel(_sid : String, _s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do state end
     end
@@ -176,7 +176,9 @@ let test_derived_caps_and_initiates () =
   let open Yojson.Safe.Util in
   let pools = j |> member "topology" |> member "pools" in
   let strs p k = pools |> member p |> member k |> to_list |> List.map to_string in
-  Alcotest.(check (list string)) "back reaches only what it was given" [ "IO.Console" ] (strs "back" "caps");
+  (* Since ocap phase 7b the hook no longer takes `Cap(IO.Console)`, which
+     was the only console in this pool; nothing in it performs IO. *)
+  Alcotest.(check (list string)) "back reaches nothing" [] (strs "back" "caps");
   Alcotest.(check (list string)) "back initiates nothing" [] (strs "back" "initiates");
   Alcotest.(check (list string)) "front initiates Checkout.Client, through a helper"
     [ "Checkout.Client" ] (strs "front" "initiates");
@@ -197,7 +199,7 @@ let test_emit_without_topology_has_no_object () =
 
 let test_hand_written_main_warns () =
   let (rc, _, err) =
-    run ~src:(entry_src ~back:(hook ^ serve_one) ~extra:"  fn main(c : Cap(IO)) do () end" ())
+    run ~src:(entry_src ~back:(hook ^ serve_one) ~extra:"  fn main() needs IO do () end" ())
       ~digest_text:(digest ()) ()
   in
   Alcotest.(check int) "exit 0" 0 rc;
@@ -229,19 +231,21 @@ let test_missing_file_is_rejected () =
   ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)));
   Alcotest.(check int) "exit 1" 1 rc
 
+(* Ocap phase 7b: a granted role's body takes no grant parameters, so a body
+   that still takes one has the wrong arity. *)
 let test_body_arity () =
   let body = {|
-    fn serve_one(env : Env, s : Cap(Session.Live), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
+    fn serve_one(env : Env, s : Cap(Session.Live), extra : Int, st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
       Checkout_Ledger.recv_Order(s, st, fn (n, st1) ->
-        Checkout_Ledger.close(s, Checkout_Ledger.send_Receipt(s, st1, n * env.factor)))
+        Checkout_Ledger.close(s, Checkout_Ledger.send_Receipt(s, st1, n * env.factor + extra)))
     end
 |} in
   expect_error (run ~src:(entry_src ~back:(hook ^ body) ()) ~digest_text:(digest ()) ())
-    "body 'App.Back.serve_one' takes 3 parameter(s); a body of this role takes 4: the pool's environment, the session, 1 granted cap(s), and the entry state"
+    "body 'App.Back.serve_one' takes 4 parameter(s); a body of this role takes 3: the pool's environment, the session, and the entry state"
 
 let test_body_env_mismatch () =
   let body = {|
-    fn serve_one(env : Int, s : Cap(Session.Live), _c : Cap(IO.Console), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
+    fn serve_one(env : Int, s : Cap(Session.Live), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
       Checkout_Ledger.recv_Order(s, st, fn (n, st1) ->
         Checkout_Ledger.close(s, Checkout_Ledger.send_Receipt(s, st1, n * env)))
     end
@@ -254,7 +258,7 @@ let test_actor_shape () =
     actor Ledger do
       state { factor : Int }
       init(n : Int) { factor: n }
-      on Start(_sid : String, _s : Cap(Session.Live), _c : Cap(IO.Console)) do state end
+      on Start(_sid : String, _s : Cap(Session.Live)) do state end
       on Cancel(_sid : String, _s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do state end
     end
 |} in
@@ -267,15 +271,25 @@ let test_hook_signature () =
     fn start(n : Int, _node : Cap(ClusterNode.Live)) : Env do { factor: n } end
 |} in
   expect_error (run ~src:(entry_src ~back:(h ^ serve_one) ()) ~digest_text:(digest ()) ())
+    "hook 'App.Back.start' takes 2 parameters; it takes one, the node, `Cap(ClusterNode.Live)`";
+  let h1 = {|
+    fn start(n : Int) : Env do { factor: n } end
+|} in
+  expect_error (run ~src:(entry_src ~back:(h1 ^ serve_one) ()) ~digest_text:(digest ()) ())
     "hook 'App.Back.start': parameter `n : Int` is not a capability"
 
 let test_grant_beyond_written_caps () =
   expect_error (run ~src:ok_src ~digest_text:(digest ~caps:{|["IO.Clock"]|} ()) ())
     "role \"Checkout.Ledger\" is granted `IO.Console` (`role Ledger needs ...` in protocol Checkout), beyond pool \"back\"'s written caps [IO.Clock]"
 
+(* Ocap phase 7b: a hook takes no `Cap(P)` any more; one that still does is
+   refused by its signature (the retired parameter is its own error). *)
 let test_hook_cap_beyond_written_caps () =
-  expect_error (run ~src:ok_src ~digest_text:(digest ~caps:{|["IO.FileRead"]|} ()) ())
-    "hook 'App.Back.start' takes `Cap(IO.Console)`, beyond the pool's written caps [IO.FileRead]"
+  let h = {|
+    fn start(_c : Cap(IO.Console), _node : Cap(ClusterNode.Live)) : Env do { factor: 10 } end
+|} in
+  expect_error (run ~src:(entry_src ~back:(h ^ serve_one) ()) ~digest_text:(digest ~caps:{|["IO.FileRead"]|} ()) ())
+    "hook 'App.Back.start' takes 2 parameters; it takes one, the node"
 
 let test_reach_beyond_written_caps () =
   (* The hook takes only the handle but prints: its REACH is IO.Console,
@@ -304,7 +318,7 @@ let test_reach_beyond_written_caps () =
    written caps bound it, and a pool whose code reaches it beyond them is
    refused, as with the IO kinds. *)
 let introspect_body = {|
-    fn serve_one(env : Env, s : Cap(Session.Live), _c : Cap(IO.Console), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
+    fn serve_one(env : Env, s : Cap(Session.Live), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
       let _ = Actor.introspect()
       Checkout_Ledger.recv_Order(s, st, fn (n, st1) ->
         Checkout_Ledger.close(s, Checkout_Ledger.send_Receipt(s, st1, n * env.factor)))
@@ -337,6 +351,19 @@ let test_foreign_needs_isolation () =
   expect_error (run ~flags:"--topology-isolate-foreign" ~src ~digest_text:d ())
     "role \"Checkout.Ledger\" is granted `IO.Foreign`, but pool \"back\" is not isolated";
   (* Not opted in: no such error (the body's shape is then what fails, if anything). *)
+  let (_, _, err) = run ~src ~digest_text:d () in
+  Alcotest.(check bool) "only with the flag" false (contains err "is not isolated")
+
+(* The hook half: a hook asks for `IO.Foreign` with its `needs` clause (it once
+   took a `Cap(IO.Foreign)` parameter; ocap phase 7b retired those). *)
+let test_foreign_hook_needs_isolation () =
+  let h = {|
+    fn start(_node : Cap(ClusterNode.Live)) : Env needs IO.Foreign do { factor: 10 } end
+|} in
+  let src = entry_src ~back:(h ^ serve_one) () in
+  let d = digest () in
+  expect_error (run ~flags:"--topology-isolate-foreign" ~src ~digest_text:d ())
+    "hook 'App.Back.start' asks for `needs IO.Foreign`, but the pool is not isolated";
   let (_, _, err) = run ~src ~digest_text:d () in
   Alcotest.(check bool) "only with the flag" false (contains err "is not isolated")
 
@@ -484,9 +511,10 @@ let tests = [
   Alcotest.test_case "an actor's init and handlers" `Quick test_actor_shape;
   Alcotest.test_case "a hook parameter that is not a cap" `Quick test_hook_signature;
   Alcotest.test_case "a role grant beyond the pool's written caps" `Quick test_grant_beyond_written_caps;
-  Alcotest.test_case "a hook cap beyond the pool's written caps" `Quick test_hook_cap_beyond_written_caps;
+  Alcotest.test_case "a hook that still takes a Cap(P) is refused" `Quick test_hook_cap_beyond_written_caps;
   Alcotest.test_case "a hook that reaches beyond the written caps" `Quick test_reach_beyond_written_caps;
   Alcotest.test_case "IO.Foreign in a non-isolated pool, when opted in" `Quick test_foreign_needs_isolation;
+  Alcotest.test_case "a hook asking for IO.Foreign in a non-isolated pool, when opted in" `Quick test_foreign_hook_needs_isolation;
   Alcotest.test_case "a role granted Actor.Introspect: main requests it" `Quick test_actor_kind_role_grant_ok;
   Alcotest.test_case "an Actor.Introspect grant beyond the pool's written caps" `Quick test_actor_kind_grant_beyond_written_caps;
   Alcotest.test_case "a role that reaches Actor.Introspect beyond the written caps" `Quick test_actor_kind_reach_beyond_written_caps;

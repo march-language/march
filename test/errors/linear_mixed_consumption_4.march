@@ -8,7 +8,7 @@ mod Main do
   fn g(b : Bool, st) : Int do
     if b do sink(st) else 0 end
   end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(g(false, S1(1))))
   end
 end

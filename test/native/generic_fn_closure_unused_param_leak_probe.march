@@ -35,7 +35,7 @@ mod GenericFnClosureUnusedParamLeakProbe do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("ksnd_f=" ++ float_to_string(call_f(ksnd, 4, 0.0)))
     println("kfst_f=" ++ float_to_string(call_f(kfst, 4, 0.0)))
     println("ksnd_s=" ++ int_to_string(call_s(ksnd, 4, 0)))

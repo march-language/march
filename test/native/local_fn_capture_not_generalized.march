@@ -28,7 +28,7 @@ mod LocalFnCaptureNotGeneralized do
     fold(a, b, go)
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let lt = fn x -> fn y -> x < y
     println(String.join(union([], [2, 30, 3], lt), ","))
     let s = Set.union(Set.from_list([1, 2], lt), Set.from_list([2, 3], lt), lt)

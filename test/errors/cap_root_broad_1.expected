@@ -1,11 +1,13 @@
 exit: 1
--- HINT: CAPABILITY ------- errors/cap_root_broad_1.march
+-- CAPABILITY ------------- errors/cap_root_broad_1.march
 
-This declaration uses `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]
+`Cap(IO)` was retired: capability values grant nothing since the current authority replaced them. [cap_param_retired]
+help: remove it; code uses the current authority, which `main`'s `needs` clause asks for and each operation checks.
 
 18 |   type Loot = Loot(Cap(IO))
-       ^^^^^^^^^^^^^^^^^^^^^^^^^
+                        ^^^^^^^
 
+    run `march --explain cap_param_retired`
 
 
 -- CAPABILITY ------------- errors/cap_root_broad_1.march

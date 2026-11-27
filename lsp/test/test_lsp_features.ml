@@ -1512,7 +1512,7 @@ mod Main do
       end
     end
   end
-  fn main(c : Cap(IO.Console), f : Cap(IO.FileRead)) do
+  fn main() needs IO.Console, IO.FileRead do
     println(Dep.slurp("/nonexistent"))
   end
 end
@@ -1530,7 +1530,7 @@ mod Main do
       end
     end
   end
-  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Console do
     println(A.go("q"))
   end
 end

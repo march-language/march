@@ -30,7 +30,7 @@ mod CertRotateC do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let old = Authority.must(Env.require("OLD_PKI"))
     let creds = match (NodeCert.key_from_hex(read(old ++ "/node-b.key"), 64), NodeCert.from_text(read(old ++ "/node-b.cert")),
                        NodeCert.key_from_hex(read(Authority.must(Env.require("PKI")) ++ "/operator.pub"), 32)) do

@@ -70,7 +70,7 @@ let run_capture cmd =
 let app = "relapp"
 
 let program =
-  "mod Relapp do\n  needs IO.Console\n  needs IO.Clock\n  fn main(_c : Cap(IO.Console)) : () do\n    println(\"ready\")\n    sleep_ms(600000)\n  end\nend\n"
+  "mod Relapp do\n  needs IO.Console\n  needs IO.Clock\n  fn main() : () needs IO.Console do\n    println(\"ready\")\n    sleep_ms(600000)\n  end\nend\n"
 
 let forge_toml ~hot =
   Printf.sprintf "[package]\nname = \"%s\"\nversion = \"0.3.0\"\ntype = \"app\"\n%s" app

@@ -10,7 +10,7 @@ mod Main do
       Tok(n) -> n
     end
   end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     IO.puts(int_to_string(id_of(task_cancel_token_new())))
   end
 end

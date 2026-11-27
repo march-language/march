@@ -15,7 +15,7 @@ mod Main do
 
   derive Eq for SqlValue
 
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let a = PFloat(3.14)
     let b = PFloat(3.14)
     println(bool_to_string(a == b))

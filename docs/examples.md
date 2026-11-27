@@ -411,7 +411,7 @@ end
 
 ### capabilities.march
 
-The capability security model. Shows `needs IO` declarations, `Cap(IO.Console)` and `Cap(IO.Network)` in function signatures, capability narrowing with `cap_narrow`, and higher-order capability passing.
+The capability security model. Shows `needs` declarations, `main`'s request, narrowing a block with `restrict`, and closures keeping the authority they were made under.
 
 ```march
 needs IO
@@ -419,17 +419,16 @@ needs IO
 -- Pure functions need no capability
 fn format_greeting(name : String) : String do "Hello, " ++ name ++ "!" end
 
--- IO functions take an explicit capability token
-fn greet(cap : Cap(IO.Console), name : String) : Unit do
+-- IO functions use the current authority; the module declares what they need
+fn greet(name : String) : Unit do
   println(format_greeting(name))
 end
 
--- Narrow the root cap to least-privilege sub-capabilities
-fn main() : Unit do
-  let cap         = root_cap
-  let console_cap = cap_narrow(cap)
-  let net_cap     = cap_narrow(cap)
-  greet(console_cap, "Alice")
+-- `main` asks for the program's authority; `restrict` narrows it for a block
+fn main() : Unit needs IO.Console, IO.Network do
+  restrict IO.Console do
+    greet("Alice")
+  end
 end
 ```
 

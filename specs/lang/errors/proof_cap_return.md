@@ -25,10 +25,10 @@ mod Main do
     needs IO
     needs Db.Ready
 
-    fn pretend(c : Cap(IO)) : Cap(Db.Ready) do mint_cap(c) end
+    fn pretend() : Cap(Db.Ready) do mint_cap() end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     ()
   end
 end
@@ -45,7 +45,7 @@ mod Main do
     proof cap Ready
     needs IO
 
-    fn open_db(c : Cap(IO)) : Cap(Db.Ready) do mint_cap(c) end
+    fn open_db() : Cap(Db.Ready) do mint_cap() end
   end
 
   mod App do
@@ -54,7 +54,7 @@ mod Main do
     fn use_db(r : Cap(Db.Ready)) : Cap(Db.Ready) do r end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     ()
   end
 end

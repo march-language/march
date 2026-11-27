@@ -22,7 +22,7 @@ mod ProcessSpawnSigmask do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+  fn main() needs IO.Console, IO.Process do
     probe("USR1")
     probe("PIPE")
     match Authority.must(Process.spawn_async("sh", ["-c", "kill -USR1 $$; echo survived"])) do

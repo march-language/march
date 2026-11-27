@@ -50,7 +50,7 @@ end
 The grant on `main` is a ceiling on the whole program: a dependency that
 tries to open a socket in a program granted only `IO.Console` is rejected at
 compile time. That only means something if a program with no grant really
-can do nothing, so undeclared IO is an error rather than an implicit `Cap(IO)`.
+can do nothing, so undeclared IO is an error rather than an implicit `needs IO`.
 
 See also: [the language reference](../capabilities.md).
 

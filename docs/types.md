@@ -96,7 +96,7 @@ wait. The formal typing rules for the core language are in
 | **Modules** | `opaque type` and `ptype` hide a type's representation outside its module; a type from another module is written `Http.Method`. | [Modules]({{ site.baseurl }}/docs/modules/) |
 | **Refinement types** | `{Int \| _ >= 0}` narrows a type to the values a predicate admits, checked by Z3 at compile time. | [Refinement Types]({{ site.baseurl }}/docs/refinement-types/) |
 | **Linear types** | `linear` and `affine` qualify a type so its values are used exactly once, or at most once. | [Linear Types]({{ site.baseurl }}/docs/linear-types/) |
-| **Capabilities** | `Cap(IO.Console)` is a type: `main`'s parameter of that type grants the program the console. Capabilities are declared, never inferred. | [Capabilities]({{ site.baseurl }}/docs/capabilities/) |
+| **Capabilities** | `needs IO.Console` on `main` asks for the console; each operation checks it. Capabilities are declared, never inferred, and a proof capability `Cap(X)` is a value only its module can mint. | [Capabilities]({{ site.baseurl }}/docs/capabilities/) |
 | **Memory model** | Static types let the compiler specialize generic code, compile lambdas to plain data, and skip write barriers. | [Memory Model]({{ site.baseurl }}/docs/memory-model/) |
 
 ---

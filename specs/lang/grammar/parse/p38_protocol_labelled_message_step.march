@@ -22,7 +22,7 @@ mod P38ProtocolLabelledMessageStep do
     reply: Logger -> Client : String
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(1)
   end
 end

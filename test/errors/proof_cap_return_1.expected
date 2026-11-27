@@ -5,8 +5,8 @@ The function `make` returns `Cap(Db.P)` but `Cap(Db.P)` is a proof capability de
 Only public functions of `Db` can construct `Cap(Db.P)`.
 hint: accept `Cap(Db.P)` as a parameter and pass it through, or call a factory in `Db`.
 
-23 |     fn make(cap : Cap(IO)) : Cap(Db.P) do mint_cap(cap) end
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+23 |     fn make() : Cap(Db.P) do mint_cap() end
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     run `march --explain proof_cap_return`
 

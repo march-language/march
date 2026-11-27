@@ -4,7 +4,7 @@ mod Main do
   -- precondition; the total twin `List.nth_opt` is suggested.
   needs IO.Console
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(List.nth([1, 2, 3], 5)))
   end
 end

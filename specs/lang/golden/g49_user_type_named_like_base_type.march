@@ -61,7 +61,7 @@ mod Main do
     end
   end
 
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let b = task_cancel_token_new()
     IO.puts(show_tok(Tok(7)))
     IO.puts(show_tok(Other("x")))

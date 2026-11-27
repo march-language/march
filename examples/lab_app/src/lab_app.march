@@ -97,12 +97,13 @@ mod LabApp do
     end
 
     -- Order.Stock, bound to a function: the pool's environment, the session,
-    -- the role's grant (`role Stock needs IO.Mut`), the entry state.
-    fn stock(env : Env, s : Cap(Session.Live), m : Cap(IO.Mut), st : Order_Stock.Entry) : Order_Stock.Yield do
+    -- the entry state.  Its grant (`role Stock needs IO.Mut`) is checked at
+    -- compile time against everything it reaches; it takes no capability.
+    fn stock(env : Env, s : Cap(Session.Live), st : Order_Stock.Entry) : Order_Stock.Yield do
       Order_Stock.recv_Want(s, st, fn (n, st1) ->
         if n < 3 do
           let st2 = Order_Stock.choose_have(s, st1, reply(env, n))
-          stock(env, s, m, Order_Stock.send_Book(s, st2, n))
+          stock(env, s, Order_Stock.send_Book(s, st2, n))
         else
           let st2 = Order_Stock.choose_out(s, st1, reply(env, n))
           Order_Stock.close(s, Order_Stock.send_Skip(s, st2, n))
@@ -115,7 +116,7 @@ mod LabApp do
     actor LedgerActor do
       state { total : Int, node : String, sessions : LinearMap(String, Order_Ledger.Parked_Ledger) }
       init(env : Env) { total: 0, node: env.node, sessions: LinearMap.empty_string() }
-      on Start(sid : String, s : Cap(Session.Live), _con : Cap(IO.Console)) do
+      on Start(sid : String, s : Cap(Session.Live)) do
         if state.total == 0 do Authority.ignore(println("ledger: first session on " ++ state.node)) else () end
         let parked = Order_Ledger.await_have_out(s, Order_Ledger.register(s, 0))
         match LinearMap.put(state.sessions, sid, parked) do

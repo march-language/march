@@ -725,7 +725,7 @@ mod Main do
       end)
   end
 
-  fn main(io : Cap(IO)) do
+  fn main() needs IO do
     let c = Authority.must(Actor.introspect())
     let w = spawn(Worker)
     let _r = Actor.register(w, "worker")
@@ -763,7 +763,7 @@ mod Main do
       println(cr.kind ++ " under " ++ sup ++ ", restart " ++ int_to_string(cr.restart)))
   end
 
-  fn main(io : Cap(IO)) do
+  fn main() needs IO do
     busiest(Authority.must(Actor.introspect()))
   end
 end
@@ -784,7 +784,7 @@ mod Main do
     List.any(fs, fn f -> f.severity == "critical")
   end
 
-  fn main(io : Cap(IO)) do
+  fn main() needs IO do
     let c = Authority.must(Actor.introspect())
     if check(c) do
       println("critical finding")
@@ -1534,8 +1534,9 @@ Inputs:
 The two table commands print the table instead of a record per actor. For the
 rows as values, call `Recon.top(intro, "mailbox", 10)` (a list of `TopRow`).
 
-Capabilities are pre-bound names: `console` (`Cap(IO.Console)`), `clock`,
-`intro` (`Cap(Actor.Introspect)`), `debug` (`Cap(Actor.Debug)`).
+Two capabilities are pre-bound names: `intro` (`Cap(Actor.Introspect)`) and `debug`
+(`Cap(Actor.Debug)`). Console and clock operations need no name: they use the current
+authority.
 
 ### How values print
 

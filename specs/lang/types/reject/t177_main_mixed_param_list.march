@@ -1,4 +1,4 @@
--- EXPECT-ERROR: only arguments of type `Cap(IO)`
+-- EXPECT-ERROR: `main` must take no arguments
 mod Main do
   -- R1 stage D (2026-08-10): the relaxation to `main`'s signature is "one
   -- capability parameter" -> "any number of capability parameters", NOT
@@ -10,7 +10,7 @@ mod Main do
   -- meaning in the grant.
   needs IO
 
-  fn main(cap : Cap(IO), n : Int) : () do
+  fn main(n : Int) : () needs IO do
     println(int_to_string(n))
     ()
   end

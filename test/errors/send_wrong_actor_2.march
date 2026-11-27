@@ -18,7 +18,7 @@ mod Main do
     on Tally(k : Int) do { state with s: state.s ++ int_to_string(k) } end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let c = spawn(Counter)
     let l = spawn(Labels)
     send(c, Tally(1))

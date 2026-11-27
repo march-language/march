@@ -85,7 +85,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = 40
     leg_from_list(0, 3, 0)
     let a = live_allocs()

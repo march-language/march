@@ -12,16 +12,21 @@
 --
 -- Threading through a private helper is the point: authority flows down by
 -- parameter, which is what makes "received, never taken" true of the value.
+-- Ocap phase 7b: `main` no longer receives a value. It ASKS, with a `needs`
+-- clause, and the program runs under that authority: the private helper
+-- below uses it without being handed anything. (The `Cap(IO)` parameter form
+-- is deprecated, `deprecated_main_cap`.) If this file ever stops
+-- typechecking, reject/t152 has stopped being a fix and started being a
+-- removal.
 mod GrantedRoot do
   needs IO
-
-  pfn write_report(w : Cap(IO.FileWrite), body : String) : Bool do
+  pfn write_report(body : String) : Bool do
+    let _ = body
     true
   end
-
-  fn main(cap : Cap(IO)) do
-    let w : Cap(IO.FileWrite) = cap_narrow(cap)
-    let ok = write_report(w, "report")
-    println("root received at the boundary and threaded down")
+  fn main() needs IO do
+    let ok = write_report("report")
+    let _ = ok
+    println("the request is made at the boundary; the helper uses it")
   end
 end

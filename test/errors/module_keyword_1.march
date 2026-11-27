@@ -1,6 +1,6 @@
 module Main do
   needs IO.Console
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("hello")
   end
 end

@@ -14025,8 +14025,7 @@ void *march_cap_narrow(void *cap) {
    a Cap(IO) is always NULL today; the moment one could carry a dictionary the
    two backends would silently disagree, compiled inheriting it and
    interpreted not.  Same rule as eval.ml's mint_cap. */
-void *march_mint_cap(void *cap) {
-    (void)cap;
+void *march_mint_cap(void) {
     return NULL;
 }
 

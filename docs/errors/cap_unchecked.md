@@ -23,7 +23,7 @@ the reason the warning names.
 ```march
 mod Main do
   needs IO.Console
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("before")
     App.stop()
     println("after")
@@ -40,7 +40,7 @@ every mode.
 ```march
 mod Main do
   needs IO.Console
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("before")
     println("after")
   end

@@ -69,7 +69,7 @@ mod MapFloatKeyLeakProbe do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("size=" ++ int_to_string(size_leg(4, 0)))
     println("replace_remove=" ++ int_to_string(replace_remove_leg(4, 0)))
     println("drop=" ++ int_to_string(drop_leg(4, 0)))

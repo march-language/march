@@ -18,7 +18,7 @@ mod PidField do
   type Hello = { from : Pid(Counter), n : Int }
   derive Json for Hello
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("unreachable")
   end
 end

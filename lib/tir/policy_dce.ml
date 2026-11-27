@@ -180,7 +180,7 @@ let check_noio (io_fns : StringSet.t) (io_mods : StringSet.t) (fd : Tir.fn_def) 
   | [] -> None
   | callee :: _ ->
     Some (Printf.sprintf
-      "function `%s` (specialized to a NoIO policy) calls `%s`, which requires Cap(IO).\n\
+      "function `%s` (specialized to a NoIO policy) calls `%s`, which requires IO.\n\
        IO is forbidden in NoIO / Realtime functions."
       fd.Tir.fn_name callee)
 

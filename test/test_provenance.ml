@@ -434,7 +434,7 @@ let test_compiled_with_debug_info_runs () =
   fn boom(n : Int) : Int do
     if n > 2 do panic("boom at " ++ int_to_string(n)) else n end
   end
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("before")
     println(int_to_string(boom(5)))
   end

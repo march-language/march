@@ -21,6 +21,39 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`Cap(IO.*)` values are retired** (object capabilities, phase 7b). A function no longer
+  receives its authority as an argument: it uses the current authority, which `main`'s
+  `needs` clause asks for and each operation checks. A `Cap(IO.X)` type anywhere outside
+  `main`'s parameters is now the error `cap_param_retired`; its fix deletes the parameter
+  and the argument at each call in the same file (`forge fix` applies it). Proof
+  capabilities (`Cap(Session.Live)`, `Cap(Actor.Introspect)`, a program's own) stay.
+- **`fn main(c : Cap(IO.X))` is deprecated** for one release: it still asks for the same
+  authority, with the warning `deprecated_main_cap`, whose fix rewrites it to
+  `fn main() needs IO.X`. It will be removed in the next release.
+- **`cap_narrow` and `root_cap` are gone.** Each is an error (`cap_narrow_retired`,
+  `root_cap_reference`) everywhere, test blocks and the REPL included. To run code under
+  less authority, use `restrict SCOPE do ... end`.
+- **`--cap-sandbox` grants what `main`'s `needs` clause asks for**, as it granted what
+  `main`'s `Cap` parameters named.
+- **A realtime function's `needs` clause is checked like its parameters were.** A function
+  taking `Tagged(_, Realtime)` cannot ask for `needs IO`, `needs Alloc` or `needs Panic`
+  (`realtime_mixed`), as it could not take `Cap(IO)`, `Cap(Alloc)` or `Cap(Panic)`.
+- **`mint_cap()` takes no argument.** A proof capability is minted with `mint_cap()`; the old
+  `mint_cap(c)` is `mint_cap_invalid`, with a fix that drops the argument.
+- **Choreography runners take no capabilities.** A role body is always
+  `(Cap(Session.Live), Entry) -> Yield`: `role R needs ...` no longer adds `Cap(P)`
+  parameters to it, `run_<Role>`, `host_<Role>` and `host_<Role>_or` no longer take a
+  `Cap(IO)`, and the cluster fronts (`cluster_`, `offer_`, `initiate_`, their hosted forms)
+  no longer take the grant. The grant is checked at compile time against everything the
+  role's code reaches, as before. A topology pool's hook takes only the node, and the
+  generated `main` requests `needs IO`.
+- **`SessionNode.run`, `run_hosted` and `run_hosted_or` no longer take a `Cap(IO)`**, and
+  `SessionNode.drain_epochs(soft_ms, hard_ms)` is a checked operation under `IO.Cluster`
+  returning `Result((), CapError)`.
+- **Capability diagnostics recommend `needs`.** `cap_grant` and `cap_grant_exceeded` suggest
+  (and fix with) a `needs` clause on `main`, or a `needs` line when the module's is `main`'s
+  request, instead of a `Cap` parameter; the old fix could produce `fn main(, ...)`.
+
 - **Compiles lower only the standard-library functions the program can reach.** The
   native compile used to lower all ~4,200 stdlib module functions to the compiler's IR and
   then drop the ~4,100 the program never calls; it now lowers a function's body only when
@@ -41,7 +74,7 @@ git log is authoritative for exact commits.
   `ClusterNode.start(cfg)` no longer takes the `Cap(IO)` and reports a refusal in its
   `String` error. The new kinds are `Actor.Introspect` and `Actor.Debug` (outside `IO`, so
   `needs IO` no longer covers inspecting other actors) and `IO.Cluster`; `main` requests
-  them with a parameter such as `Cap(Actor.Introspect)`. Write `Authority.must(Actor.introspect())` where you wrote
+  them in its `needs` clause (`fn main() needs Actor.Introspect`). Write `Authority.must(Actor.introspect())` where you wrote
   `Actor.introspect(io)`.
 - **Compiles are about another 0.2 s faster.** Four lookups in the front end that rescanned
   a whole list or file per item (a module's names per variable when lowering, a source file

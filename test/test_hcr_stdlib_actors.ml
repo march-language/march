@@ -251,7 +251,7 @@ let app_src = {|mod HrApp do
     on Bump(k : Int) do { n: state.n + k } end
   end
 
-  fn main(cap : Cap(IO)) do
+  fn main() needs IO do
     let c = spawn(Counter)
     send(c, Bump(1))
     let _q = NodeQueue.start_local(fn _ -> ())

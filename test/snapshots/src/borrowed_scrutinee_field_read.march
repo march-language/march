@@ -20,7 +20,7 @@ mod BorrowedScrutineeFieldRead do
     string_concat(head, int_to_string(read_only(b)))
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let b = Box("ab", "cde")
     println(escapes(b))
   end

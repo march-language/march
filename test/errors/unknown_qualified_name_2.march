@@ -25,5 +25,5 @@ mod Main do
       fn (_x, st2) -> Stream_Prod.Yield(Stream_Prod.Secret),
       fn (_x, st2) -> Stream_Prod.close(s, st2))
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

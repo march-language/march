@@ -15,5 +15,5 @@ mod Main do
     let _done = Fan_B.close(s, st1)
     Fan_B.close(s, Fan_B.send_Second(s, st1, 10))
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

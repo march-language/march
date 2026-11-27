@@ -39,7 +39,7 @@ mod Main do
   pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1) : Stream_Cons.Yield do
     Stream_Cons.close(s, Stream_Cons.choose_done(s, st, true))
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end
 ```
 
@@ -69,7 +69,7 @@ mod Main do
     Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (_n, st1) ->
       Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end
 ```
 

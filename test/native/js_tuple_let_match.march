@@ -37,7 +37,7 @@ mod JsTupleLetMatch do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(int_to_string(step({ hp: 40, shake: 2 })))
     println(shown(socket("bulwark", 0, "hips")) ++ " " ++ shown(socket("mender", 2, "top")) ++ " " ++ shown(socket("mender", 1, "top")) ++ " " ++ shown(socket("x", 0, "back")))
     let got = match ("bulwark", 0) do

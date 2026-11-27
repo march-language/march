@@ -2718,7 +2718,7 @@ let run_groups name (groups : (string * unit Alcotest.test_case list) list) =
    the raw value 7 is never really closed. *)
 let handle_roundtrip_src = {|mod HandleRoundtrip do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let h : Socket = handle_new(4, 7, 0) -- kind TCP_BORROWED
     let raw = handle_enter(h, 3) -- kind TCP
     handle_leave(h)
@@ -2735,7 +2735,7 @@ let handle_roundtrip_expected = "[7, true, -1, false]"
 
 let handle_containers_src = {|mod HandleContainers do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let h : Socket = handle_new(4, 7, 0) -- kind TCP_BORROWED
     let xs : List(Socket) = [h, h]
     let m : Map(String, Socket) = Map.singleton("a", h)
@@ -2763,7 +2763,7 @@ let handle_vs_user_type_src = {|mod Main do
       end
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let p = App.mk(3, 4)
     let h : Process = handle_new(4, 7, 0) -- kind TCP_BORROWED
     let hs : List(Process) = [h, h]
@@ -2789,7 +2789,7 @@ let handle_vs_user_record_src = {|mod App do
       W(s) -> s.name ++ int_to_string(f(s))
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let s : Socket = { fd: 42, name: "x" }
     let h : Listener = handle_new(4, 7, 0) -- kind TCP_BORROWED
     println(int_to_string(f(s)))
@@ -2864,7 +2864,7 @@ let process_reap_src ?(trap = false) ~drop () = Printf.sprintf {|mod ProcessReap
     pid
   end
 
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+  fn main() needs IO.Console, IO.Process do
     let pid = %s
     println("child after release: " ++ settle(pid, 250))
   end
@@ -2901,7 +2901,7 @@ let process_wait_race_src = {|mod WaitRace do
     if i == n do good else rounds(i + 1, n, good + one_round()) end
   end
 
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Process, IO.Spawn do
     println("rounds with one Ok and one Closed: " ++ int_to_string(rounds(0, 6, 0)) ++ "/6")
   end
 end

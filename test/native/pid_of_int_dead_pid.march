@@ -38,7 +38,7 @@ mod PidOfIntDeadPid do
     is_alive(Authority.must(Actor.pid_from_int(n)))
   end
 
-  fn main(io : Cap(IO), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let intro = Authority.must(Actor.introspect())
     let n = spawn_and_kill()
     run_until_idle()

@@ -5,8 +5,8 @@ The private function `run_migrations` in `Db` cannot mint `Cap(Db.Migrated)`. [p
 Only public functions of `Db` can construct `Cap(Db.Migrated)`.
 hint: make this function public, or accept `Cap(Db.Migrated)` as a parameter and pass it through.
 
-17 |   pfn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
-       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+17 |   pfn run_migrations() : Cap(Db.Migrated) do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     run `march --explain proof_cap_mint_private`
 

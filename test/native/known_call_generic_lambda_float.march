@@ -72,7 +72,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let n = 20000
     let a = live_allocs()
     flat("generic lambda returns its first Float", a, float_to_string(keep_first(n, 0.0)))

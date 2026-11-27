@@ -69,7 +69,7 @@ mod NestedFloatPatternLeakProbe do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("unique=" ++ float_to_string(unique_leg(4, 0.0)))
     println("shared=" ++ float_to_string(shared_leg(4, 0.0)))
     let b0 = live_allocs()

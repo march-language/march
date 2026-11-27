@@ -22,7 +22,7 @@ mod ReceiveInHandlerAtExit do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let w = spawn(Waiter)
     send(w, Park)
     sleep_ms(100)

@@ -1,4 +1,23 @@
 exit: 1
+-- WARNING: CAPABILITY --- errors/cap_deserialize_1.march
+
+`main` asks for its authority with `Cap` parameters, which are deprecated and will be removed in the next release: a capability value grants nothing since the current authority replaced it. [deprecated_main_cap]
+help: request it with a `needs` clause: `fn main() needs IO do`.
+
+19 |   fn main(cap : Cap(IO)) do
+                     ^^^^^^^
+
+
+    possible fix (a guess: check it before applying it):
+
+19 -   fn main(cap : Cap(IO)) do
+19 +   fn main() do
+19 -   fn main(cap : Cap(IO)) do
+19 +   fn main(cap : Cap(IO)) needs IO do
+
+    run `march --explain deprecated_main_cap`
+
+
 -- CAPABILITY ------------ errors/cap_deserialize_1.march
 
 `Cap(IO)` cannot be serialized — a capability may only be received, never constructed. [cap_deserialize]

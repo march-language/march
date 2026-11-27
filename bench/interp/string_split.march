@@ -15,7 +15,7 @@ mod StringSplit do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let s = build(20000, "")
     let parts = String.split(s, ",")
     println("checksum=" ++ int_to_string(count7(parts, 0)))

@@ -54,7 +54,7 @@ pfn router(conn) do
   end
 end
 
-pfn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_websocket : Cap(IO.WebSocket)) do
+pfn main() needs IO.Console, IO.NetListen, IO.WebSocket do
   println("WebSocket echo server starting on port 9877 ...")
   Authority.must(HttpServer.new(9877)
   |> HttpServer.plug(router)

@@ -120,7 +120,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Process, IO.Spawn do
     let n = 40
     leg_read(0, 3, 0)
     let a = live_allocs()

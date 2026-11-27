@@ -1,0 +1,41 @@
+exit: 1
+-- CAPABILITY ---------- errors/cap_param_retired_1.march
+
+`greet` takes a `Cap(IO.Console)` parameter, but capability values were retired: a function no longer receives its authority, it uses the current authority, which `main`'s `needs` clause asks for and each operation checks. [cap_param_retired]
+help: remove the parameter and the argument at each call; to state what `greet` may use, give it a `needs` clause.
+
+4 |   fn greet(c : Cap(IO.Console), name : String) do
+                   ^^^^^^^^^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+4 -   fn greet(c : Cap(IO.Console), name : String) do
+4 +   fn greet(name : String) do
+9 -     greet(c, "Ada")
+9 +     greet("Ada")
+
+    run `march --explain cap_param_retired`
+
+
+-- WARNING: CAPABILITY -- errors/cap_param_retired_1.march
+
+`main` asks for its authority with `Cap` parameters, which are deprecated and will be removed in the next release: a capability value grants nothing since the current authority replaced it. [deprecated_main_cap]
+help: request it with a `needs` clause: `fn main() needs IO.Console do`.
+
+8 |   fn main(c : Cap(IO.Console)) do
+                  ^^^^^^^^^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+8 -   fn main(c : Cap(IO.Console)) do
+8 +   fn main() do
+8 -   fn main(c : Cap(IO.Console)) do
+8 +   fn main(c : Cap(IO.Console)) needs IO.Console do
+
+    run `march --explain deprecated_main_cap`
+
+
+
+after fix: exit 0

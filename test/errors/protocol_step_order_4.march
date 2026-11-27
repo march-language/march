@@ -25,5 +25,5 @@ mod Main do
       Pump_A.recv_Tock(s, Pump_A.send_Tick(s, st3, 2), fn (_m, st4) ->
         Pump_A.close(s, Pump_A.choose_quit(s, st4, true))))
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

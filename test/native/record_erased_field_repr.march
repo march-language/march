@@ -24,7 +24,7 @@
 mod Main do
   needs IO
 
-  fn main(cap: Cap(IO)) do
+  fn main() needs IO do
     -- ── fully erased read: nothing constrains the payload type ───────────
     let ri = record_put(record_from_list([]), "y", 7)      -- ODD Int
     println(record_get(ri, "y"))

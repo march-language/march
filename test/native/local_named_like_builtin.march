@@ -122,7 +122,7 @@ mod LocalNamedLikeBuiltin do
     string_to_lowercase(a) < string_to_lowercase(b)
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let always = fn (a : Int, b : Int) -> true
     println("via_eq(always, 1, 2): " ++ bool_to_string(via_eq(always, 1, 2)))
     println("via_f(always, 1, 2): " ++ bool_to_string(via_f(always, 1, 2)))

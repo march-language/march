@@ -30,7 +30,7 @@ mod CeilOptOut do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+  fn main() : () needs IO.Console, IO.FileWrite do
     Inner.go()
   end
 end
@@ -117,7 +117,7 @@ mod Main do
       end
     end
   end
-  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Console do
     println(A.go("q"))
   end
 end
@@ -156,7 +156,7 @@ end
 
 let dep_main = {|mod Main do
   needs IO.Console, IO.FileRead
-  fn main(c : Cap(IO.Console), f : Cap(IO.FileRead)) do
+  fn main() needs IO.Console, IO.FileRead do
     println(CapDep.slurp("/nonexistent/cap_cache"))
   end
 end

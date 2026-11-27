@@ -81,7 +81,7 @@ mod Main do
     ()
   end
 
-  fn main(_io : Cap(IO)) do
+  fn main() needs IO do
     probe("watcher killed, then target", fn i -> pair(0, i))
     probe("target killed, then watcher", fn i -> pair(1, i))
     probe("demonitored, then both killed", fn i -> pair(2, i))

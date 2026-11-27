@@ -823,7 +823,7 @@ mod Main do
     Cons(1, Nil)
   end
 
-  fn main(_cap : Cap(IO.Console)) : Int do
+  fn main() : Int needs IO.Console do
     let xs = noisy_list()             -- not cat_nil(noisy_list())
     cat_nil(xs)
     0

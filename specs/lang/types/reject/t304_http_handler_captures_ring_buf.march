@@ -4,7 +4,7 @@
 -- handler cannot capture a RingBuf at all. Type-checked before C2 (Phase 0).
 mod Main do
   needs IO.NetListen
-  fn main(_c : Cap(IO.NetListen)) do
+  fn main() needs IO.NetListen do
     let rb = RingBuf.make(16)
     let handler = fn conn ->
       let _ = RingBuf.push(rb, 1)

@@ -54,7 +54,7 @@ let shop_march = {|mod Shop do
     init { n: 0 }
   end
 
-  fn main(c : Cap(IO)) do 0 end
+  fn main() needs IO do 0 end
 end
 |}
 
@@ -478,7 +478,7 @@ let test_hover_on_role () =
       List.iter (fun sub ->
           if not (str_contains ~sub h) then Alcotest.failf "hover lacks %S:\n%s" sub h)
         [ "role Ledger needs IO.FileWrite";
-          "(Cap(Session.Live), Cap(IO.FileWrite), Checkout_Ledger.Entry) -> Checkout_Ledger.Yield";
+          "(Cap(Session.Live), Checkout_Ledger.Entry) -> Checkout_Ledger.Yield";
           "protocol `Shop.Checkout`" ];
       (* A serves entry hovers the same way; an ungranted role says so. *)
       let h2 = hover_text p base_toml "\"Quotes.Server\"]" ~off:3 () in

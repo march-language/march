@@ -17,7 +17,7 @@ mod Main do
     f(a, b) + f(b, a)
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let ia = NativeArray.from_list_int(Cons(1, Cons(-2, Cons(3, Cons(40, Nil)))))
     let fa = NativeArray.from_list_float(Cons(1.5, Cons(-2.25, Cons(3.0, Cons(0.125, Nil)))))
     let empty_i = NativeArray.from_list_int(Nil)

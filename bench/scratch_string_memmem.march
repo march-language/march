@@ -27,7 +27,7 @@ mod ScratchStringMemmem do
     end
   end
 
-  fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Clock, IO.Console do
     -- 32MB haystack, needle absent (worst case: every byte examined).
     let buf = String.repeat("abcdefghij", 3200000)
     let t0 = Authority.must(System.now())

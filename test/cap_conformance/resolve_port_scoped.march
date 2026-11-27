@@ -13,7 +13,7 @@ mod ResolvePortScoped do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect)) do
+  fn main() needs IO.Console, IO.NetConnect do
     println(verdict(Udp.resolve("localhost", 53)))
     println(verdict(Udp.resolve("localhost", 54)))
   end

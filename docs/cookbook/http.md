@@ -120,7 +120,7 @@ mod EchoServer do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen)) do
+  fn main() do
     println("Listening on :8080")
     Authority.must(HttpServer.new(8080)
     |> HttpServer.plug(handle)

@@ -108,7 +108,7 @@ mod ClusterApLocal do
     end end
   end
 
-  fn session(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int) : () do
+  fn session(h : Cap(ClusterNode.Live), n : Int) : () do
     match Echo_Run.initiate_Client(h, fn (s, st) -> ask(s, st, n)) do
       Ok(_) -> Authority.ignore(println("Client: session " ++ int_to_string(n) ++ " done"))
       Err(e) -> Authority.ignore(println("Client: " ++ Echo_Run.error_message(e)))
@@ -122,7 +122,7 @@ mod ClusterApLocal do
     ()
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "local-secret", 1)
     match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
@@ -137,8 +137,8 @@ mod ClusterApLocal do
             -- back to what it was before them (measured once the killed
             -- actors have been reaped).
             let before = Scheduler.live_procs()
-            session(c, h, 1)
-            session(c, h, 2)
+            session(h, 1)
+            session(h, 2)
             sleep_ms(300)
             retired("offered sessions", before)
             SessionNode.close_offer(o)

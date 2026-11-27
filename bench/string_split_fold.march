@@ -36,7 +36,7 @@ mod StringSplitFold do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let buf = String.repeat("aaa,bbb,ccc,ddd\n", rows())
     println("fold_split checksum=" ++ to_string(go_fold(buf, 0, iterations(), 0)))
     println("fold_split_ranges checksum=" ++ to_string(go_ranges(buf, 0, iterations(), 0)))

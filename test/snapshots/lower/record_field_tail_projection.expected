@@ -687,7 +687,7 @@ fn keep(s : String) : List(String) =
 alloc List.Cons(s, $t1)
 
 ## main
-fn main(_c : Cap(IO.Console)) : () =
+fn main() : () =
   let ms : List({ addr : String, node_id : String }) = let $t5 : { addr : String, node_id : String } = let $t2 : String = let $t1 : String = int_to_string(0) in
 ++("n", $t1) in
 let $t4 : String = let $t3 : String = int_to_string(0) in

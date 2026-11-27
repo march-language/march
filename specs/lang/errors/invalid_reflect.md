@@ -31,7 +31,7 @@ mod Main do
     n + 1
   end
 
-  fn main(_cap : Cap(IO.Console)) : Int do
+  fn main() : Int needs IO.Console do
     noisy(1)
   end
 end

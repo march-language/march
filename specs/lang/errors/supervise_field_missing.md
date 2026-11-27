@@ -33,7 +33,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let _ = spawn(Pool)
   end
 end
@@ -63,7 +63,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let _ = spawn(Pool)
   end
 end

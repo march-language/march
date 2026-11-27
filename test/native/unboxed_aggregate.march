@@ -61,7 +61,7 @@ mod UnboxedAggregate do
     end
   end
 
-  fn main(cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     let a = mk(1.0, 2.0, 3.0)
     let b = mk(0.5, 0.5, 0.5)
 

@@ -24,7 +24,7 @@ mod UdpCloseWhileRecv do
     end end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     let _ = Authority.must(Vault.new("ucwr"))
     let sock = match Authority.must(Udp.open("127.0.0.1", 0)) do
       Ok(s) -> s

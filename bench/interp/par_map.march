@@ -87,7 +87,7 @@ pfn par_map_sum(xs : List(Int), chunk_size : Int) : Int do
   par_map_inner(xs, chunk_size, Nil, chunk_size)
 end
 
-pfn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
+pfn main() : Unit needs IO.Console, IO.Spawn do
   -- 20K elements, 1000 per chunk = 20 tasks
   -- Scaled up from 10K for more parallelism to measure.
   let n = 20000

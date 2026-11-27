@@ -199,7 +199,7 @@ pfn rounds(k : Int, ia, ib, fa, fb, acc : Float) : Float do
   else rounds(k - 1, ia, ib, fa, fb, acc +. round(ia, ib, fa, fb)) end
 end
 
-fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
+fn main() : Unit needs IO.Clock, IO.Console do
   let n = 4000000
   let ia = NativeArray.from_list_int(make_int_list(n))
   let ib = NativeArray.from_list_int(make_int_list(n))

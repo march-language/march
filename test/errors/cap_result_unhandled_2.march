@@ -11,7 +11,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     show(Some(1))
   end
 end

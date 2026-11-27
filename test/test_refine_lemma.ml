@@ -242,7 +242,7 @@ end
           run ~args:""
             ("mod N do\n" ^ console
            ^ "  fn inc(n : Int) : Int do n + 1 end\n\
-             \  fn main(_c : Cap(IO.Console)) do\n    println(int_to_string(inc(4611686018427387903)))\n  end\nend\n")
+             \  fn main() needs IO.Console do\n    println(int_to_string(inc(4611686018427387903)))\n  end\nend\n")
         in
         if not (contains ran "attempt to add with overflow") then
           Alcotest.failf "inc at the largest Int must panic, not return:\n%s" ran;
@@ -539,7 +539,7 @@ let erase_src ~lemmas =
       l "      Cons(_, t) -> cat_nil(t)";
       l "    end";
       l "  end";
-      "  fn main(_cap : Cap(IO.Console)) do";
+      "  fn main() needs IO.Console do";
       "    let xs = Cons(1, Cons(2, Nil))";
       l "    cat_nil(xs)";
       "    println(int_to_string(List.length(cat(xs, Nil))))";
@@ -654,7 +654,7 @@ let erase =
     assert cat(xs, xs) == xs
     ()
   end
-  fn main(_cap : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     boom(Cons(1, Nil))
     println("ran")
   end
@@ -701,7 +701,7 @@ end
         let src ~lemma =
           "mod N do\n  needs IO.Console\n"
           ^ (if lemma then "  @[lemma]\n  fn which_children(n : Int) : {Unit | n == n} do () end\n" else "\n\n")
-          ^ "  fn main(_cap : Cap(IO.Console)) do\n    let kids = Supervisor.which_children(:nope)\n    println(int_to_string(List.length(kids)))\n  end\nend\n"
+          ^ "  fn main() needs IO.Console do\n    let kids = Supervisor.which_children(:nope)\n    println(int_to_string(List.length(kids)))\n  end\nend\n"
         in
         let a = output `Interp (src ~lemma:true) and b = output `Interp (src ~lemma:false) in
         (* The program's own line, not the last one: dynamic supervisors are
@@ -727,7 +727,7 @@ end
       ()
     end
   end
-  fn main(_cap : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     A.l(1)
     B.l(2)
   end
@@ -964,7 +964,7 @@ let iface_laws =
     gated "iface_law_erased: laws and the method copies never run" (fun () ->
         let src =
           "mod N do\n  needs IO.Console\n" ^ joinable ~proof:true
-          ^ "  fn main(_cap : Cap(IO.Console)) do\n    println(int_to_string(List.length(join([1, 2], [3]))))\n  end\nend\n"
+          ^ "  fn main() needs IO.Console do\n    println(int_to_string(List.length(join([1, 2], [3]))))\n  end\nend\n"
         in
         List.iter
           (fun mode ->
@@ -1973,7 +1973,7 @@ end
         Alcotest.failf "strict proof accepted:\n%s" out); gated "assert by: erasure without lemma declarations" (fun () ->
       let src proof = String.concat "\n" [
         "mod Main do"; "  needs IO.Console";
-        "  fn main(_cap : Cap(IO.Console)) do";
+        "  fn main() needs IO.Console do";
         (if proof then "    assert 1 == 1 by do let x = 40 + 2 end" else "");
         "    println(\"42\")"; "  end"; "end"; ""] in
       List.iter (fun mode -> Alcotest.(check string) "runtime output" "42\n" (output mode (src true)))
@@ -1985,7 +1985,7 @@ end
   fn unchecked(n : Int) : Unit do
     assert n > 0 by do () end
   end
-  fn main(_cap : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     unchecked(0)
     println("alive")
   end

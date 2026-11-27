@@ -6,7 +6,7 @@
 -- reaches builtin generics. Type-checked before C2.
 mod Main do
   needs IO.Mut
-  fn main(_m : Cap(IO.Mut)) : Int do
+  fn main() : Int needs IO.Mut do
     let t = Authority.must(Vault.new("bufs"))
     let rb = RingBuf.make(4)
     Vault.set(t, "k", rb)

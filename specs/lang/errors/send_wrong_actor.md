@@ -29,7 +29,7 @@ mod Main do
     on Line(s : String) do { state with lines: state.lines + 1 } end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let log = spawn(Log)
     send(log, Bump(1))
   end
@@ -57,7 +57,7 @@ mod Main do
     on Line(s : String) do { state with lines: state.lines + 1 } end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let counter = spawn(Counter)
     send(counter, Bump(1))
   end

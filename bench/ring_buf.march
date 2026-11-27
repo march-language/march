@@ -33,7 +33,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = 20000000
     let t0 = System.monotonic_time()
     let (popped, rb) = drive(RingBuf.make(1024), 0, n, 0)

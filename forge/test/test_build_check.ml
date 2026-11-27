@@ -354,7 +354,7 @@ let cap_fix_before = {|mod Shapes do
     helper()
   end
 
-  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+  fn main() needs IO.Console, IO.Clock do
     greet("world")
     show(Some(1))
     println(later() > 0)
@@ -392,7 +392,7 @@ let cap_fix_after = {|mod Shapes do
     ()
   end
 
-  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+  fn main() needs IO.Console, IO.Clock do
     greet("world")
     show(Some(1))
     println(later() > 0)
@@ -416,6 +416,52 @@ let test_fix_paths_cap_results () =
   let rc = Sys.command (Printf.sprintf "march --check %s > /dev/null 2>&1" (Filename.quote f)) in
   Alcotest.(check int) "the result typechecks" 0 rc
 
+(* ocap phase 7b: `forge fix` migrates a program off the retired capability
+   values: `main`'s deprecated `Cap` parameter becomes a `needs` clause, and a
+   pass-through `Cap(IO.X)` parameter goes, with the argument at each call. *)
+let retired_fix_before = {|mod Greeter do
+  needs IO.Console
+
+  fn greet(c : Cap(IO.Console), name : String) : () do
+    println("hello, " ++ name)
+    ()
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    greet(c, "world")
+  end
+end
+|}
+
+let retired_fix_after = {|mod Greeter do
+  needs IO.Console
+
+  fn greet(name : String) : () do
+    println("hello, " ++ name)
+    ()
+  end
+
+  fn main() needs IO.Console do
+    greet("world")
+  end
+end
+|}
+
+let test_fix_paths_retired_caps () =
+  setup_hermetic_march ();
+  let dir = Filename.temp_dir "forge_fix_retired_" "" in
+  let f = Filename.concat dir "greeter.march" in
+  write_file f retired_fix_before;
+  (match Cmd_fix.run_paths [ dir ] with
+   | Ok _ -> () | Error e -> Alcotest.failf "forge fix PATH failed: %s" e);
+  Alcotest.(check string) "main and the parameter rewritten" retired_fix_after (read_file_text f);
+  (match Cmd_fix.run_paths [ dir ] with
+   | Ok msg -> Alcotest.(check string) "a second run finds nothing"
+                 "no auto-fixable diagnostics found" msg
+   | Error e -> Alcotest.failf "second forge fix PATH failed: %s" e);
+  let rc = Sys.command (Printf.sprintf "march --check %s > /dev/null 2>&1" (Filename.quote f)) in
+  Alcotest.(check int) "the result typechecks" 0 rc
+
 let test_fix_paths_only_filters_codes () =
   setup_hermetic_march ();
   let dir = Filename.temp_dir "forge_fix_only_" "" in
@@ -427,7 +473,7 @@ let test_fix_paths_only_filters_codes () =
     println("hello, " ++ name)
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     greet("world", 1)
   end
 end
@@ -1109,7 +1155,7 @@ let test_run_interpreted_passes_ffi_sources () =
         \  extern \"shim\" : Cap(Ffi) do\n\
         \    fn triple(x: Int): Int = \"forge_run_ffi_triple\"\n\
         \  end\n\n\
-        \  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do\n\
+        \  fn main() : Unit needs IO.Console, IO.Foreign do\n\
         \    println(int_to_string(triple(14)))\n\
         \    ()\n\
         \  end\n\
@@ -1203,6 +1249,8 @@ let () =
     "forge fix PATH", [
       Alcotest.test_case "rewrites capability results and is idempotent" `Quick
         test_fix_paths_cap_results;
+      Alcotest.test_case "migrates retired capability values (ocap phase 7b)" `Quick
+        test_fix_paths_retired_caps;
       Alcotest.test_case "a path with no .march files is an error" `Quick
         test_fix_paths_no_files;
       Alcotest.test_case "--only applies only the named codes" `Quick

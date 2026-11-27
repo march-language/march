@@ -25,7 +25,7 @@ mod Main do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     -- Short (< 16 byte) haystack/needle: scalar-ish path.
     println(show_opt(String.index_of("hello", "ll")))          -- Some(2)
     println(show_opt(String.index_of("hello", "xyz")))         -- None

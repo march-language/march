@@ -1863,9 +1863,9 @@ let check_main_signature (errors : Err.ctx) (decls : decl list) : unit =
              let n_caps = List.length (List.filter cap_param params) in
              Err.error ~code:Err.Code.main_signature errors ~span:clause.fc_span
                (Printf.sprintf
-                  "`main` must take zero arguments, or only arguments of type `Cap(IO)` (or narrower points of the IO lattice, e.g. `Cap(IO.Console)`, or `Cap(Actor.Introspect)` / `Cap(Actor.Debug)`) — the capabilities the runtime GRANTS the program at startup; the whole program is then held to their union.\n\
+                  "`main` must take no arguments: it asks for the program's authority with a `needs` clause, and the runtime passes it nothing; the deprecated form, where every argument is a `Cap(IO)` or a narrower kind such as `Cap(IO.Console)`, is still accepted for one release.\n\
                    Found %d parameter%s, %d of which %s a capability.\n\
-                   help: use `fn main() : () do ... end`, `fn main(cap : Cap(IO)) : () do ... end` for full IO, or e.g. `fn main(console : Cap(IO.Console), spawn : Cap(IO.Spawn)) : () do ... end` to grant exactly what the program needs."
+                   help: use `fn main() : () needs IO.Console, IO.Spawn do ... end` to request exactly what the program needs (`Cap` parameters on `main` are deprecated since ocap phase 7b)."
                   n (if n = 1 then "" else "s")
                   (n - n_caps) (if n - n_caps = 1 then "is not" else "are not")))
       | _ -> ()

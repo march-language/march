@@ -39,7 +39,7 @@ pfn par_fib(n : Int, threshold : Int) : Int do
   end
 end
 
-pfn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
+pfn main() : Unit needs IO.Console, IO.Spawn do
   -- fib(25) with parallel threshold at 18
   -- Scaled down from fib(40, 20) for interpreter speed.
   let result = par_fib(25, 18)

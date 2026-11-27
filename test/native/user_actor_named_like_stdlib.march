@@ -31,7 +31,7 @@ mod App do
     fn beat(pid, k) do send(pid, Beat(k)) end
   end
 
-  fn main(cap : Cap(IO)) do
+  fn main() needs IO do
     let a = spawn(Anchor)
     let w = spawn(Writer)
     let c = spawn(Net.ClusterNodeActor)

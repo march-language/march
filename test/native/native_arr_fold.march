@@ -29,7 +29,7 @@
 -- macro regressing i32's load to unsigned.
 mod NativeArrFold do
   needs IO.Console
-  fn main(_cap : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     -- fold_int: init 3 (odd) -- 3*2+1=7, 7*2+2=16, 16*2+3=35
     let i = NativeArray.from_list_int([1, 2, 3])
     println(NativeArray.fold_int(i, 3, fn (acc, x) -> acc * 2 + x))       -- 35

@@ -55,7 +55,7 @@ mod TopologyPlace do
     end end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let h = match ClusterNode.start(ClusterNode.config("topo-1", 0, "", Nil, "topo-secret", 1)) do
       Ok(h) -> h
       Err(e) -> panic(e)

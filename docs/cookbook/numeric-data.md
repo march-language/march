@@ -29,7 +29,7 @@ if you need a `List` again:
 mod NumFast do
   needs IO.Console
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let xs = [1.0, 2.0, 3.0, 4.0]
     let arr = NativeArray.from_list_float(xs)
     let doubled = NativeArray.map_float(arr, fn x -> x *. 2.0)
@@ -59,7 +59,7 @@ where the extra speed comes from:
 mod NumFast do
   needs IO.Console
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     -- Narrow to f32 for half the bytes / double the SIMD lanes.
     let arr64 = NativeArray.from_list_float([1.0, 2.0, 3.0, 4.0])
     let arr32 = NativeArray.float_to_f32_arr(arr64)
@@ -95,7 +95,7 @@ nothing else is holding it:
 mod SortDemo do
   needs IO.Console
 
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let arr = NativeArray.from_list_int([5, 3, 9, 1, 7])
     let sorted = NativeArray.sort_int(arr)
     println(NativeArray.to_list_int(sorted))   -- [1, 3, 5, 7, 9]
@@ -176,7 +176,7 @@ mod SalesFast do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let header = ["name", "qty"]
     let rows = [["a", "3"], ["b", "4"], ["c", "5"]]
     match sum_column(rows, header, "qty") do
@@ -237,7 +237,7 @@ mod DotKernel do
     dot_tail(a, b, limit, n, vector_sum)
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let a = NativeArray.make_f32(9, 1.0)
     let b = NativeArray.make_f32(9, 2.0)
     println(float_to_string(dot_simd(a, b)))   -- 18.
@@ -303,7 +303,7 @@ mod ScanKernel do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let hay0 = NativeArray.make_u8(40, 65)
     let hay = NativeArray.set_u8(hay0, 33, 10)
     println(int_to_string(scan_simd(hay, 10)))   -- 33

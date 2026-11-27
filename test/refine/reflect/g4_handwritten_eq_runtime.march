@@ -11,7 +11,7 @@ mod G4 do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(if P(1, 3) == P(1, 2) do "eq" else "ne" end)
     ()
   end

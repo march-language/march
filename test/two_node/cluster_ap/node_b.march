@@ -24,22 +24,22 @@ mod ClusterApB do
       Echo_Client.close(s, st2))
   end
 
-  fn session(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int) : () do
+  fn session(h : Cap(ClusterNode.Live), n : Int) : () do
     match Echo_Run.initiate_Client(h, fn (s, st) -> ask(s, st, n)) do
       Ok(_) -> Authority.ignore(println("Client: session " ++ int_to_string(n) ++ " done"))
       Err(e) -> Authority.ignore(println("Client: " ++ SessionNode.run_error_message(e)))
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let seed = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A")))
     let cfg = ClusterNode.config("node-b", Authority.must(Env.require_int("MARCH_PORT_B")), "", Cons(seed, Nil), "ap-secret", 1)
     match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
-        session(c, h, 1)
-        session(c, h, 2)
+        session(h, 1)
+        session(h, 2)
         ClusterNode.stop(h)
     end
   end

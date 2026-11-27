@@ -4,8 +4,7 @@
     When the compiler is given [--topology <digest.json>] and the entry module
     has no [main], [main] is generated: it starts the ClusterNode from the
     environment, runs each pool's hook (under [Topology.hook]'s watchdog) with
-    one [cap_narrow] per [Cap(P)] parameter the hook declares plus the node
-    handle, then hands [Topology.place] one entry per served role, installs
+    the node handle, then hands [Topology.place] one entry per served role, installs
     [Topology.drain_on_signal] and ends in [Topology.supervise_offers], which
     keeps [main] alive.  Under [forge run] the one generated [main] runs every
     pool (D9); a process of a shared build runs the pools [MARCH_POOLS] names
@@ -16,16 +15,16 @@
 
     - A role bound to a function ([body = "M.f"]) becomes
       [Topology.offer_role(name, place, capacity, fn cap -> <P>_Run.offer_<R>(node,
-      caps..., cap, fn (s, caps..., st) -> M.f(env, s, caps..., st)))]: the body's
-      type is the role's granted body type with the pool's [Env] in front (4.1,
-      D34). The capacity is an argument so that a topology re-read on SIGHUP
+      cap, fn (s, st) -> M.f(env, s, st)))]: the body's type is the role's body
+      type with the pool's [Env] in front (4.1; since ocap phase 7b a grant adds
+      no parameters). The capacity is an argument so that a topology re-read on SIGHUP
       can change it without a rebuild (build step 8).
     - A role bound to an actor ([actor = "M.A"], D23) becomes
       [Topology.offer_actor_role(name, place, capacity, fn () -> spawn(A, env),
-      fn (a, cap) -> <P>_Run.offer_hosted_<R>(node, caps..., cap, a, start, deliver,
+      fn (a, cap) -> <P>_Run.offer_hosted_<R>(node, cap, a, start, deliver,
       cancel))],
       one actor per offer, whose three callbacks forward to the actor's
-      [Start(sid, s, caps...)], [Deliver(sid, s, from, msg, ep)] and
+      [Start(sid, s)], [Deliver(sid, s, from, msg, ep)] and
       [Cancel(sid, s, role, cause, ep)] handlers -- the same messages a
       hand-written hosted offer's actor takes (test/two_node/cluster_ap_hosted),
       from which it drives the generated [Parked_<Role>] API.
@@ -95,6 +94,7 @@ type fn_info = {
   fi_params : (string * ty option) list;
   fi_ret    : ty option;
   fi_path   : string list;   (** enclosing module path, entry name first *)
+  fi_needs  : string list;   (** the kinds of its `needs` clause, as written *)
 }
 
 type actor_info = {
@@ -139,8 +139,8 @@ let rec proto_roles_of acc (steps : protocol_step list) =
 (* Capability kinds only (the IO kinds and the actor kinds): any other path
    is refused by the typechecker at the grant line, and dropping it here
    keeps that the only diagnostic in a topology app too.  Every kind is
-   checked against a pool's written caps; only the IO kinds are body
-   parameters ([param_grants_for], as [Desugar_endpoints.grants_of]). *)
+   checked against a pool's written caps; none is a body parameter (ocap
+   phase 7b). *)
 let grants_of (steps : protocol_step list) =
   List.filter_map (function
       | ProtoRoleNeeds (r, caps, _) ->
@@ -162,7 +162,12 @@ let collect ~entry ~(entry_decls : decl list) ~(imports : decl list) : facts =
           (match def.fn_clauses with
            | c :: _ ->
              Hashtbl.replace f.fns (qualify path def.fn_name.txt)
-               { fi_params = params_of c; fi_ret = def.fn_ret_ty; fi_path = path }
+               { fi_params = params_of c; fi_ret = def.fn_ret_ty; fi_path = path;
+                 fi_needs =
+                   (match def.fn_needs with
+                    | Some (paths, _) ->
+                      List.map (fun (p, _) -> String.concat "." (List.map (fun (n : name) -> n.txt) p)) paths
+                    | None -> []) }
            | [] -> ())
         | DActor (_, nm, a, _) ->
           Hashtbl.replace f.actors (qualify path nm.txt)
@@ -263,21 +268,9 @@ let grants_for f (r : role) =
   | Some pi -> Option.value ~default:[] (List.assoc_opt r.r_role pi.pi_grants)
   | None -> []
 
-(* The grants a body takes as `Cap(P)` parameters: the IO kinds.  An actor
-   kind is used through the body's own checked call. *)
-let param_grants_for f (r : role) =
-  List.filter (March_caps.Cap_lattice.cap_subsumes "IO") (grants_for f r)
-
 
 let hook_info f (p : pool) = match p.p_start with Some s -> Hashtbl.find_opt f.fns s | None -> None
 
-(** The hook's leading [Cap(P)] parameters, in order. *)
-let hook_caps (hi : fn_info) =
-  List.filter_map (fun (_, t) ->
-      match t with
-      | Some t when is_handle_ty t -> None
-      | _ -> Option.bind t cap_of_ty)
-    hi.fi_params
 
 (** The pool's environment type, as text: the hook's declared return type,
     or [()] for a pool with no hook. *)
@@ -323,32 +316,28 @@ let check ?(foreign_isolated = false) ?pools (f : facts) (t : t) : string list =
   let err fmt = Printf.ksprintf (fun s -> errs := s :: !errs) fmt in
   let pools = selected_pools ?pools t in
   List.iter (fun (p : pool) ->
-      (* The hook: [Cap(P)]... then the handle; annotated return type. *)
+      (* The hook: the node handle, and an annotated return type (since ocap
+         phase 7b it takes no `Cap(P)`: the hook uses the current authority). *)
       (match p.p_start, hook_info f p with
        | Some s, Some hi ->
-         let ps = hi.fi_params in
-         let n = List.length ps in
-         List.iteri (fun i (pn, ty) ->
-             let last = i = n - 1 in
-             match ty with
-             | None -> err "pool \"%s\": hook '%s': parameter `%s` needs a type annotation (a hook takes `Cap(P)` parameters and then the node, `Cap(ClusterNode.Live)`)" p.p_name s pn
-             | Some ty when last ->
-               if not (is_handle_ty ty) then
-                 err "pool \"%s\": hook '%s': its last parameter must be the node, `Cap(ClusterNode.Live)`, not `%s`" p.p_name s (show_ty ty)
-             | Some ty ->
-               (match cap_of_ty ty with
-                | None -> err "pool \"%s\": hook '%s': parameter `%s : %s` is not a capability; a hook takes `Cap(P)` parameters and then the handle" p.p_name s pn (show_ty ty)
-                | Some c ->
-                  (match p.p_caps with
-                   | Some written when not (subsumes written c) ->
-                     err "pool \"%s\": hook '%s' takes `Cap(%s)`, beyond the pool's written caps [%s]" p.p_name s c (String.concat ", " written)
-                   | _ -> ())))
-           ps;
-         if n = 0 then err "pool \"%s\": hook '%s' takes no parameters; it takes `Cap(P)` parameters and then the node, `Cap(ClusterNode.Live)`" p.p_name s;
+         (match hi.fi_params with
+          | [ (_, Some ty) ] when is_handle_ty ty -> ()
+          | [ (pn, None) ] ->
+            err "pool \"%s\": hook '%s': parameter `%s` needs a type annotation (a hook takes the node, `Cap(ClusterNode.Live)`)" p.p_name s pn
+          | [ (pn, Some ty) ] when cap_of_ty ty = None ->
+            err "pool \"%s\": hook '%s': parameter `%s : %s` is not a capability; a hook takes the node, `Cap(ClusterNode.Live)`" p.p_name s pn (show_ty ty)
+          | [ (_, Some ty) ] ->
+            err "pool \"%s\": hook '%s': its parameter must be the node, `Cap(ClusterNode.Live)`, not `%s`" p.p_name s (show_ty ty)
+          | [] -> err "pool \"%s\": hook '%s' takes no parameters; it takes the node, `Cap(ClusterNode.Live)`" p.p_name s
+          | _ ->
+            err "pool \"%s\": hook '%s' takes %d parameters; it takes one, the node, `Cap(ClusterNode.Live)` (since capability values were retired a hook takes no `Cap(P)`: it uses the current authority)"
+              p.p_name s (List.length hi.fi_params));
          if hi.fi_ret = None then
            err "pool \"%s\": hook '%s' needs a declared return type: it is the environment its roles' bodies receive" p.p_name s;
-         if foreign_isolated && not p.p_isolate && List.mem "IO.Foreign" (hook_caps hi) then
-           err "pool \"%s\": hook '%s' takes `Cap(IO.Foreign)`, but the pool is not isolated (`isolate = true`)" p.p_name s
+         (* A hook asks for `IO.Foreign` with its `needs` clause, as it once
+            did with a `Cap(IO.Foreign)` parameter (ocap phase 7b). *)
+         if foreign_isolated && not p.p_isolate && List.mem "IO.Foreign" hi.fi_needs then
+           err "pool \"%s\": hook '%s' asks for `needs IO.Foreign`, but the pool is not isolated (`isolate = true`)" p.p_name s
        | _ -> ());
       List.iter (fun rn ->
           match role_by_name t rn with
@@ -367,7 +356,7 @@ let check ?(foreign_isolated = false) ?pools (f : facts) (t : t) : string list =
             if foreign_isolated && not p.p_isolate && List.mem "IO.Foreign" grants then
               err "role \"%s\" is granted `IO.Foreign`, but pool \"%s\" is not isolated (`isolate = true`)" r.r_name p.p_name;
             let env = env_ty f p in
-            let k = List.length (param_grants_for f r) in
+            let k = 0 in
             (match r.r_body, r.r_actor with
              | Some b, _ ->
                (match Hashtbl.find_opt f.fns b with
@@ -431,8 +420,6 @@ let place_src = function
   | Count n -> Printf.sprintf "Topology.count(%d)" n
   | Count_on (l, n) -> Printf.sprintf "Topology.count_on(%S, %d)" l n
 
-let xs k = List.init k (fun i -> Printf.sprintf "topology_x%d" (i + 1))
-
 (** The helpers injected into each bound actor's module: [(module path,
     source of the helper functions)], one entry per actor. *)
 let helper_sources ?pools (f : facts) (t : t) : (string list * string) list =
@@ -441,17 +428,17 @@ let helper_sources ?pools (f : facts) (t : t) : (string list * string) list =
   let actors =
     List.filter_map (fun rn ->
         match role_by_name t rn with
-        | Some ({ r_actor = Some a; _ } as r) -> Some (a, r)
+        | Some { r_actor = Some a; _ } -> Some a
         | _ -> None)
       served
-    |> List.sort_uniq (fun (a, _) (b, _) -> String.compare a b)
+    |> List.sort_uniq String.compare
   in
-  List.filter_map (fun (a, r) ->
+  List.filter_map (fun a ->
       match Hashtbl.find_opt f.actors a with
       | None -> None
       | Some ai ->
         let leaf = match List.rev (String.split_on_char '.' a) with l :: _ -> l | [] -> a in
-        let caps = xs (List.length (param_grants_for f r)) in
+        let caps = [] in
         let spawn = if ai.ai_init = [] then Printf.sprintf "spawn(%s)" leaf else Printf.sprintf "spawn(%s, topology_env)" leaf in
         let fwd name msg args =
           Printf.sprintf
@@ -476,28 +463,23 @@ let main_source ?pools (f : facts) (t : t) : string =
     let encoded = String.concat "" (List.init (String.length key)
         (fun i -> Printf.sprintf "%02x" (Char.code key.[i]))) in
     "__topology_entry_" ^ encoded in
-  let grant_args k = String.concat "" (List.init k (fun _ -> "cap_narrow(topology_io), ")) in
   let work_factory key run role body ps =
     let name = work_name key in
     Printf.bprintf adapters "fn %s_body(topology_env, %s) do %s(%s) end\n"
       name (String.concat ", " ps) body (String.concat ", " ("topology_env" :: ps));
-    (* [ps] is the session, one name per granted capability, the entry state:
-       the front takes the grant as arguments, and `main` holds the root
-       capability to narrow each from.  [topology_io] is annotated because
-       nothing else pins it: `cap_narrow` takes any capability, and a role
-       with no grant does not use it at all.  Unpinned, the adapter is
-       generic, monomorphisation names it after its argument types (the
-       pool's Env among them), and a hot deploy that changes Env meets a new
-       symbol where the ABI guard expects the old one with a new hash. *)
+    (* [ps] is the session and the entry state. *)
     Printf.bprintf adapters
-      "fn %s_open(topology_env, topology_io : Cap(IO), topology_node, topology_cap) do\n  %s.offer_work_%s(topology_node, %stopology_cap, fn (%s) -> %s_body(%s))\nend\n"
-      name run role (grant_args (List.length ps - 2))
+      "fn %s_open(topology_env, topology_node, topology_cap) do\n  %s.offer_work_%s(topology_node, topology_cap, fn (%s) -> %s_body(%s))\nend\n"
+      name run role
       (String.concat ", " ps) name (String.concat ", " ("topology_env" :: ps));
     name ^ "_open" in
   let pools = selected_pools ?pools t in
+  (* The request: full IO, which the root `Cap(IO)` parameter asked for
+     before capability values were retired (ocap phase 7b), and the actor
+     kinds its pools' roles are granted or written. *)
   (match actor_kinds_of f t pools with
-   | [] -> add "fn main(topology_io : Cap(IO)) do\n"
-   | ks -> add "fn main(topology_io : Cap(IO)) : () needs IO, %s do\n" (String.concat ", " ks));
+   | [] -> add "fn main() : () needs IO do\n"
+   | ks -> add "fn main() : () needs IO, %s do\n" (String.concat ", " ks));
   (* Only ClusterNode may hand out a Cap(ClusterNode.Live) (D35), so the
      node is started here, not by a Topology helper. *)
   add "  let topology_node = match ClusterNode.start(Topology.config_from_env()) do\n";
@@ -510,15 +492,7 @@ let main_source ?pools (f : facts) (t : t) : string =
       (match p.p_start, hook_info f p with
        | Some s, Some hi ->
          let args =
-           List.map (fun (_, ty) ->
-               match ty with
-               | Some t when is_handle_ty t -> "topology_node"
-               | _ ->
-               match Option.bind ty cap_of_ty with
-               | Some "IO" -> "topology_io"
-               | Some _ -> "cap_narrow(topology_io)"
-               | None -> "topology_node")
-             hi.fi_params
+           List.map (fun _ -> "topology_node") hi.fi_params
          in
          add "    let %s = Topology.hook(%S, fn () -> %s(%s))\n" env s (ref_of f s) (String.concat ", " args)
        | _ -> add "    let %s = ()\n" env);
@@ -529,13 +503,13 @@ let main_source ?pools (f : facts) (t : t) : string =
             | Some r ->
               let cap = Option.value ~default:default_capacity r.r_capacity in
               let run = run_module f r.r_protocol in
-              let caps = xs (List.length (param_grants_for f r)) in
+              let caps = [] in
               (match r.r_body, r.r_actor with
                | Some body, _ ->
                  let ps = [ "topology_s" ] @ caps @ [ "topology_st" ] in
                  let factory = work_factory (p.p_name ^ ":" ^ r.r_name) run r.r_role (ref_of f body) ps in
                  Some (Printf.sprintf
-                         "      Topology.offer_role(%S, %s, %d, fn topology_cap -> %s(%s, topology_io, topology_node, topology_cap))"
+                         "      Topology.offer_role(%S, %s, %d, fn topology_cap -> %s(%s, topology_node, topology_cap))"
                          r.r_name (place_src r.r_place) cap factory env)
                | None, Some a ->
                  (match Hashtbl.find_opt f.actors a with
@@ -559,10 +533,10 @@ let main_source ?pools (f : facts) (t : t) : string =
                     Printf.bprintf adapters "fn %s_spawn(topology_env) do %s(topology_env) end\n"
                       name (h "spawn");
                     Printf.bprintf adapters
-                      "fn %s_open(topology_a, topology_io : Cap(IO), topology_node, topology_cap) do\n  %s.offer_work_hosted_%s(topology_node, %stopology_cap, topology_a,\n    %s,\n    %s,\n    %s)\nend\n"
-                      name run r.r_role (grant_args (List.length caps)) start deliver cancel;
+                      "fn %s_open(topology_a, topology_node, topology_cap) do\n  %s.offer_work_hosted_%s(topology_node, topology_cap, topology_a,\n    %s,\n    %s,\n    %s)\nend\n"
+                      name run r.r_role start deliver cancel;
                     Some (Printf.sprintf
-                            "      Topology.offer_actor_role(%S, %s, %d, fn () -> %s_spawn(%s),\n        fn (topology_a, topology_cap) -> %s_open(topology_a, topology_io, topology_node, topology_cap))"
+                            "      Topology.offer_actor_role(%S, %s, %d, fn () -> %s_spawn(%s),\n        fn (topology_a, topology_cap) -> %s_open(topology_a, topology_node, topology_cap))"
                             r.r_name (place_src r.r_place) cap name env name))
                | None, None -> None))
           p.p_serves
@@ -579,15 +553,15 @@ let main_source ?pools (f : facts) (t : t) : string =
     | None -> ""
     | Some c ->
       let factory = work_factory "control" "Ctl_Run" "Control" "ctl_control_session"
-          ([ "topology_s" ] @ xs 5 @ [ "topology_st" ]) in
+          [ "topology_s"; "topology_st" ] in
       Printf.sprintf
-        ", [\n      Topology.pinned(Topology.offer_role(\"Ctl.Control\", Topology.count_on(%S, 1), 256, fn topology_cap -> %s(topology_node, topology_io, topology_node, topology_cap)))\n    ]"
+        ", [\n      Topology.pinned(Topology.offer_role(\"Ctl.Control\", Topology.count_on(%S, 1), 256, fn topology_cap -> %s(topology_node, topology_node, topology_cap)))\n    ]"
         c.c_candidates factory
   in
   add "  Topology.place(topology_node, List.concat([%s%s]))\n"
     (String.concat ", " (List.mapi (fun i _ -> Printf.sprintf "topology_roles_%d" i) pools)) ctl_roles;
   (match t.control with
-   | Some c -> add "  ctl_start(topology_io, topology_node, %S, %d)\n" c.c_candidates c.c_port
+   | Some c -> add "  ctl_start(topology_node, %S, %d)\n" c.c_candidates c.c_port
    | None -> ());
   add "  Topology.drain_on_signal(topology_node, %d, %d)\n" t.soft_ms t.hard_ms;
   add "  Topology.supervise_offers(topology_node)\n";

@@ -41,7 +41,7 @@ mod MonitorDemo do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("=== Monitor Demo ===")
     println("")
 

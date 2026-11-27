@@ -162,7 +162,7 @@ mod TypedSendLoopback do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
+  fn main() needs IO.Console, IO.NetConnect, IO.NetListen, IO.Spawn, IO.Mut do
     let listen_fd = match tcp_listen(0) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)

@@ -233,8 +233,8 @@ returns.
 Each role becomes a program whose `main` calls its runner:
 
 ```march
-fn main(c : Cap(IO)) do
-  match Fan_Run.run_C(c, "node-c", "fan-secret", Fan_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
+fn main() needs IO do
+  match Fan_Run.run_C("node-c", "fan-secret", Fan_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
     Ok(_) -> println("C: closed")
     Err(e) -> panic(Fan_Run.error_message(e))
   end
@@ -244,7 +244,6 @@ end
 A's and B's programs are the same with `run_A` and `run_B`, their own node names, and
 their own bodies. The arguments:
 
-- `c`: the program's IO capability.
 - `"node-c"`: this node's name, used in the handshake.
 - `"fan-secret"`: a secret every node in the session shares. A node with a different
   secret is refused. With certificates configured the secret is unused; see
@@ -561,10 +560,10 @@ whether the role's code is a callback body or an actor.
 
 `<P>_Run.error_message(e)` turns any `RunError` into a line that names the roles.
 
-The two that open their own connections take the root capability, `Cap(IO)`. The five
-that run over a `ClusterNode` take only the node: a program that holds a running node can
-play a role without holding `Cap(IO)`. A role with a [grant](#per-role-grants) adds one
-capability parameter per granted path, straight after the node.
+None of them takes a capability value: the two that open their own connections use the
+current authority (the network kinds and `IO.Cluster`, which `main` requests), and the
+five that run over a `ClusterNode` take the node. A role's [grant](#per-role-grants) adds
+no parameter anywhere.
 
 ## What is proved about a protocol
 
@@ -798,7 +797,7 @@ To run it, use `host_<Role>` in place of `run_<Role>`. It takes the actor, a fun
 starts it, and a function that hands it each delivery:
 
 ```march
-fn main(c : Cap(IO)) do
+fn main() needs IO do
   let pc = spawn(ConsActor)
   let start = fn s ->
     let _ = send(pc, StartC(s))
@@ -806,7 +805,7 @@ fn main(c : Cap(IO)) do
   let deliver = fn (s, from, msg, ep) ->
     let _ = send(pc, DeliverC(s, from, msg, ep))
     ()
-  match Stream_Run.host_Cons(c, "node-b", "stream-secret", Stream_Run.addrs_from_env(), pc, start, deliver) do
+  match Stream_Run.host_Cons("node-b", "stream-secret", Stream_Run.addrs_from_env(), pc, start, deliver) do
     Ok(_) -> println("Cons: closed")
     Err(e) -> panic(Stream_Run.error_message(e))
   end
@@ -931,7 +930,7 @@ through its session, and only that session is cancelled.
 
 A protocol's grant lines (see [Grants](#grants)) give each role a narrow
 [capability]({{ site.baseurl }}/docs/capabilities/), and the compiler checks the role's
-code against it. The grant becomes parameters of the role's body. For
+code against it. For
 
 ```march
 @[endpoints]
@@ -941,53 +940,35 @@ protocol Checkout do
 end
 ```
 
-the body `run_Ledger` and every other entry point takes is
+everything `Ledger`'s code reaches may use files and outbound connections, and nothing
+else. The grant changes no type: the body every entry point takes is still
 
 ```march
-(Cap(Session.Live), Cap(IO.FileWrite), Cap(IO.NetConnect), Checkout_Ledger.Entry) -> Checkout_Ledger.Yield
+(Cap(Session.Live), Checkout_Ledger.Entry) -> Checkout_Ledger.Yield
 ```
 
-one capability per path, in the order the line lists them, after the session and before
-the entry state. `run_<Role>` and `host_<Role>` narrow them from the `Cap(IO)` they were
-given and pass them, so a body is written as
+so a body is written as
 
 ```march
-pfn ledger(s : Cap(Session.Live), fw : Cap(IO.FileWrite), nc : Cap(IO.NetConnect), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
+pfn ledger(s : Cap(Session.Live), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
   ...
 end
 
-Checkout_Run.run_Ledger(c, "ledger-1", secret, addrs, fn (s, fw, nc, st) -> ledger(s, fw, nc, st))
+Checkout_Run.run_Ledger("ledger-1", secret, addrs, fn (s, st) -> ledger(s, st))
+Checkout_Run.offer_Ledger(node, 64, fn (s, st) -> ledger(s, st))
 ```
 
-and a body with a different parameter list does not compile against the runner. For a role
-hosted in an actor, the grant arrives through `start`: `start(s, fw, nc)`, or
-`start(sid, s, fw, nc)` for the many-session entry points. A role with no grant line keeps
-the plain `(s, st)` body.
+(Before object-capability phase 7b the grant became `Cap(P)` parameters of the body and
+of the cluster entry points, narrowed from a `Cap(IO)`; those capability values were
+retired, because they were erased at run time and granted nothing.)
 
-The entry points over a cluster node hold no `Cap(IO)` to narrow from, so the caller hands
-the grant over: one parameter per path, after the node, in the order the line lists them.
-They reach the body unchanged:
-
-```march
-Checkout_Run.offer_Ledger(node, fw, nc, 64, fn (s, fw, nc, st) -> ledger(s, fw, nc, st))
-```
-
-A caller that holds the root capability writes `cap_narrow(c)` for each. One that holds
-only `Cap(IO.FileWrite)` and `Cap(IO.NetConnect)` passes those, and a caller that holds
-neither cannot offer the role at all: it does not typecheck.
-
-Because the grant is a value, the composition root is explicit from `main` to every role,
-and a test can hand a body any dictionary it likes in place of the runner's (see
-[Mocking an IO capability in tests]({{ site.baseurl }}/docs/capabilities/#mocking-an-io-capability-in-tests-mock)).
-It is also checked: what a body reaches must fit under its grant.
+The grant is a compile-time limit. At run time a body runs under the authority it was made
+under, as every function value does, so `main`'s request and any `restrict` around the
+code that made it bound what it may do.
 
 ### What the grant checks
 
-Two things stop a role from doing more than its line says. The first is the type: a
-granted body holds `Cap(IO.FileWrite)`, not `Cap(IO)`, and `Cap(IO.FileWrite)` does not
-unify with `Cap(IO)`, so it cannot hand its capability to anything that wants the wider
-one. The second is a walk, because a body that never touches its capability value can
-still call `File.write` through any helper. At every call of an entry point the compiler
+A walk stops a role from doing more than its line says. At every call of an entry point the compiler
 walks everything the callback reaches (helpers, functions passed as values, local closures
 it captures, actors it spawns; for a hosted role, `start`, `deliver`, `cancel` and the
 actor behind `host`) and requires every capability in that reach to sit under the role's
@@ -996,11 +977,11 @@ grant, exactly as `main`'s grant bounds the program:
 ```
 -- CAPABILITY -------------------------------- gbad.march
 
-Role `Stream.Cons` is granted `Cap(IO.Console)` (`role Cons needs IO.Console`), but the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body: body → cons → save). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]
-help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.Console, IO.FileWrite`. The body then takes one `Cap` per granted capability, in the grant's order, between the session capability and the state, so it gains a parameter: `fn (s, cap_console, cap_file_write, st) -> ...`. Pass `cap_file_write` on to any function the body hands its capabilities to. Or remove the use.
+Role `Stream.Cons` is granted `IO.Console` (`role Cons needs IO.Console`), but the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body: body → cons → save). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]
+help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.Console, IO.FileWrite`. Or remove the use.
 
-28 |     let _ = Stream_Run.run_Cons(c, "n", "s", Stream_Run.addrs_from_env(), fn (s, con, st) -> cons(s, con, st))
-                                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+28 |     let _ = Stream_Run.run_Cons("n", "s", Stream_Run.addrs_from_env(), fn (s, st) -> cons(s, st))
+                                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ```
 
 Here `cons` calls a helper `save` that writes through `File.write`. The error points at
@@ -1027,20 +1008,19 @@ help: pass a lambda or a named function here, or bind the body with `let` in thi
 function, to have it checked.
 ```
 
-A role's grant must also fit within `main`'s: the role's capabilities are narrowed
-from what `main` holds, by the runner or by the caller, so `role Cons needs IO.FileWrite`
-under `fn main(c : Cap(IO.Console))` is an error at the grant line. And a grant names
-capability kinds only: the IO kinds and the two actor kinds, `Actor.Introspect` and
-`Actor.Debug`. `role Cons needs Session.Live` (or `ClusterNode.Live`, or `LibC`) is one
-error at the grant line, because a proof or foreign capability is no kind a grant can
-bound. The session capability is passed to every body already.
+A role's grant must also fit within `main`'s: everything the role's code reaches is part
+of the program, so `role Cons needs IO.FileWrite` under `fn main() needs IO.Console` is
+an error at the grant line. And a grant names capability kinds only: the IO kinds and the
+two actor kinds, `Actor.Introspect` and `Actor.Debug`. `role Cons needs Session.Live` (or
+`ClusterNode.Live`, or `LibC`) is one error at the grant line, because a proof or foreign
+capability is no kind a grant can bound. The session capability is passed to every body
+already.
 
-An actor kind in a grant is not a body parameter: the body uses it through its own checked
-call (`Actor.introspect()`, `Actor.pid_from_int(n)`, `Actor.debug()`), and the walk bounds
-that use like an IO one. A body that reaches `Actor.Introspect` under
-`role Cons needs IO.Console` is refused, and `role Cons needs IO.Console, Actor.Introspect`
-accepts it with the body's parameters unchanged. `main` requests the kind with a `needs`
-clause (`fn main(c : Cap(IO)) : () needs IO, Actor.Introspect do`). In a topology app the
+An actor kind in a grant bounds the body's own checked calls (`Actor.introspect()`,
+`Actor.pid_from_int(n)`, `Actor.debug()`) like an IO one: a body that reaches
+`Actor.Introspect` under `role Cons needs IO.Console` is refused, and
+`role Cons needs IO.Console, Actor.Introspect` accepts it. `main` requests the kind in its
+`needs` clause (`fn main() needs IO, Actor.Introspect do`). In a topology app the
 generated `main` requests every actor kind its pools' roles are granted or written, and a
 pool's written caps bound the actor kinds as they bound the IO ones.
 
@@ -1322,7 +1302,7 @@ its head is not a drain point, so its sessions run until they end on their own, 
 the drain's hard deadline stops them (`Err(Left("draining"))`). It changes no message, so
 it does not change the protocol's fingerprint.
 
-`SessionNode.drain_epochs(io, soft_ms, hard_ms)` drains every session on the node (and
+`SessionNode.drain_epochs(soft_ms, hard_ms)` drains every session on the node (and
 every actor still on old code). `Topology.drain_on_signal` calls it on SIGTERM, and a hot
 deploy's `DRAIN` does the same for the epochs it retires.
 

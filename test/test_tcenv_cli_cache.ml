@@ -67,7 +67,7 @@ let stdlib_heavy_src =
   "mod StdlibHeavy do\n\
   \  needs IO.Console\n\
   \n\
-  \  fn main(_cap : Cap(IO.Console)) do\n\
+  \  fn main() needs IO.Console do\n\
   \    let xs = List.map([1, 2, 3, 4, 5], fn x -> x * 2)\n\
   \    let s = List.fold_left(xs, 0, fn (acc, x) -> acc + x)\n\
   \    let joined = String.join([\"a\", \"b\", \"c\"], \",\")\n\
@@ -144,7 +144,7 @@ let test_shadowed_run_bypasses_cli_cache () =
       "mod ShadowEntry do\n\
       \  needs IO.Console\n\
       \n\
-      \  fn main(_cap : Cap(IO.Console)) do\n\
+      \  fn main() needs IO.Console do\n\
       \    println(Json.greet())\n\
       \  end\n\
        end";

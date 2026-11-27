@@ -28,7 +28,7 @@ mod Main do
       balanced_loop(n - 1, acc + String.byte_size(s))
     end
   end
-  fn main(_cap : Cap(IO)) : Unit do
+  fn main() : Unit needs IO do
     let base = live_allocs()
     let a = balanced_loop(100, 0)
     let b = leak_loop(3, 0)

@@ -11,3 +11,4 @@ mod Main do
 
   fn main(c : Cap(IO.Console)) do println(read(c)) end
 end
+-- EXPECT-FIX-PARTIAL: a witness for a retired form (ocap phase 7b): its Cap(IO.X) value is now cap_param_retired / cap_narrow_retired, which no fix can remove without rewriting what the case tests

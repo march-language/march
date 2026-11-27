@@ -55,7 +55,7 @@ mod SpawnSite do
     ()
   end
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _k : Cap(IO.Clock), _m : Cap(IO.Mut)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Spawn, IO.Clock, IO.Mut do
     println("node-a: version 1 up")
     let driver = spawn(Driver)
     let n = 50

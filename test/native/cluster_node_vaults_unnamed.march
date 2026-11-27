@@ -22,7 +22,7 @@ mod ClusterNodeVaultsUnnamed do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let h = match ClusterNode.start(ClusterNode.config("vbnode", 0, "", Nil, "vb-secret", 1)) do
       Ok(h) -> h
       Err(e) -> panic(e)

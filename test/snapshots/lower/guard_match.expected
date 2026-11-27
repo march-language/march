@@ -13,7 +13,7 @@ case $guard2 of
   _ -> "zero"
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let $t1 : String = classify(5) in
 println($t1)
 

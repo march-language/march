@@ -33,7 +33,7 @@ pfn bucket(i : Int, stop : Int, k : Int, acc : Int) : Int do
   if i == stop do acc else bucket(i + 1, stop, k, acc + i / k + i % k) end
 end
 
-fn main(_cap_console : Cap(IO.Console)) : () do
+fn main() : () needs IO.Console do
   let a = sum_digits(0, 20000000, 0)
   let b = sum_gcd(1, 3000000, 0)
   let c = bucket(0, 100000000, 37, 0)

@@ -78,7 +78,7 @@ let src = {|mod App do
     List.map(xs, fn x -> x * k)
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(List.length(scale([1, 2, 3], 2))))
     println(float_to_string(area(Circle(1.0))))
   end

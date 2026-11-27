@@ -8,7 +8,7 @@ mod FloatLoop do
     else step(i - 1, x + 1.0 / 1.5) end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let r = step(200000, 0.0)
     println("checksum=" ++ int_to_string(float_to_int(r)))
     ()

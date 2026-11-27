@@ -25,7 +25,7 @@ mod Main do
     end
   end
   fn unrestricted_callback(k : Int -> Int) : Int do k(1) end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let a = payload(S1(1)) + result_dropped() + diverging_arm(Ping(1), S1(2))
     println(int_to_string(a + unrestricted_callback(fn _ -> 0)))
   end

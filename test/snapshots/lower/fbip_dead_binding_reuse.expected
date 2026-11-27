@@ -11,7 +11,7 @@ alloc List.Cons($t1, t)
   _ -> panic("non-exhaustive pattern match")
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let $t3 : List(Int) = let $t2 : List(Int) = let $t1 : List(Int) = alloc List.Nil(Int)() in
 alloc List.Cons(1, $t1) in
 bump_head($t2) in

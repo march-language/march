@@ -18,7 +18,7 @@ mod Siblings do
     cap_narrow(r)
   end
 
-  fn main(cap : Cap(IO)) do
+  fn main() needs IO do
     println("file-read cannot become file-write")
   end
 end

@@ -90,7 +90,7 @@ mod NativeArrFoldLeakProbe do
       if x > 0.0 do acc + 1 else acc end)
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let before = live_allocs()
     println(f64_leg())
     println(f32_leg())

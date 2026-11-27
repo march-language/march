@@ -42,7 +42,7 @@ mod App do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_process : Cap(IO.Process)) do
+  fn main() needs IO.Console, IO.NetListen, IO.Process do
     let args = Authority.must(Process.argv())
     let port = match List.nth_opt(args, 1) do
       Some(s) ->

@@ -14,7 +14,7 @@ mod Db do
   proof cap Migrated
   needs IO
 
-  pfn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
-    mint_cap(cap)
+  pfn run_migrations() : Cap(Db.Migrated) do
+    mint_cap()
   end
 end

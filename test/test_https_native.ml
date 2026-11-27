@@ -89,7 +89,7 @@ let config_src = {|mod HttpsConfigProbe do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _l : Cap(IO.NetListen), _t : Cap(IO.NetConnect.TLS)) do
+  fn main() needs IO.Console, IO.NetListen, IO.NetConnect.TLS do
     println("reload: " ++ show(http_server_reload_tls(0, "a", "b")))
     println("configure: " ++ show(http_server_tls_configure(0, "/nonexistent.pem", "/nonexistent.key", 0, 0)))
     let conn = HttpServer.test_conn(:get, "/", Nil, "")
@@ -149,7 +149,7 @@ let bad_cert_src = {|mod HttpsBadCert do
     end
   end
 
-  fn main(_l : Cap(IO.NetListen), _t : Cap(IO.NetConnect.TLS), _p : Cap(IO.Process)) do
+  fn main() needs IO.NetListen, IO.NetConnect.TLS, IO.Process do
     Authority.must(HttpServer.new(env_int("MARCH_TEST_HTTP_PORT"))
     |> HttpServer.tls(HttpServer.TlsFiles("/nonexistent/march-cert.pem", "/nonexistent/march-key.pem"))
     |> HttpServer.plug(fn c -> HttpServer.text(c, 200, "should never serve"))
@@ -208,7 +208,7 @@ let deadline_server_src = {|mod HttpsDeadlines do
     end
   end
 
-  fn main(_l : Cap(IO.NetListen), _p : Cap(IO.Process)) do
+  fn main() needs IO.NetListen, IO.Process do
     Authority.must(HttpServer.new(env_int("MARCH_TEST_HTTP_PORT"))
     |> HttpServer.idle_timeout(2)
     |> HttpServer.header_timeout(2)
@@ -619,7 +619,7 @@ let https_server_src = {|mod HttpsE2e do
     end
   end
 
-  fn main(_l : Cap(IO.NetListen), _p : Cap(IO.Process), _w : Cap(IO.WebSocket), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.NetListen, IO.Process, IO.WebSocket, IO.Spawn do
     Authority.must(HttpServer.new(env_int("MARCH_TEST_HTTP_PORT"))
     |> HttpServer.tls(HttpServer.TlsFiles(env_str("MARCH_TEST_CERT"), env_str("MARCH_TEST_KEY")))
     |> HttpServer.tls_handshake_timeout(2)
@@ -1112,8 +1112,7 @@ let rotate_server_src = {|mod HttpsRotate do
     if env_str("MARCH_TEST_WAIT") == "1" do HttpServer.tls_wait_for_cert(server) else server end
   end
 
-  fn main(_l : Cap(IO.NetListen), _p : Cap(IO.Process), _t : Cap(IO.NetConnect.TLS),
-          _f : Cap(IO.FileRead), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.NetListen, IO.Process, IO.NetConnect.TLS, IO.FileRead, IO.Spawn do
     Authority.must(HttpServer.new(env_int("MARCH_TEST_HTTP_PORT"))
     |> HttpServer.tls(HttpServer.TlsFiles(env_str("MARCH_TEST_CERT"), env_str("MARCH_TEST_KEY")))
     |> HttpServer.tls_poll_interval(1)

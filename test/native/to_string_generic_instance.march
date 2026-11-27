@@ -26,7 +26,7 @@ mod Main do
   type Bag = Bag(List(Meters), Opt(Flag))
   type Rec = { b : Box(Meters), p : Pair(Bool, MaybeName) }
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     -- newtype / niche / scalar in a type-variable slot
     println(to_string(Box(Meters(9))))
     println(to_string(Box(MaybeName.Named("x"))))

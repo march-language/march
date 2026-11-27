@@ -32,7 +32,7 @@ mod SocketCloseWhileRecv do
     end end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     let _ = Authority.must(Vault.new("scwr"))
     let l = match Authority.must(Socket.listen(0)) do
       Ok(l) -> l

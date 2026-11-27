@@ -25,22 +25,22 @@ mod ClusterApWithdrawA do
       Ring_A.close(s, st2))
   end
 
-  pfn attempt(c : Cap(IO), h : Cap(ClusterNode.Live)) : Bool do
+  pfn attempt(h : Cap(ClusterNode.Live)) : Bool do
     match Ring_Run.initiate_A(h, fn (s, st) -> role_a(s, st)) do
       Ok(_) -> true
       Err(_) -> false
     end
   end
 
-  pfn attempt_retry(c : Cap(IO), h : Cap(ClusterNode.Live), left : Int) : Bool do
-    if attempt(c, h) do true
+  pfn attempt_retry(h : Cap(ClusterNode.Live), left : Int) : Bool do
+    if attempt(h) do true
     else if left <= 0 do false else
       sleep_ms(500)
-      attempt_retry(c, h, left - 500)
+      attempt_retry(h, left - 500)
     end end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "apw-secret", 1)
     match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
@@ -48,10 +48,10 @@ mod ClusterApWithdrawA do
         println("node-a: up")
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: nobody joined") end
         -- Only B is offered: this attempt fills B, finds no C, and withdraws.
-        if attempt(c, h) do panic("node-a: a session formed with no C") else () end
+        if attempt(h) do panic("node-a: a session formed with no C") else () end
         println("Client: no session yet")
         -- node-c starts now; B's slot must be free again.
-        if attempt_retry(c, h, 20000) do println("Client: session done") else panic("node-a: no session after node-c joined") end
+        if attempt_retry(h, 20000) do println("Client: session done") else panic("node-a: no session after node-c joined") end
         ClusterNode.stop(h)
     end
   end

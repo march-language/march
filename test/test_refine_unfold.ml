@@ -877,7 +877,7 @@ let review =
   fn d(inc : Int -> Int, y : Int) : Int do
     if inc(y) == 2 do need2(y + 1) else 0 end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("${a(fn x -> x + 50)} ${b(fn x -> x + 50)} ${c()} ${d(fn x -> 2, 10)}")
   end
 end
@@ -908,7 +908,7 @@ end
     end
     fn val() : Int do A.f(1) end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("${B.a()} ${B.b()} ${B.c(1)} ${B.val()}")
   end
 end
@@ -942,7 +942,7 @@ end
   fn needm12(x : {Int | _ == -12}) : Int do x end
   fn a() : Int do needm12(h(24)) end
   fn b() : Int do needm12(k(24)) end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("${h(24)} ${k(24)} ${negate(2)}")
   end
 end
@@ -964,7 +964,7 @@ end
   fn c() : Int do needm12(-12) end
   fn need_neg(x : {Int | _ < 0}) : Int do x end
   fn d() : Int do need_neg(-12) end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("${c()}")
     println("${h(24)}")
   end
@@ -1001,7 +1001,7 @@ end
     let r = List.sum_int([1, 2])
     need42(r)
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("${List.sum_int([1, 2])} ${Y.h()}")
   end
 end
@@ -1019,7 +1019,7 @@ end
     let r = List.sum_int([1, 2])
     need42(r)
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("${List.sum_int([1, 2])}")
   end
 end
@@ -1049,7 +1049,7 @@ end
     let r = X.g(1)
     need51(r)
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("a() = ${a()}, X.g(1) = ${X.g(1)}, Y.h() = ${Y.h()}")
   end
 end
@@ -1077,7 +1077,7 @@ end
     let r = X.g(1)
     need51(r)
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("a() = ${a()}, X.g(1) = ${X.g(1)}, Y.h() = ${Y.h()}")
   end
 end
@@ -1104,7 +1104,7 @@ end
     let r = B.g(1)
     need51(r)
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("a() = ${a()}, B.g(1) = ${B.g(1)}")
   end
 end
@@ -1124,7 +1124,7 @@ end
     let r = B.g(1)
     need51(r)
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("a() = ${a()}, B.g(1) = ${B.g(1)}")
   end
 end
@@ -1154,7 +1154,7 @@ end
     let q = k(1)
     need0(p - q)
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("Y.w(1) = ${Y.w(1)}, k(1) = ${k(1)}, M.X.g(1) = ${M.X.g(1)}")
   end
 end
@@ -1179,7 +1179,7 @@ end
     let r = Y.w([1, 2])
     need42(r)
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("${Y.w([1, 2])}")
   end
 end
@@ -1206,7 +1206,7 @@ end
   fn a(z : Int) : Int do
     if Y.w(z) == k(z) do 0 else need0(1) end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("a(1) = ${a(1)}")
   end
 end

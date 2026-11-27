@@ -1,4 +1,4 @@
--- EXPECT-ERROR: `root_cap` cannot be referenced
+-- EXPECT-ERROR: `root_cap` no longer exists
 -- R2 — THE ROOT CAPABILITY IS GRANTED, NOT TAKEN (2026-08-05).
 --
 -- `root_cap` was an ordinary global of type `Cap(IO)`, in scope in every

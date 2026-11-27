@@ -103,7 +103,7 @@ mod RateLimit do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_mut : Cap(IO.Mut)) do
+  fn main() do
     let ip = "192.0.2.1"
     let limit = 3
     println("hit 1: " ++ bool_to_string(check(ip, limit)))

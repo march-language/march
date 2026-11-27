@@ -74,7 +74,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = 20000
     let zero = "0"
     let nine = "9"

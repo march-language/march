@@ -18,7 +18,7 @@ dec_rc $t6;
 $rc_1
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let b : Box = alloc Box.Box("ab", "cde") in
 let $t1 : String = escapes(b) in
 let $rc_3 : () = println($t1) in

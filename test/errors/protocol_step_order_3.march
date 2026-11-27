@@ -20,5 +20,5 @@ mod Main do
       fn (_item, st2) -> Shop_C.recv_Total(s, st2, fn (_n, st3) -> Shop_C.close(s, st3)),
       fn (_sorry, st2) -> Shop_C.close(s, st2))
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

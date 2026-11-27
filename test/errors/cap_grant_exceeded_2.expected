@@ -1,17 +1,17 @@
 exit: 1
 -- CAPABILITY --------- errors/cap_grant_exceeded_2.march
 
-`main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileRead` (reached from `main`: main → slurp). The grant is a ceiling on the WHOLE program — declaring `needs IO.FileRead` does not raise it. [cap_grant_exceeded]
-help: add a `Cap(IO.FileRead)` parameter to `main` (e.g. `fn main(…, _cap_fileread : Cap(IO.FileRead))`), or widen the whole grant to `Cap(IO)`, or remove the use.
+`main` is granted `needs IO.Console`, but the program reaches `IO.FileRead` (reached from `main`: main → slurp). The grant is a ceiling on the WHOLE program — declaring `needs IO.FileRead` does not raise it. [cap_grant_exceeded]
+help: add `IO.FileRead` to `main`'s request (its `needs` clause, or the module's `needs` line when `main` has no clause), or request all of `IO`, or remove the use.
 
-33 |   fn main(cap : Cap(IO.Console)) : () do
-       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+33 |   fn main() : () needs IO.Console do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 
     fix (`forge fix` applies it):
 
-33 -   fn main(cap : Cap(IO.Console)) : () do
-33 +   fn main(cap : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+33 -   fn main() : () needs IO.Console do
+33 +   fn main() : () needs IO.Console, IO.FileRead do
 
     run `march --explain cap_grant_exceeded`
 

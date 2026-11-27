@@ -5,7 +5,7 @@ mod Main do
     true
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     -- `&&`/`||` short-circuit (core-march.md §4.4.1): the right operand runs
     -- only when the left one does not already decide the result. The two
     -- "skipped" tags must never print; the two "evaluated" tags must.

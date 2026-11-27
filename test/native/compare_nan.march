@@ -56,7 +56,7 @@ mod CompareNan do
     compare(a, b) < 0
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let nan = float_nan()
     println("compare(nan, 1.0) = " ++ int_to_string(compare(nan, 1.0)))
     println("compare(1.0, nan) = " ++ int_to_string(compare(1.0, nan)))

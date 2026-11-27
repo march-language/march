@@ -32,9 +32,9 @@ mod CrashAfterSendNodeC do
       Logging_C.close(s, st2))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-c: up")
-    match Logging_Run.run_C(c, "node-c", "logging-secret", Logging_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
+    match Logging_Run.run_C("node-c", "logging-secret", Logging_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
       Ok(_) -> println("C: closed")
       Err(SessionNode.Cancelled(role, cause)) ->
         println("C: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)

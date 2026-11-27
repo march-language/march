@@ -7,7 +7,7 @@ mod Main do
   -- before 2026-09-19; the same call with the arguments swapped was rejected.
   always_linear type S1 = S1(Int)
   fn ap2(f : a -> Int, linear x : a) : Int do f(x) end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(ap2(fn s -> 0, S1(1))))
   end
 end

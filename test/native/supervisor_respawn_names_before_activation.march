@@ -128,7 +128,7 @@ mod SupervisorRespawnNamesBeforeActivation do
     end
   end
 
-  fn main(io : Cap(IO), _clock : Cap(IO.Clock), _cap_introspect : Cap(Actor.Introspect)) do
+  fn main() needs IO, Actor.Introspect do
     let intro = Authority.must(Actor.introspect())
     let sup = spawn(Sup)
     let a = Authority.must(Actor.pid_from_int(child_int(sup, "a")))

@@ -55,7 +55,7 @@ mod Chat do
     end
   end
 
-  fn main(cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let room = spawn(Room)
     send(room, Enter("alice"))
     send(room, Enter("bob"))
@@ -69,7 +69,7 @@ The grant covers the actor's handlers too. Add `file_write("chat.log", text)` to
 handler and the build fails, naming the path from `main`:
 
 ```
-`main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite`
+`main` is granted `needs IO.Console`, but the program reaches `IO.FileWrite`
 (reached from `main`: main → Room → Room_Say). The grant is a ceiling on the WHOLE
 program — declaring `needs IO.FileWrite` does not raise it.
 ```

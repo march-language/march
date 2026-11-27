@@ -51,7 +51,7 @@ mod MutualTcoDeferredDrop do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println(take_next(build(6, Nil), ""))
     println(last_seen(build(6, Nil), "none"))
 

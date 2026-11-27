@@ -12,7 +12,7 @@ mod Main do
   extern "c" : Cap(Ffi) do
     fn probe(unused: Int): Int = "fatal_trap_report_probe"
   end
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     let r = probe(0)
     let flags = r - (r / 16) * 16
     println("child exit status: " ++ int_to_string(r / 16))

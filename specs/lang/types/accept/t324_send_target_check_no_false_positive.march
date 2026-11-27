@@ -27,7 +27,7 @@ mod Main do
     send(pid, msg)
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let c = spawn(Counter)
     send(c, Bump(1))
     let m = Bump(2)

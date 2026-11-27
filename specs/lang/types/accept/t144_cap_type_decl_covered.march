@@ -14,16 +14,21 @@
 -- `IO.FileSystem` covering both `IO.FileRead` and `IO.FileWrite` is
 -- deliberate: it also proves lattice subsumption reaches the new positions
 -- rather than requiring an exact string match on the declared capability.
+-- Ocap phase 7b retired `Cap(IO.X)` values, so these positions are now shown
+-- with a proof capability, which a module must still cover with `needs`. (The
+-- lattice-subsumption half no longer applies: proof capabilities are their
+-- own roots.)
 mod CoveredDecls do
+  mod Db do
+    proof cap Ready
+    fn ready() : Cap(Db.Ready) do mint_cap() end
+  end
   needs IO.Console
-  needs IO.FileSystem
-  needs IO.NetConnect
-
-  type Handle = { id : Int, tok : Cap(IO.FileWrite) }
-  type Conn = Idle | Live(Cap(IO.NetConnect))
-  type Bag = { label : String, items : List(Cap(IO.FileRead)) }
-
-  fn main(_cap_console : Cap(IO.Console)) do
+  needs Db.Ready
+  type Handle = { id : Int, tok : Cap(Db.Ready) }
+  type Conn = Idle | Live(Cap(Db.Ready))
+  type Bag = { label : String, items : List(Cap(Db.Ready)) }
+  fn main() needs IO.Console do
     println("every capability named here is declared")
   end
 end

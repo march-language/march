@@ -11,7 +11,7 @@ mod ActorCallTimeout do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let c = spawn(Silent)
     match Actor.call(c, CallGet, 300) do
     Ok(_)  -> println("fail:expected_timeout")

@@ -323,7 +323,7 @@ $dst.1 <- $trmc1;
 call_ptr go$dps($t3, $trmc1)
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let $t2 : String = let $t1 : List(Int) = ascending(0, 5) in
 let $rc_151 : String = List.sum_int($t1) in
 dec_rc $t1;

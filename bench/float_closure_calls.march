@@ -70,7 +70,7 @@ pfn rounds(k : Int, xi : List(Int), xf : List(Float), acc : Float) : Float do
   if k <= 0 do acc else rounds(k - 1, xi, xf, acc +. round(xi, xf)) end
 end
 
-fn main(_c : Cap(IO.Clock), _o : Cap(IO.Console)) : Unit do
+fn main() : Unit needs IO.Clock, IO.Console do
   let n = 2000000
   let xi = ints(n)
   let xf = flts(n)

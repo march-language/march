@@ -52,7 +52,7 @@ mod ActorCallInHandlerKeepsMessages do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let slow = spawn(Slow)
     let caller = spawn(Caller)
     send(caller, Work(slow))

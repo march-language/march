@@ -23,7 +23,7 @@ mod Main do
       { n: state.n + old, slot: Some(S1(v)) }
     end
   end
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let r : R = { slot: Some(S1(1)), n: 2 }
     let k = r.n + r.n + sink_opt(r.slot)
     let _ = spawn(Holder)

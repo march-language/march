@@ -23,7 +23,7 @@ mod Main do
       state
     end
   end
-  fn main(_c : Cap(IO.Console)) : Int do
+  fn main() : Int needs IO.Console do
     let rb = RingBuf.make(8)
     let s = spawn(Recent, rb)
     send(s, Seen(1))

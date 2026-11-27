@@ -31,7 +31,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let a = UserValues.Down(41)
     println(int_to_string(outer_get(a) + UserValues.get(a)))
     let ds = [UserValues.Down(5), UserValues.Down(6)]

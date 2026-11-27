@@ -25,7 +25,7 @@ mod StringConcatN do
     if i <= 0 do acc else rows(i - 1, acc ++ row(i)) end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let a = "A"
     let b = ""
     let c = "CCC"

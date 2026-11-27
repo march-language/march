@@ -6,7 +6,7 @@ mod ProcessAllowed do
   needs IO.Console
   needs IO.Process
 
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+  fn main() needs IO.Console, IO.Process do
     println(Process.env("MARCH_CONF_NEVER_SET") == Ok(None))
     println(Process.set_env("MARCH_CONF_SET", "yes") == Ok(()))
     println(Process.env("MARCH_CONF_SET") == Ok(Some("yes")))

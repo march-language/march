@@ -44,7 +44,7 @@ mod TaskCancelByIdLeakProbe do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     println("cancel=" ++ int_to_string(cancel_leg(4, 0)))
     println("again=" ++ int_to_string(again_leg(4, 0)))
     let b0 = live_allocs()

@@ -18,7 +18,7 @@ mod Main do
     type Note = { b : String }
     derive Json for Note
   end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     IO.puts(Json.to_string(to_json(A.make())))
   end
 end

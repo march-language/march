@@ -50,7 +50,7 @@ mod TopologyMoveA do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let me = "node-a"
     let other = "node-b"
     let seeds = Nil

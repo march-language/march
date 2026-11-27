@@ -62,7 +62,7 @@ mod Main do
     end
   end
 
-  fn main(cap: Cap(IO)) do
+  fn main() needs IO do
     -- ── nested Option element, type-honest: Vault(Option(String)) ────────
     let o = Authority.must(Vault.new("vnu_opt"))
     Vault.set(o, "row1", Some("hello"))

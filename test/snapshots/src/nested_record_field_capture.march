@@ -16,7 +16,7 @@ mod NestedRecordFieldCapture do
     A(Cons(S(h.identity.name), Cons(S(h.identity.node_id), Cons(S(h.nonce), Nil))))
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let my_id = { name: "node-" ++ "b", node_id: "pk-" ++ "b" }
     let h = { identity: my_id, nonce: "n" ++ "1" }
     let _ = enc(h)

@@ -23,7 +23,7 @@ mod UnboxedAggregate do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let v = forward(0.5, 0.25)
     println(float_to_string(dot(v, v)))
   end

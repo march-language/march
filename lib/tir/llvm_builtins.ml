@@ -1172,13 +1172,11 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_own(ptr %pid, ptr %value)" };
   { march_name = "cap_narrow"; c_name = Some "march_cap_narrow"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_cap_narrow(ptr %cap)" };
-  (* mint_cap — the gated proof-cap mint.  It has its OWN symbol rather than
-     aliasing march_cap_narrow: a mint must not inherit the dictionary of the
-     Cap(IO) it was minted from (see march_mint_cap), and the alias returned
-     its argument.  That agreed with the interpreter only while a Cap(IO) was
-     always NULL. *)
+  (* mint_cap() — the gated proof-cap mint, with no argument since ocap phase
+     7b (it took the root Cap(IO)).  Its own symbol, returning a fresh
+     capability with no dictionary. *)
   { march_name = "mint_cap"; c_name = Some "march_mint_cap"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
-    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mint_cap(ptr %cap)" };
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mint_cap()" };
   (* cap_impl / cap_dict — capability runtime dictionaries.  Both are
      identity-shaped at the machine level: a capability is NULL-or-dictionary,
      and Option is niche-encoded (None = 0, Some(x) = x, lib/tir/repr.ml), so

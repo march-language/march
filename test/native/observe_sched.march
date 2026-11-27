@@ -35,7 +35,7 @@ mod Main do
     end
   end
 
-  fn main(_io : Cap(IO)) do
+  fn main() needs IO do
     println("ready")
     sleep_ms(3000)
     start(4, Authority.must(System.now_ms()) + 4000)

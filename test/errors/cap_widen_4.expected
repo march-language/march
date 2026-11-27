@@ -1,10 +1,39 @@
 exit: 1
 -- CAPABILITY ------------------ errors/cap_widen_4.march
 
+`as_writer` takes a `Cap(IO.Console)` parameter, but capability values were retired: a function no longer receives its authority, it uses the current authority, which `main`'s `needs` clause asks for and each operation checks. [cap_param_retired]
+help: remove the parameter and the argument at each call; to state what `as_writer` may use, give it a `needs` clause.
+
+5 |   pfn as_writer(c : Cap(IO.Console)) : Cap(IO.FileWrite) do
+                        ^^^^^^^^^^^^^^^
+
+
+    possible fix (a guess: check it before applying it):
+
+ 5 -   pfn as_writer(c : Cap(IO.Console)) : Cap(IO.FileWrite) do
+ 5 +   pfn as_writer() : Cap(IO.FileWrite) do
+10 -     let _w = as_writer(c)
+10 +     let _w = as_writer()
+
+    run `march --explain cap_param_retired`
+
+
+-- CAPABILITY ------------------ errors/cap_widen_4.march
+
+`Cap(IO.FileWrite)` was retired: capability values grant nothing since the current authority replaced them. [cap_param_retired]
+help: remove it; code uses the current authority, which `main`'s `needs` clause asks for and each operation checks.
+
+5 |   pfn as_writer(c : Cap(IO.Console)) : Cap(IO.FileWrite) do
+                                           ^^^^^^^^^^^^^^^^^
+
+
+
+-- CAPABILITY ------------------ errors/cap_widen_4.march
+
 `Cap(IO.Console)` cannot be widened to `Cap(IO.FileWrite)` — `cap_narrow` only attenuates, so the source capability must subsume the target. [cap_widen]
 help: `Cap(IO.FileWrite)` is not below `Cap(IO.Console)` in the capability lattice. Receive it from a caller that holds an ancestor of it.
 
-7 |     cap_narrow(c)
+6 |     cap_narrow(c)
         ^^^^^^^^^^^^^
 
     run `march --explain cap_widen`
@@ -12,21 +41,41 @@ help: `Cap(IO.FileWrite)` is not below `Cap(IO.Console)` in the capability latti
 
 -- CAPABILITY ------------------ errors/cap_widen_4.march
 
+`cap_narrow` was retired with the capability values it narrowed. [cap_narrow_retired]
+help: remove the call; to run code under less authority, use `restrict SCOPE do ... end`.
+
+6 |     cap_narrow(c)
+        ^^^^^^^^^^^^^
+
+
+
+-- CAPABILITY ------------------ errors/cap_widen_4.march
+
 `main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite` (reached from `main`: main → as_writer). The grant is a ceiling on the WHOLE program — declaring `needs IO.FileWrite` does not raise it. [cap_grant_exceeded]
-help: add a `Cap(IO.FileWrite)` parameter to `main` (e.g. `fn main(…, _cap_filewrite : Cap(IO.FileWrite))`), or widen the whole grant to `Cap(IO)`, or remove the use.
+help: add `IO.FileWrite` to `main`'s request (its `needs` clause, or the module's `needs` line when `main` has no clause), or request all of `IO`, or remove the use.
 
-10 |   fn main(c : Cap(IO.Console)) do
+ 9 |   fn main(c : Cap(IO.Console)) do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-
-    fix (`forge fix` applies it):
-
-10 -   fn main(c : Cap(IO.Console)) do
-10 +   fn main(c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
 
     run `march --explain cap_grant_exceeded`
 
 
+-- WARNING: CAPABILITY --------- errors/cap_widen_4.march
 
-after fix: exit 1
-`Cap(IO.Console)` cannot be widened to `Cap(IO.FileWrite)` — `cap_narrow` only attenuates, so the source capability must subsume the target. [cap_widen]
+`main` asks for its authority with `Cap` parameters, which are deprecated and will be removed in the next release: a capability value grants nothing since the current authority replaced it. [deprecated_main_cap]
+help: request it with a `needs` clause: `fn main() needs IO.Console do`.
+
+9 |   fn main(c : Cap(IO.Console)) do
+                  ^^^^^^^^^^^^^^^
+
+
+    possible fix (a guess: check it before applying it):
+
+9 -   fn main(c : Cap(IO.Console)) do
+9 +   fn main() do
+9 -   fn main(c : Cap(IO.Console)) do
+9 +   fn main(c : Cap(IO.Console)) needs IO.Console do
+
+    run `march --explain deprecated_main_cap`
+
+

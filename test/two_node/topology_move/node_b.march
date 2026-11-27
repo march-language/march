@@ -50,7 +50,7 @@ mod TopologyMoveB do
     end
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let me = "node-b"
     let other = "node-a"
     let seeds = Cons("127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A"))), Nil)

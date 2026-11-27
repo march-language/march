@@ -41,7 +41,7 @@ mod FromJsonDispatch do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let pt : Point = { x: 3, y: 4 }
     let lb : Label = { name: "hi" }
     let ch = Gamma("g")

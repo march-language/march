@@ -6,7 +6,7 @@ mod Main do
   needs IO.Console
   needs IO.Clock
 
-  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+  fn main() needs IO.Console, IO.Clock do
     println("observe_ping: started")
     sleep_ms(2000)
     println("observe_ping: done")

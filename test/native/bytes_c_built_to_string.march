@@ -5,7 +5,7 @@
 -- compiler stamps for `Bytes.Bytes`.
 mod BytesCBuiltToString do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let made = Bytes.from_string("hi")
     let r : Result(Bytes, String) = Ok(made)
     println(to_string(r))

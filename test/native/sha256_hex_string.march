@@ -13,7 +13,7 @@
 mod Sha256HexString do
   needs IO.Console
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let d = sha256(Bytes.from_string("abc"))
     -- FIPS 180-2 test vector for "abc"
     println(d)

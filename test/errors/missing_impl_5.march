@@ -7,7 +7,7 @@ mod Main do
     List.length(List.filter(xs, fn x -> x == target))
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(count_of([Circle(1), Square(2)], Circle(1))))
   end
 end

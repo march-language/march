@@ -14,7 +14,7 @@ mod Main do
     ()
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let s = "hello"
     emit("neg_start", string_slice(s, -1, 3))
     emit("neg_start_far", string_slice(s, -1000, 2))

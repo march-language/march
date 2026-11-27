@@ -31,7 +31,7 @@ fn keep(b : Box) : Box =
   b
 
 ## main
-fn main(_c : Cap(IO.Console)) : () =
+fn main() : () =
   let $p4 : Box = let $t1 : (String, Int, String) = ("a", 1, "b") in
 from_tuple($t1) in
 dec_rc $p4;

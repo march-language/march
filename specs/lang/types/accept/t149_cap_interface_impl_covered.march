@@ -13,30 +13,31 @@
 --
 -- `IO.FileSystem` covering `IO.FileWrite` also proves the new positions run
 -- their findings through lattice subsumption, not a string match.
+-- Ocap phase 7b retired `Cap(IO.X)` values, so these positions are now shown
+-- with a proof capability, which a module must still cover with `needs`. (The
+-- lattice-subsumption half no longer applies: proof capabilities are their
+-- own roots.)
 mod CoveredIfaceImpl do
-  needs IO.Console
-  needs IO.FileSystem
-
-  interface Grantor(a) do
-    fn grant : a -> Cap(IO.FileWrite)
+  mod Db do
+    proof cap Ready
+    fn ready() : Cap(Db.Ready) do mint_cap() end
   end
-
+  needs IO.Console
+  needs Db.Ready
+  interface Grantor(a) do
+    fn grant : a -> Cap(Db.Ready)
+  end
   type Box = Box(Int)
-
   impl Grantor(Box) do
     fn grant(b) do
-      let take = fn (w : Cap(IO.FileWrite)) -> 1
+      let take = fn (w : Cap(Db.Ready)) -> 1
+      let _ = take
       match b do
-        Box(_) -> grant_stub()
+        Box(_) -> Db.ready()
       end
     end
   end
-
-  pfn grant_stub() : Cap(IO.FileWrite) do
-    grant_stub()
-  end
-
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("every capability named here is declared")
   end
 end

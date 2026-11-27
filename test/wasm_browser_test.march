@@ -9,7 +9,7 @@ fn update(state_json, msg_json) do
   state_json
 end
 
-fn main(_cap_console : Cap(IO.Console)) do
+fn main() needs IO.Console do
   println(render("{}"))
 end
 

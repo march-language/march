@@ -20,7 +20,7 @@ mod Rollback do
     { count: if old.label == "v2" do old.count else -999 end, announced: false }
   end
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _k : Cap(IO.Clock)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Spawn, IO.Clock do
     let counter = spawn(Counter)
     println("ready")
     List.each(List.range(0, 150), fn _ ->

@@ -11,7 +11,7 @@ mod ClusterAcceptSilentPeer do
   needs IO.NetListen
   needs IO.Spawn
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let listen_fd = match tcp_listen(0) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)

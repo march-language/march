@@ -31,17 +31,17 @@ mod Main do
     end
   end
 
-  fn log(_cap : Cap(IO.Console), msg : String) : () do
+  fn log(msg : String) : () do
     println(msg)
     ()
   end
 
-  fn run(_cap : Cap(IO.Console), job : (() -> ())) : () do
+  fn run(job : (() -> ())) : () do
     println("before")
     job()
   end
 
-  fn main(_cap_filewrite : Cap(IO.FileWrite)) : () do
+  fn main() : () needs IO.FileWrite do
     save("t174")
   end
 end

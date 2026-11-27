@@ -79,7 +79,7 @@ mod ArraySortBy do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     check("Array.sort_by", fn xs -> Array.to_list(Array.sort_by(Array.from_list(xs), fn (a, b) -> by_key(a, b))))
     check("Array.sort_by_key", fn xs -> Array.to_list(Array.sort_by_key(Array.from_list(xs), fn t -> key_of(t))))
     check("RRB.sort_by", fn xs -> RRB.to_list(RRB.sort_by(RRB.from_list(xs), fn (a, b) -> by_key(a, b))))

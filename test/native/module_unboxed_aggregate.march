@@ -50,7 +50,7 @@ mod ModuleUnboxedAggregate do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let a = Geo.P2(1, 2)
     let b = Geo.add(a, Geo.P2(10, 20))
     println(int_to_string(Geo.px(b) + py(b)))

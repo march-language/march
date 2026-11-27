@@ -16,7 +16,7 @@ mod TaskAwaitDiscarded do
     v
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     let t1 = Authority.must(Task.async(fn () -> work(100, 1)))
     let _ = task_await_unwrap(t1)
     println("after a discarded await")

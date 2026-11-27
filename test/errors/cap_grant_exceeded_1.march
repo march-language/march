@@ -1,4 +1,4 @@
--- EXPECT-ERROR: granted `Cap(IO.Console)`
+-- EXPECT-ERROR: granted `needs IO.Console`
 mod Main do
   -- R1 stages A+B reject witness (2026-08-09) — the decisive property, and
   -- the one no earlier check could state: EVERY `needs` line here is
@@ -20,7 +20,7 @@ mod Main do
     end
   end
 
-  fn main(cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     greet("march")
   end
 end

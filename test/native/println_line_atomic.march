@@ -37,7 +37,7 @@ mod Main do
     end
   end
 
-  fn main(cap: Cap(IO)) do
+  fn main() needs IO do
     let t1 = Authority.must(Task.async(fn () -> spew("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 300)))
     let t2 = Authority.must(Task.async(fn () -> spew("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", 300)))
     let t3 = Authority.must(Task.async(fn () -> spew("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", 300)))

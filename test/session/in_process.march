@@ -117,7 +117,7 @@ mod InProcess do
       Logging_C.close(s, st2))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     IO.puts("-- a whole session")
     let t1 = traced()
     let s1 = Authority.must(Session.attach(t1.ops))

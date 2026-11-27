@@ -19,7 +19,7 @@
 mod Main do
   needs IO
 
-  fn main(cap: Cap(IO)) do
+  fn main() needs IO do
     let t = Authority.must(Vault.new("vk"))
     Vault.set(t, 7, "odd")
     Vault.set(t, 8, "even")

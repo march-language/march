@@ -1,4 +1,23 @@
 exit: 1
+-- CAPABILITY ------------- errors/cap_root_broad_2.march
+
+`wants_root` takes a `Cap(IO)` parameter, but capability values were retired: a function no longer receives its authority, it uses the current authority, which `main`'s `needs` clause asks for and each operation checks. [cap_param_retired]
+help: remove the parameter and the argument at each call; to state what `wants_root` may use, give it a `needs` clause.
+
+40 |   pfn wants_root(r : Cap(IO)) : Int do 1 end
+                          ^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+40 -   pfn wants_root(r : Cap(IO)) : Int do 1 end
+40 +   pfn wants_root() : Int do 1 end
+44 -       Some(c) -> println(int_to_string(wants_root(c)))
+44 +       Some(c) -> println(int_to_string(wants_root()))
+
+    run `march --explain cap_param_retired`
+
+
 -- PROGRAM ---------------- errors/cap_root_broad_2.march
 
 `pid_of_int` is internal to the standard library; use `Actor.pid_from_int(n)` (a checked operation under `Actor.Introspect`). [stdlib_internal]
@@ -29,3 +48,6 @@ expected `Cap(IO)` but got `ActorCap(a)`. [type_mismatch]
     run `march --explain type_mismatch`
 
 
+
+after fix: exit 1
+`pid_of_int` is internal to the standard library; use `Actor.pid_from_int(n)` (a checked operation under `Actor.Introspect`). [stdlib_internal]

@@ -49,7 +49,7 @@ let $reg_inspect : Unit = register_actor_inspect(Bump_dispatch, Bump_inspect) in
 $spawned
 
 ## main
-fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) : () =
+fn main() : () =
   let p : Pid({ n : Int }) = let $raw_actor : Ptr(Unit) = Bump_spawn() in
 spawn($raw_actor) in
 let $t2 : Bump_Msg = let $t1 : Int = two_reads(1) in

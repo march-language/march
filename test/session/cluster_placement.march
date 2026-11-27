@@ -123,7 +123,7 @@ mod ClusterPlacement do
 
   -- ── the test ───────────────────────────────────────────────────────────
 
-  fn main(io : Cap(IO)) do
+  fn main() needs IO do
     let fk = { members: Authority.must(Vault.new("fake_members")), subs: Authority.must(Vault.new("fake_subs")), meta: Authority.must(Vault.new("fake_meta")) }
     Vault.set(fk.members, "n1", info("n1"))
     Vault.set(fk.members, "n2", info("n2"))

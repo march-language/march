@@ -18,7 +18,7 @@ mod ArrayReadTcoLoop do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let a = NativeArray.make_u8(4, 7)
     println(sum_bytes(a, 0, NativeArray.length_u8(a), 0))
   end

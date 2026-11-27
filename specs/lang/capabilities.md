@@ -95,11 +95,11 @@ callers never have to satisfy. See [The grant](#grant).
 
 | I want to… | Use |
 |------------|-----|
-| Control what external resources a module may touch | IO caps: `needs` in the module, `Cap(X)` at module boundaries |
+| Control what external resources a module may touch | IO caps: `needs` in the module |
 | Prove a module never touches the network | Declare only non-network caps; the compiler enforces absence |
 | Guarantee a function is completely pure | Declare no `needs`; the compiler verifies it |
-| Let a plugin only read the clock | `cap_narrow` to `Cap(IO.Clock)` at the call site |
-| Bound what the whole program may do | The grant: `main`'s capability parameter |
+| Let a plugin only read the clock | `restrict IO.Clock do ... end` around the call ([narrowing a block](#restrict)) |
+| Bound what the whole program may do | The grant: `main`'s `needs` clause |
 | Narrow what one run of a program may do | `--grant` / `MARCH_GRANT` at launch ([run-time authority](#run-time-authority)) |
 | Limit a function to some paths, hosts or names | A scoped function `needs` clause, checked at run time |
 | Limit what a dependency may do | A `grant` on it in `forge.toml` ([dependency grants](#dep-grants)) |
@@ -174,17 +174,29 @@ Every module that touches external resources declares `needs`:
 mod Server do
   needs IO.Network
 
-  fn listen(cap : Cap(IO.Network), port : Int) : () do
+  fn listen(port : Int) : () do
     ...
   end
 end
 ```
 
-The compiler enforces this transitively when the capability flows through a signature. `Server.listen` takes `Cap(IO.Network)` as a parameter, so any module that `use`s `Server` and calls `listen` must itself declare `needs IO.Network` (directly, or via a broader ancestor like `needs IO`), or the build fails naming exactly what is missing. A `Caller` module that `use`s `Server` without `needs IO.Network` gets `` module `Caller` imports `Server` which requires `Cap(IO.Network)`, but `IO.Network` is not declared in `needs`. ``, exit 1. This covers the signature, `use` and extern surface. A module that reaches for an IO builtin directly in a function body, with no `Cap(X)` in any signature, is rejected the same way; see [What the compiler tells you](#what-the-compiler-tells-you). The stdlib-mediated route that neither of these sees is covered by the [upper limit](#cap-strict).
+A module's `needs` limits its own operations: a module whose code reaches for an IO
+operation it does not declare is rejected, naming exactly what is missing; see
+[What the compiler tells you](#what-the-compiler-tells-you). A function never receives its
+authority as an argument: it uses the current authority, which `main`'s `needs` clause asks
+for and each operation checks ([run-time authority](#run-time-authority)). The
+stdlib-mediated route is covered by the [upper limit](#cap-strict).
+
+**`Cap(IO.X)` values were retired** (object capabilities, phase 7b). Earlier releases passed
+`Cap(IO.X)` values between functions and narrowed them with `cap_narrow`; those values were
+erased at run time and granted nothing. A `Cap(IO.X)` type outside `main`'s parameters is now
+the error [`cap_param_retired`]({{ site.baseurl }}/docs/errors/cap_param_retired/), and
+`cap_narrow` and `root_cap` are errors too. `forge fix` removes such a parameter and the
+argument at each call.
 
 ### Capability hierarchy
 
-`Cap(IO)` is the root. Sub-capabilities narrow what is allowed:
+`IO` is the root. Sub-capabilities narrow what is allowed:
 
 ```
 IO
@@ -216,7 +228,7 @@ Actor.Debug             — reading another actor's state: Actor.debug
 
 `Actor.Introspect` and `Actor.Debug` are roots of their own, outside `IO`: `needs IO` does
 not let a program inspect every actor's state. A program that uses them asks for them in
-`main`'s request (`fn main() : () needs IO.Console, Actor.Introspect do`).
+`main`'s request (`fn main() needs IO.Console, Actor.Introspect do`).
 
 **Monotonic time is ambient.** `sys_uptime_ms` and its stdlib wrapper
 `System.monotonic_time` (milliseconds since the process started) are not gated
@@ -236,13 +248,14 @@ Declaring a capability is a compile-time claim. To see it become a *runtime* bou
 
 This `IO` lattice is closed: every `IO`-rooted path in a `needs` declaration must appear in it. An unrecognized `IO`-rooted path (wrong case, a typo) or a bare leaf standing in for a real capability (`needs Network` instead of `needs IO.Network`) is a compile-time error with a did-you-mean suggestion, rather than being silently accepted and only surfacing later as a confusing "no function requires it" warning or an unrelated missing-`needs` error. Capability roots outside the `IO` lattice (e.g. `needs Ffi`, a dotted namespace like `needs Db.Migrated`, or an FFI extern's `Cap(LibC)`) are intentionally not in this table and stay free-form. The one exception is a *bare, single-segment* name whose spelling collides with a real capability's leaf case-insensitively: `needs Network` is rejected in favor of `needs IO.Network`, since that is almost always a real capability written without its `IO.` path rather than an actual FFI root. A dotted non-`IO` path is never subject to that check, even if its last segment happens to coincide with an `IO` capability's leaf (`needs MyLib.Clock`, `needs Vendor.Random`): the dot makes it unambiguously its own namespace.
 
-A module that declares `needs IO` can pass `Cap(IO)` to any function that requires a narrower cap. Use `cap_narrow` to produce a sub-capability: it is free, compile-time only:
+To run part of a program under less authority than the rest, wrap it in a
+[`restrict`](#restrict) block:
 
 ```march
-fn start(cap : Cap(IO)) : () do
-  let net_cap  : Cap(IO.Network)        = cap_narrow(cap)
-  let tls_cap  : Cap(IO.NetConnect.TLS) = cap_narrow(cap)
-  Server.listen(net_cap, 8080)
+fn start() : () do
+  restrict IO.NetListen do
+    Server.listen(8080)
+  end
 end
 ```
 
@@ -336,12 +349,12 @@ An uncovered capability is a **build-breaking ERROR** (`--check` exits 1). The
 route by which it is uncovered does not change the severity. (Before 2026-08-06 a
 direct builtin call in a function body was only a warning.)
 
-**Signature, transitive `use`, or `extern`.** If `Cap(X)` appears in a
-function, actor or extern parameter, or you `use` a module and reference a function
-from it that needs a capability you have not declared:
+**Transitive `use`, or `extern`.** If an extern declares a capability, or you `use`
+a module and reference a function from it that needs a capability you have not
+declared:
 
 ```
-$ march --check caller.march   # `use`s a module needing Cap(IO.Network), no `needs IO.Network` of its own
+$ march --check caller.march   # `use`s a module needing IO.Network, no `needs IO.Network` of its own
 -- CAPABILITY --
 Module `Caller` imports `Server` which requires `Cap(IO.Network)`, but `IO.Network` is not declared in `needs`.
 help: add `needs IO.Network` to the module body.
@@ -352,8 +365,7 @@ $ echo $?
 It is the functions you *reference* that count, not the imported module as a whole
 ([Propagation is demand-driven](#propagation-is-demand-driven)).
 
-**A direct body call to an IO builtin**, with no `Cap(X)` anywhere in a
-signature, is the same severity:
+**A direct body call to an IO builtin** is the same severity:
 
 ```
 $ march --check reader.march   # fn slurp(path) do file_read(path) end — no needs
@@ -374,7 +386,7 @@ single error naming all four once (each other capability's first use is a label)
 with one fix that inserts all four `needs` lines at once:
 
 ```
--- CAPABILITY -- `main` prints, but module `Main` declares no `needs IO.Console`; its code also reaches `Cap(IO.FileWrite)`, `Cap(IO.Random)`, `Cap(Time.Clock)`.
+-- CAPABILITY -- `main` prints, but module `Main` declares no `needs IO.Console`; its code also reaches `IO.FileWrite`, `IO.Random`, `Time.Clock`.
 hint: add these to the module body —
         needs IO.Console
         needs IO.FileWrite
@@ -438,7 +450,7 @@ mod Logger do
     log("ERROR: " ++ msg)
   end
 
-  fn main(_console : Cap(IO.Console), _write : Cap(IO.FileWrite)) : Unit do
+  fn main() : Unit needs IO.Console, IO.FileWrite do
     log_error("disk full")
   end
 end
@@ -465,13 +477,12 @@ many private helpers deep, and none of it goes beyond what the module declared".
 is still mechanically checked (`--check` exits 1 on the deleted-`needs` version
 above).
 
-Capabilities do flow as explicit values in one place: across module boundaries.
-`Server.listen` at the top of this page takes `Cap(IO.Network)` as a parameter, so
-any *other* module that imports `Server` and calls `listen` has to hold that
-capability itself, or the build fails naming the missing `needs`. Inside a single
-module no rule forces that: `needs` already covers everything the module can reach.
-Across a module boundary, a `Cap(X)` parameter behaves as it would in an
-object-capability language: authority only gets in if it is passed in.
+Earlier releases also let IO capabilities flow as explicit `Cap(X)` values across
+module boundaries. Those values were erased at run time and granted nothing, so they
+were retired (object capabilities, phase 7b): narrowing is done with
+[`restrict`](#restrict) and [dependency grants](#dep-grants), which the run time
+enforces, and a capability that is a *value* is a proof capability
+([below](#proof-capabilities)).
 
 ### The capability upper limit: on by default
 {: #cap-strict}
@@ -530,13 +541,13 @@ exclusion also covers first-party stdlib modules built on `extern`, such as
 `needs IO.Foreign` themselves, so a module can call them without declaring any
 `needs`. Function-level `needs ()` bounds and `main`'s grant still see the
 reach: a bounded function that calls `Js.Dom.set_text` gets `[cap_bound]`, and
-a `main` granted only `Cap(IO.Console)` gets `[cap_grant_exceeded]`.
+a `main` granted only `IO.Console` gets `[cap_grant_exceeded]`.
 
 The same upper limit can be re-checked on a compiled binary with
 [`forge cap inspect --strict`]({{ site.baseurl }}/docs/capability-audit/#auditing-a-compiled-binary),
 which reads each module's declared and measured capability sets out of the artifact.
 
-### The grant: `main`'s parameter bounds the whole program
+### The grant: `main`'s `needs` clause bounds the whole program
 {: #grant}
 
 Everything above verifies the *manifest*: `needs` must be present and truthful,
@@ -544,42 +555,41 @@ end to end. None of it stops anything: a module that declares
 `needs IO.Network` and exfiltrates passes every check, because the declaration
 is true. The grant is the point where March enforces a **no**.
 
-`main`'s capability parameter is the program's grant, and the program's whole
-transitive capability closure must sit under it:
+`main`'s request is the program's grant, and the program's whole transitive
+capability closure must sit under it:
 
 ```march
 mod Report do
   needs IO.Console
 
-  fn main(cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println("report done")
   end
 end
 ```
 
-`Cap(IO.Console)` here is a machine-checked claim: this program (every helper,
+`needs IO.Console` here is a machine-checked claim: this program (every helper,
 every stdlib call, every dependency `main` reaches) touches no resource beyond the
 console. Add a `save` helper that calls `file_write` anywhere in that closure
 and the build fails, naming the chain from `main` down to the frame that
 actually possesses the capability:
 
 ```
-`main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite`
+`main` is granted `needs IO.Console`, but the program reaches `IO.FileWrite`
 (reached from `main`: main → save). The grant is a ceiling on the WHOLE program —
 declaring `needs IO.FileWrite` does not raise it.
-help: add a `Cap(IO.FileWrite)` parameter to `main` (e.g.
-`fn main(…, _cap_filewrite : Cap(IO.FileWrite))`), or widen the whole grant to
-`Cap(IO)`, or remove the use.
+help: add `IO.FileWrite` to `main`'s request (its `needs` clause, or the module's
+`needs` line when `main` has no clause), or request all of `IO`, or remove the use.
 ```
 
-The help names the **precise** capability to add as a parameter before the
-broad `Cap(IO)` escape hatch: least privilege is the default the diagnostic
-steers you toward, not the widest grant.
+The help names the **precise** capability to add before the broad `IO` escape
+hatch, and the fix (`forge fix` applies it) adds exactly that: least privilege is
+the default the diagnostic steers you toward, not the widest grant.
 
 **Actors are inside the grant.** A message handler's body counts against
 `main`'s grant exactly like any other reachable code: an actor with a handler that
 calls `file_write` is charged the moment the program `spawn`s it, so a program
-granted only `Cap(IO.Console)` cannot smuggle a file write into a handler. An
+granted only `IO.Console` cannot smuggle a file write into a handler. An
 actor that is *defined but never spawned* costs no capability, the same
 dead-code-is-free rule the rest of the grant follows.
 
@@ -590,12 +600,11 @@ Three signatures, three meanings:
 | `fn main()` | the module's `needs` line; with no `needs` line, **empty** |
 | `fn main() needs ()` | **empty**: a build error the moment the program's closure reaches any capability; only a program that truly touches no IO compiles with it |
 | `fn main() needs IO.Console, IO.FileRead("/srv/")` | the clause, scopes included: the scopes are checked at run time ([Run-time authority](#run-time-authority)) |
-| `fn main(cap : Cap(IO))` | full IO: the established entry-point convention |
-| `fn main(cap : Cap(IO.Console))` | narrow: the closure must sit under it |
-| `fn main(a : Cap(IO.Console), b : Cap(IO.Spawn))` | union of the parameters: for when the program needs two narrow grants without widening to `Cap(IO)` |
+| `fn main() needs IO` | full IO |
+| `fn main(cap : Cap(IO.Console))` | deprecated (warning [`deprecated_main_cap`]({{ site.baseurl }}/docs/errors/deprecated_main_cap/)): the same request as `needs IO.Console`; removed in the next release |
 
-`main`'s request is its `needs` clause together with the kinds of its `Cap(...)`
-parameters. With neither, it is the module's `needs` line, so a program that prints
+`main`'s request is its `needs` clause (together with the kinds of any deprecated
+`Cap(...)` parameters). With neither, it is the module's `needs` line, so a program that prints
 needs only `needs IO.Console` in its module; `needs ()` on `main` requests nothing.
 A program that reaches more than its request is a compile error naming the exact
 capability to add (`` `main` performs IO but declares no grant. The program reaches
@@ -605,7 +614,7 @@ Two intentional edges:
 
 - **`IO.Foreign` cannot sit under a narrow grant.** What linked C code does is
   invisible to the capability lattice, so a program with a closure that reaches an
-  `extern` block is not accepted under any grant narrower than `Cap(IO)`, since the
+  `extern` block is not accepted under any grant narrower than `IO`, since the
   check will not certify a bound it cannot see.
 - **The grant bounds what `main` reaches, not what the file contains.** Dead
   code costs no capability, the same reachability the upper limit uses. (Its `needs`
@@ -1362,7 +1371,7 @@ for more; a grant narrowed or newly added is reported but does not. See
 
 **Don't use IO caps for pure domain concepts.** A function that validates an email address or checks a constraint has no business with capabilities. Capabilities exist for external state, not for logic.
 
-**Don't use capabilities for per-value guarantees.** `Cap(IO.FileRead)` proves a module is *allowed* to read files; it says nothing about whether a specific string value came from a trusted source. For per-value guarantees, use an opaque refined type.
+**Don't use capabilities for per-value guarantees.** `needs IO.FileRead` says a module is *allowed* to read files; it says nothing about whether a specific string value came from a trusted source. For per-value guarantees, use an opaque refined type.
 
 **Small scripts: just use `needs IO`.** For a 50-line script you will run once, fine-grained capability declarations add more friction than value. Use `needs IO` at the top and move on. The value of narrow caps emerges in larger codebases with multiple contributors over time.
 
@@ -1657,7 +1666,7 @@ mod NoFFIService do
   cap no_extern
   needs IO.Network
 
-  fn ping(_cap : Cap(IO.Network), host : String) : Int do
+  fn ping(host : String) : Int do
     string_length(host)
   end
 end
@@ -1837,11 +1846,10 @@ mod Api do
   needs IO.NetConnect.TLS    -- outbound HTTPS only — no plaintext TCP
   needs IO.Mut               -- session vault
 
-  fn start(io : Cap(IO.NetListen), tls : Cap(IO.NetConnect.TLS),
-           mut : Cap(IO.Mut)) : () do
+  fn start() : () do
     WebServer.new()
-    |> WebServer.plug(fn conn -> handle(conn, tls, mut))
-    |> WebServer.run(io, 8080)
+    |> WebServer.plug(fn conn -> handle(conn))
+    |> WebServer.run(8080)
   end
 end
 
@@ -1851,14 +1859,10 @@ mod Main do
 
   needs IO
 
-  -- The initial Cap(IO) is provided implicitly by the runtime to `main()` —
-  -- there is no `root_cap()` call in user code.
-  fn main(cap : Cap(IO)) : () do
-    let config  = AppConfig.load("/etc/myapp/config.toml")
-    let io_cap  : Cap(IO.NetListen)      = cap_narrow(cap)
-    let tls_cap : Cap(IO.NetConnect.TLS) = cap_narrow(cap)
-    let mut_cap : Cap(IO.Mut)            = cap_narrow(cap)
-    Api.start(io_cap, tls_cap, mut_cap)
+  -- The program's request: what `main` and everything it reaches may use.
+  fn main() : () needs IO.FileRead, IO.NetListen, IO.NetConnect.TLS, IO.Mut do
+    let config = AppConfig.load("/etc/myapp/config.toml")
+    Api.start()
   end
 end
 ```
@@ -1869,7 +1873,7 @@ end
 
 ## Runtime behaviour
 
-A `Cap(X)` is a **nullable pointer**. By default it is null, compiling to `null` in LLVM IR and `VUnit` in the interpreter, with no allocation, no indirection and no overhead; that is what every capability is unless something explicitly attaches a [runtime dictionary](#runtime-dictionaries-swapping-what-a-capability-does) to it. Enforcement of the capability *types* is at compile time; what a run may do is also checked at each capability operation against the [run-time authority](#run-time-authority), at the cost of two global loads when no grant, scope or frame is in play. A compiled binary can additionally turn its declared set into a kernel-enforced sandbox at startup, and a running node can gate hot deploys against it. Both live on their own page: see [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/) (OS-level sandboxing via `forge cap run` / `--cap-sandbox`, and node-local hot-deploy admission control).
+A capability value (a proof capability, `Cap(X)`) is a **nullable pointer**. By default it is null, compiling to `null` in LLVM IR and `VUnit` in the interpreter, with no allocation, no indirection and no overhead; that is what every capability is unless something explicitly attaches a [runtime dictionary](#runtime-dictionaries-swapping-what-a-capability-does) to it. Enforcement of the capability *types* is at compile time; what a run may do is also checked at each capability operation against the [run-time authority](#run-time-authority), at the cost of two global loads when no grant, scope or frame is in play. A compiled binary can additionally turn its declared set into a kernel-enforced sandbox at startup, and a running node can gate hot deploys against it. Both live on their own page: see [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/) (OS-level sandboxing via `forge cap run` / `--cap-sandbox`, and node-local hot-deploy admission control).
 
 ---
 
@@ -1893,11 +1897,11 @@ mod Db do
   proof cap Migrated
   needs IO
 
-  fn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
-    -- do the real migration work using the IO capability, then mint the proof.
-    -- `mint_cap` is the sanctioned way to construct a proof cap; it typechecks
+  fn run_migrations() : Cap(Db.Migrated) do
+    -- do the real migration work, then mint the proof.
+    -- `mint_cap()` is the sanctioned way to construct a proof cap; it typechecks
     -- ONLY here — inside a public `fn` of the declaring module. Runtime-erased.
-    mint_cap(cap)
+    mint_cap()
   end
 
   fn query(m : Cap(Db.Migrated), sql : String) : List(Row) do
@@ -1908,8 +1912,7 @@ end
 ```
 
 `Cap(Db.Migrated)` is **unforgeable**; every claim below is compiler-enforced:
-- `cap_narrow` cannot produce it. This is enforced, not just "not in the IO hierarchy": `cap_narrow`'s result may never be a nominal proof cap in *any* expression position (it only attenuates IO caps).
-- The runtime-provided `Cap(IO)` in `main()` cannot produce it: the only mint is `mint_cap`, and `mint_cap` is gated.
+- The only mint is `mint_cap()`, and `mint_cap()` is gated. (`cap_narrow`, which once could forge one, was retired with the IO capability values it narrowed.)
 - Only public (`fn`) functions of `mod Db` can `mint_cap` it: private (`pfn`) functions may pass it through but cannot construct one.
 - External code can pass it through, but cannot construct one, and no polymorphic launder through a nested unannotated helper can erase the cap type either.
 
@@ -1928,10 +1931,7 @@ mod Sys do
     -- ERROR: only public functions of `Db` can construct `Cap(Db.Migrated)`.
     -- `mint_cap` outside the declaring module is rejected (here, by Check 6,
     -- because the mint sits in the declared return position).
-    fn bad(cap : Cap(IO)) : Cap(Db.Migrated) do mint_cap(cap) end
-
-    -- ERROR: cap_narrow can no longer forge a proof cap in any position.
-    fn steal(cap : Cap(IO)) : Cap(Db.Migrated) do cap_narrow(cap) end
+    fn bad() : Cap(Db.Migrated) do mint_cap() end
 
     -- OK: pass-through is allowed
     fn relay(m : Cap(Db.Migrated)) : Cap(Db.Migrated) do m end
@@ -1939,7 +1939,7 @@ mod Sys do
 end
 ```
 
-History (widening slice 6, 2026-07-08): earlier releases had two gaps here. The documented mint idiom did not typecheck (a bare `()` at the end of a `Cap(Db.Migrated)`-returning body was rejected `expected Cap(Db.Migrated) but got ()`), and the mechanism that *did* work (`cap_narrow`, with a polymorphic return `Cap(a)` that instantiated to any proof cap at the call site) was unrestricted, so any holder of an ordinary `Cap(IO)` could mint any proof cap by name with no covering `needs`. Both are closed: the sanctioned mint is the gated `mint_cap` primitive, `cap_narrow` can no longer produce a proof cap in any position, and the nested-module type-erasure hole the deepest forge relied on (`consume(id(cap))`, laundering through a nested unannotated helper) is closed by the intra-module reference-soundness fix. See `specs/lang/core-march-types.md` §2.8.13 (proof-cap minting/forging/unforgeability) and §2.5.1 (`(T-QualRef)`) for the rule-numbered treatment and corpus witnesses. One narrow residual stays open: a `cap_narrow` result wrapped in a container through a polymorphic factory can still forge in some shapes (the taint tagger is non-recursive); tracked in `specs/todos/` under "Compiler: Capabilities/effects".
+History (widening slice 6, 2026-07-08): earlier releases had two gaps here. The documented mint idiom did not typecheck (a bare `()` at the end of a `Cap(Db.Migrated)`-returning body was rejected `expected Cap(Db.Migrated) but got ()`), and the mechanism that *did* work (`cap_narrow`, with a polymorphic return `Cap(a)` that instantiated to any proof cap at the call site) was unrestricted, so any holder of an ordinary `Cap(IO)` could mint any proof cap by name with no covering `needs`. Both are closed: the sanctioned mint is the gated `mint_cap` primitive, `cap_narrow` can no longer produce a proof cap in any position, and the nested-module type-erasure hole the deepest forge relied on (`consume(id(cap))`, laundering through a nested unannotated helper) is closed by the intra-module reference-soundness fix. See `specs/lang/core-march-types.md` §2.8.13 (proof-cap minting/forging/unforgeability) and §2.5.1 (`(T-QualRef)`) for the rule-numbered treatment and corpus witnesses. Since ocap phase 7b `cap_narrow` itself is retired, which closes the last residual forge route through it.
 
 ### When to use proof caps
 
@@ -1998,7 +1998,7 @@ tag ConnTag
 tag Closed
 tag Open
 
-fn connect(cap : Cap(IO.Network)) : Handle(ConnTag, Closed) do ... end
+fn connect() : Handle(ConnTag, Closed) needs IO.NetConnect do ... end
 fn open(h : Handle(ConnTag, Closed)) : Handle(ConnTag, Open) do ... end
 fn query(h : Handle(ConnTag, Open), sql : String) : (List(Row), Handle(ConnTag, Open)) do ... end
 fn close(h : Handle(ConnTag, Open)) : Handle(ConnTag, Closed) do ... end
@@ -2084,8 +2084,8 @@ mod Session do
   proof cap Live with Ops
   needs IO
 
-  fn boot(c : Cap(IO)) : Cap(Session.Live) do
-    cap_impl(mint_cap(c), { emit: fn s -> String.length(s) })
+  fn boot() : Cap(Session.Live) do
+    cap_impl(mint_cap(), { emit: fn s -> String.length(s) })
   end
 
   fn emit(c : Cap(Session.Live), s : String) : Int do
@@ -2110,10 +2110,8 @@ boundary instead. `Session.Ops`, the stdlib session transport, carries every
 message as `Bytes` for exactly this reason, which also keeps one dictionary
 type serving every protocol.
 
-`cap_narrow` carries a dictionary across attenuation: a narrowed capability is
-the same authority, reduced. `mint_cap` does **not**: a mint produces a *new*
-capability, so inheriting the dictionary of the `Cap(IO)` it was minted from
-would give it operations belonging to something else.
+`mint_cap()` produces a *new* capability with no dictionary; attaching one is
+`cap_impl`'s job.
 
 **Who may attach one.** Supplying a dictionary decides what a capability does,
 which is at least as much authority as minting one, so it is gated exactly like
@@ -2202,14 +2200,14 @@ in favour of `mock` (ocap phase 7). `cap_impl` remains for a program's own
 
 ### Specialization tags: realtime exclusion
 
-`Tagged(X, T)` annotates a capability with a policy. The key narrowing rule: a function taking `Tagged(_, Realtime)` is in a realtime context and cannot also hold `Cap(Alloc)`, `Cap(IO)`, or `Cap(Panic)`. The compiler rejects mixed signatures:
+`Tagged(X, T)` annotates a capability with a policy. The key narrowing rule: a function taking `Tagged(_, Realtime)` is in a realtime context and cannot also hold `Alloc`, `IO` or `Panic`, whether as a `Cap(Alloc)` parameter or by asking for it in a `needs` clause (`fn f(t : Tagged(DSP, Realtime)) : () needs IO` is refused too). The compiler rejects mixed signatures:
 
 ```march
 type DSP = DSP
 type Realtime = Realtime
 
--- ERROR: realtime functions cannot take Cap(IO)
-fn bad(cap : Tagged(DSP, Realtime), io : Cap(IO)) : () do () end
+-- ERROR: realtime functions cannot take Cap(Alloc)
+fn bad(cap : Tagged(DSP, Realtime), a : Cap(Alloc)) : () do () end
 
 -- OK: statically proven — no allocation, no IO, no panic
 fn process(cap : Tagged(DSP, Realtime), buf : Buffer(Float32, 256)) : Buffer(Float32, 256) do
@@ -2224,73 +2222,48 @@ fn fft(cap : Tagged(SIMD, N), buf : Buffer(Float32, N)) : Buffer(Complex32, N)
 -- monomorphization produces fft_256, fft_1024, etc.
 ```
 
-### Capability environment records: reducing parameter count
+### Handing out a narrow authority: records of functions
 
-When many functions need the same bundle of capabilities, threading individual `Cap(X)` parameters everywhere is tedious. Bundle them into a record instead:
-
-```march
-type RuntimeEnv = {
-  io    : Cap(IO),
-  clock : Cap(IO.Clock),
-  net   : Cap(IO.Network)
-}
-
-fn run(env : RuntimeEnv, data : Input) : Output do ... end
-```
-
-Narrow to a restricted set by constructing a smaller record: the type system enforces what the callee can do through record structure:
+IO capabilities are not values (they were retired in object capabilities, phase 7b),
+so a function never receives its authority as an argument. To give a piece of code
+*some* authority and no more, hand it **functions**, and run it under `restrict ()`:
+a function value keeps the authority of the place it was made
+([what keeps the narrowed authority](#restrict)), while the code you call is limited
+by the block.
 
 ```march
-type PluginEnv = { clock : Cap(IO.Clock) }
+type PluginEnv = { now : () -> Int, log : String -> () }
 
-fn run_plugin(env : RuntimeEnv, plugin : Plugin) do
-  plugin.run({ clock: env.clock })  -- plugin structurally cannot use IO or network
-end
-```
-
-Each env module should provide named narrowing functions:
-
-```march
-mod RuntimeEnv do
-  fn narrow_for_plugin(env : RuntimeEnv) : PluginEnv do
-    { clock: env.clock }
+fn run_plugin(plugin : Plugin) : () needs IO.Clock, IO.Console do
+  let env = { now: fn () -> System.now_ms(), log: fn s -> Authority.ignore(println(s)) }
+  restrict () do
+    plugin.run(env)   -- may read the clock and print through env, nothing else
   end
 end
 ```
 
-### Testing with capability environment records
+The record is the plugin's whole authority: inside `restrict ()` its own code can
+perform no capability operation, and the two closures carry `run_plugin`'s clock and
+console. A narrower record is a narrower plugin.
 
-This pattern predates [runtime dictionaries](#runtime-dictionaries-swapping-what-a-capability-does) and is still the right tool when you want the swap to be **visible in the signature**: a `LogEnv` parameter says outright that the caller chooses the logger. Reach for a dictionary instead when you want the swap to be invisible: a function taking `Cap(IO.Console)` can be mocked without changing its type.
+### Testing with records of functions
 
-Pair the cap with a function field for swappable runtime behaviour:
+The same record is the test seam when you want the swap to be **visible in the
+signature**: a `LogEnv` parameter says outright that the caller chooses the logger.
+Reach for [`mock`](#mocking-an-io-capability-in-tests-mock) instead when you want the
+swap to be invisible: code that prints can be mocked without changing its type.
 
 ```march
-type LogEnv = {
-  log_cap : Cap(IO.Console),  -- compile-time gate, erased at runtime
-  write   : (String) -> ()    -- runtime behaviour — swappable in tests
-}
+type LogEnv = { write : String -> () }
 
-fn test_process() do
-  let captured = Vault.new("test_capture")
-  Vault.set(captured, "lines", Nil)
-  let env : LogEnv = {
-    log_cap: test_logger_cap(),
-    write:   fn line ->
-      match Vault.get(captured, "lines") do
-      Some(xs) -> Vault.set(captured, "lines", Cons(line, xs))
-      None     -> Vault.set(captured, "lines", Cons(line, Nil))
-      end
-  }
-  let result = process(env, test_input)
-  let lines = match Vault.get(captured, "lines") do
-    Some(xs) -> xs
-    None     -> Nil
-    end
-  Test.assert_true(List.any(lines, fn l -> String.contains(l, "expected message")), "should have captured the message")
+test "process logs one line" do
+  let lines = Vault.new("test_capture")
+  Vault.set(lines, "n", 0)
+  let env = { write: fn _ -> Vault.set(lines, "n", Option.unwrap_or(Vault.get(lines, "n"), 0) + 1) }
+  let _ = process(env, test_input)
+  assert(Vault.get(lines, "n") == Some(1))
 end
 ```
-
----
 
 ## Errors you'll see
 
@@ -2298,7 +2271,7 @@ The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) shows what th
 
 - [A `main` that does I/O without being granted a capability]({{ site.baseurl }}/docs/error-messages/#main-no-grant)
 - [A module that writes a file without declaring `needs`]({{ site.baseurl }}/docs/error-messages/#missing-needs)
-- [Passing one capability where another is required]({{ site.baseurl }}/docs/error-messages/#wrong-capability)
+- [Using a capability a `restrict` block leaves out]({{ site.baseurl }}/docs/error-messages/#wrong-capability)
 
 ---
 

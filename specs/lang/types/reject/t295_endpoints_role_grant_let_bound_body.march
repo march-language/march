@@ -31,12 +31,12 @@ mod Main do
     ()
   end
 
-  fn main(c : Cap(IO)) do
-    let body = fn (s, nc, st) ->
+  fn main() needs IO do
+    let body = fn (s, st) ->
       Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
         wipe(n)
         Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
-    let _ = Stream_Run.run_Cons(c, "cons", "secret", Stream_Run.addrs_from_env(), body)
+    let _ = Stream_Run.run_Cons("cons", "secret", Stream_Run.addrs_from_env(), body)
     ()
   end
 end

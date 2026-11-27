@@ -58,7 +58,7 @@ let test_js_pipeline_dom_extern_reaches_output () =
     extern "dom" : Cap(Ffi) do
       fn dom_get_element_by_id(id: String) : Option(Node) = "march_dom_get_element_by_id"
     end
-    fn main(_cap_foreign : Cap(IO.Foreign)) : Unit do
+    fn main() : Unit needs IO.Foreign do
       let _ = dom_get_element_by_id("root")
       ()
     end
@@ -79,7 +79,7 @@ let test_js_pipeline_dom_event_key_reaches_output () =
     extern "dom" : Cap(Ffi) do
       fn dom_event_key(ev: String) : String = "march_dom_event_key"
     end
-    fn main(_cap_foreign : Cap(IO.Foreign)) : Unit do
+    fn main() : Unit needs IO.Foreign do
       let _ = dom_event_key("x")
       ()
     end
@@ -317,7 +317,7 @@ let unboxed_vec3_src = {|mod UB do
       Vec3(x, _, _) -> x
     end
   end
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(float_to_string(vx(forward(1.0, 2.0))))
     ()
   end
@@ -460,7 +460,7 @@ let module_vec3_src = {|mod UB do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(float_to_string(Geo.vx(Geo.forward(1.0, 2.0))))
     ()
   end
@@ -542,7 +542,7 @@ let unboxed_branch_join_src = {|mod UBJoin do
       spin(i - 1, acc +. psum(p))
     end
   end
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(float_to_string(spin(10, 0.0)))
     ()
   end
@@ -568,7 +568,7 @@ let unboxed_mixed_join_src = {|mod UBMixed do
       spin(i - 1, acc +. psum(p))
     end
   end
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(float_to_string(spin(10, 0.0)))
     ()
   end
@@ -599,7 +599,7 @@ let unboxed_multi_join_src = {|mod UBMulti do
       spin(i - 1, acc + pval(p) + pval(q))
     end
   end
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(int_to_string(spin(10, 0)))
     ()
   end
@@ -869,7 +869,7 @@ let test_nested_bool_lit_pattern_no_tag_switch () =
         Err(_) -> "E"
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do
+    fn main() : Unit needs IO.Console do
       println(classify(Ok(true)))
       println(classify(Ok(false)))
       println(classify(Err("x")))
@@ -896,7 +896,7 @@ let test_nested_int_lit_pattern_tagged_switch () =
         Err(_) -> "E"
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do
+    fn main() : Unit needs IO.Console do
       println(classify(Ok(1)))
       ()
     end
@@ -920,7 +920,7 @@ let test_nested_atom_lit_pattern_no_tag_switch () =
         Err(_) -> "E"
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do
+    fn main() : Unit needs IO.Console do
       println(classify(Ok(:red)))
       ()
     end
@@ -1145,7 +1145,7 @@ let test_actor_handler_binder_shadows_toplevel_fn () =
         { n: state.n + 1 }
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do
+    fn main() : Unit needs IO.Console do
       let pid = spawn(Host)
       let _ = send(pid, Msg("hello"))
       run_until_idle()
@@ -1177,7 +1177,7 @@ let test_actor_suffix_named_user_type_not_treated_as_actor () =
         TNode(l, r) -> TNode(bump(l), r)
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do
+    fn main() : Unit needs IO.Console do
       let original = TNode(TLeaf(10), TLeaf(20))
       let shared = original
       let bumped = bump(original)
@@ -1213,7 +1213,7 @@ let test_tco_factorial_has_loop () =
       if n == 0 do acc
       else factorial(n - 1, n * acc) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(factorial(10, 1)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(factorial(10, 1)))) end
   end|} in
   (* The tco_loop label and back-edge branch are the unique markers of TCO. *)
   Alcotest.(check bool) "TCO factorial: tco_loop block emitted" true
@@ -1233,7 +1233,7 @@ let test_tco_fold_has_loop () =
       Cons(h, t) -> fold(t, acc + h)
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fold(Cons(1, Cons(2, Nil)), 0)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(fold(Cons(1, Cons(2, Nil)), 0)))) end
   end|} in
   Alcotest.(check bool) "TCO fold: tco_loop block emitted" true
     (ir_contains ir "tco_loop");
@@ -1249,7 +1249,7 @@ let test_tco_nontail_fib_no_loop () =
       if n < 2 do n
       else fib(n - 1) + fib(n - 2) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fib(10)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(fib(10)))) end
   end|} in
   (* Judged on fib's own body: println links Authority's policy, whose
      tail-recursive helpers do get TCO loops elsewhere in the module. *)
@@ -1269,7 +1269,7 @@ let test_tco_countdown_has_loop () =
       if n == 0 do 0
       else count(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(count(100)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(count(100)))) end
   end|} in
   Alcotest.(check bool) "TCO countdown: tco_loop block emitted" true
     (ir_contains ir "tco_loop");
@@ -1289,7 +1289,7 @@ let test_mutual_tco_even_odd_loop_emitted () =
     fn odd(n : Int) : Bool do
       if n == 0 do false else even(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(to_string(even(1000000)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(to_string(even(1000000)))) end
   end|} in
   Alcotest.(check bool) "mutual TCO even/odd: mutual_loop block emitted" true
     (ir_contains ir "mutual_loop");
@@ -1319,7 +1319,7 @@ let test_mutual_tco_three_way () =
     fn fc(n : Int) : Int do
       if n == 0 do 0 else fa(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fa(99)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(fa(99)))) end
   end|} in
   Alcotest.(check bool) "three-way mutual TCO: mutual_loop emitted" true
     (ir_contains ir "mutual_loop");
@@ -1340,7 +1340,7 @@ let test_mutual_tco_state_machine () =
     fn state_b(n : Int) : Int do
       if n <= 0 do 2 else state_a(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(state_a(1000000)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(state_a(1000000)))) end
   end|} in
   Alcotest.(check bool) "state machine mutual TCO: mutual_loop emitted" true
     (ir_contains ir "mutual_loop");
@@ -1360,7 +1360,7 @@ let test_mutual_tco_non_tail_no_loop () =
     fn count_g(n : Int) : Int do
       if n == 0 do 1 else count_f(n - 1) + 1 end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(count_f(10)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(count_f(10)))) end
   end|} in
   Alcotest.(check bool) "non-tail mutual recursion: no mutual_loop" false
     (ir_contains ir "mutual_loop")
@@ -1375,7 +1375,7 @@ let test_mutual_tco_self_tco_unaffected () =
     fn countdown(n : Int) : Int do
       if n == 0 do 0 else countdown(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(countdown(10)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(countdown(10)))) end
   end|} in
   Alcotest.(check bool) "self TCO still works: tco_loop emitted" true
     (ir_contains ir "tco_loop");
@@ -1430,7 +1430,7 @@ let test_mutual_tco_borrowed_arg_decref_on_live_path () =
         build_loop(s, n - 1)
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(build_loop("z", 1000)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(build_loop("z", 1000)))) end
   end|} in
   Alcotest.(check bool)
     "mutual-tco borrowed-arg: the group is flattened (mutual_loop emitted)"
@@ -1485,7 +1485,7 @@ let test_tco_self_fresh_arg_release_deferred () =
         str_to_int(String.join(rest, ""), acc * 10 + String.byte_size(c))
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(str_to_int("9000", 0)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(str_to_int("9000", 0)))) end
   end|} in
   let fn_ir =
     let start = Str.search_forward (Str.regexp "define [^\n]*@str_to_int(") ir 0 in
@@ -1519,7 +1519,7 @@ let test_mutual_tco_safe_group_still_flattened () =
     fn od(n : Int) : Bool do
       if n == 0 do false else ev(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(to_string(ev(1000000)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(to_string(ev(1000000)))) end
   end|} in
   Alcotest.(check bool) "safe mutual group (ints): mutual_loop emitted" true
     (ir_contains ir_ints "mutual_loop");
@@ -1538,7 +1538,7 @@ let test_mutual_tco_safe_group_still_flattened () =
     fn step(x : String, rest : List(String), seen : Int) : Int do
       if String.starts_with(x, "no") do walk(rest, seen + 1) else walk(rest, seen) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(walk(["no-a", "b"], 0)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(walk(["no-a", "b"], 0)))) end
   end|} in
   Alcotest.(check bool) "safe mutual group (owned list walk): mutual_loop emitted" true
     (ir_contains ir_list "mutual_loop");
@@ -1586,7 +1586,7 @@ let test_tco_self_dup_arg_decref_on_live_path () =
       Cons(_, t) -> walk(t, acc + 1)
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(walk(["a", "b"], 0)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(walk(["a", "b"], 0)))) end
   end|} in
   Alcotest.(check bool) "self-tco dup-arg: tco_loop emitted" true
     (ir_contains ir "tco_loop");
@@ -1656,7 +1656,7 @@ let test_deep_drop_of_borrowed_container () =
         go(buf, i + 1, n, acc + consume(parts))
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(go("a,b,c", 0, 2, 0)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(go("a,b,c", 0, 2, 0)))) end
   end|} in
   Alcotest.(check bool)
     "deep drop: the owner's drop of the split result calls a generated deep drop, not a bare decrc"
@@ -1702,7 +1702,7 @@ let test_record_drop_releases_before_loading_fields () =
         Holder(w, i) -> i + w.n
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do
+    fn main() : Unit needs IO.Console do
       let w = make(3)
       let x = peek(Holder(w, 1))
       Authority.ignore(println(int_to_string(x + string_length(w.a))))
@@ -1766,7 +1766,7 @@ let test_drop_glue_name_is_structural () =
     end
     descend(n, Nil)
   end
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(int_to_string(List.length(outer(5))))
     ()
   end
@@ -1841,7 +1841,7 @@ let test_mutual_tco_non_tail_dec_chain_wrapped_no_loop () =
         build_loop(s, n - 1)
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(build_loop("z", 5)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(build_loop("z", 5)))) end
   end|} in
   Alcotest.(check bool)
     "non-tail dec-chain-wrapped group call: no mutual_loop formed for this pair"
@@ -1866,7 +1866,7 @@ let test_mutual_tco_has_reduction_check () =
     fn is_odd(n : Int) : Bool do
       if n == 0 do false else is_even(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(to_string(is_even(1000000)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(to_string(is_even(1000000)))) end
   end|} in
   Alcotest.(check bool) "mutual TCO is_even/is_odd: mutual_loop block emitted" true
     (ir_contains ir "mutual_loop");
@@ -1900,7 +1900,7 @@ let test_phase4_nonleaf_has_reduction_check () =
       if n <= 1 do n
       else fib(n - 1) + fib(n - 2) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fib(10)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(fib(10)))) end
   end|} in
   (* Must match the LOAD, not the preamble declaration: @march_tls_reductions
      and @march_preempt_request are both declared in every native preamble, so
@@ -1946,7 +1946,7 @@ let test_phase4_tco_fn_reduction_in_loop () =
     fn countdown(n : Int) : Int do
       if n == 0 do 0 else countdown(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(countdown(100)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(countdown(100)))) end
   end|} in
   Alcotest.(check bool) "TCO countdown: tco_loop emitted" true
     (ir_contains ir "tco_loop");
@@ -1962,7 +1962,7 @@ let test_phase4_nonrecursive_caller_has_check () =
   needs IO.Console
     fn double(n : Int) : Int do n + n end
     fn apply_double(n : Int) : Int do double(n) end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(apply_double(3)))) end
+    fn main() : Unit needs IO.Console do Authority.ignore(println(int_to_string(apply_double(3)))) end
   end|} in
   (* apply_double calls double (non-builtin) → non-leaf → check emitted. *)
   Alcotest.(check bool) "apply_double: preemption check present" true
@@ -6013,7 +6013,7 @@ let blocking_extern_src = {|mod Test do
     end
   end
 
-  fn main(_cap_foreign : Cap(IO.Foreign), _cap_spawn : Cap(IO.Spawn)) : Unit do
+  fn main() : Unit needs IO.Foreign, IO.Spawn do
     let w = task_spawn(fn _ -> worker(2))
     let _ = task_await(w)
     ()
@@ -7529,7 +7529,7 @@ mod Top do
     end
     fn mk() do Shared end
   end
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(speak(DcA.mk()))
     println(speak(DcB.mk()))
   end
@@ -7603,7 +7603,7 @@ mod Top do
     end
     fn mk() do TB end
   end
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(speak(NA.mk()))
     println(speak(NB.mk()))
   end
@@ -7852,7 +7852,7 @@ mod Top do
     end
     fn mk() do Shared end
   end
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(speak(DcA.mk()))
     println(speak(DcB.mk()))
   end
@@ -7934,7 +7934,7 @@ mod Top do
       end
     end
   end
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(DcA.describe(DcA.Shared))
     println(DcB.describe(DcB.Shared))
   end
@@ -8002,7 +8002,7 @@ mod Top do
     end
     fn mk() do Shared end
   end
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(speak(DcA.mk()))
     println(speak(DcB.mk()))
   end
@@ -8183,7 +8183,7 @@ mod Top do
       fn speak(_self) do "from-B" end
     end
   end
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(speak(NA.TA))
     println(speak(NB.TB))
   end
@@ -8231,7 +8231,7 @@ mod M do
   impl Speak(Cat) do
     fn speak(_self) do "meow" end
   end
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(speak(Dog))
     println(speak(Cat))
   end
@@ -8321,7 +8321,7 @@ mod Top do
       fn speak(_self) do "from-B" end
     end
   end
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(speak(NA.TA))
     println(speak(NA.TA2))
     println(speak(NB.TB))
@@ -9644,7 +9644,7 @@ let test_compile_task_spawn_heap_alloc_no_rc_underflow () =
   let ir = emit_actor_ir {|mod T do
   needs IO.Spawn
     fn go() : String do "hello" end
-    fn main(_cap_spawn : Cap(IO.Spawn)) do
+    fn main() needs IO.Spawn do
       let _ = task_spawn(fn _ -> go())
       ()
     end
@@ -9678,7 +9678,7 @@ let test_compile_task_spawn_heap_alloc_no_rc_underflow () =
 let test_compile_local_shadows_builtin_still_gets_rc_ops () =
   let ir = emit_actor_ir {|mod ShadowRc do
   needs IO.Console
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let kill = String.concat("heap", "-allocated")
       let out = String.concat(kill, "!")
       println(out)
@@ -10282,12 +10282,14 @@ let test_cap_needs_pure_ok () =
   end|} in
   Alcotest.(check bool) "pure module: no errors" false (has_errors ctx)
 
-(* Module declares needs and uses Cap in a function signature — should be clean *)
+(* Ocap phase 7b retired `Cap(IO.X)` values, so the coverage these pin is
+   now shown with a function `needs` clause, which must lie within the
+   module's `needs` ([cap_bound_needs]). *)
 let test_cap_needs_declared_ok () =
   let ctx = typecheck {|mod Test do
     needs IO
-    fn greet(cap : Cap(IO)) do
-      cap
+    fn greet() needs IO do
+      ()
     end
   end|} in
   Alcotest.(check bool) "declared needs with Cap: no errors" false (has_errors ctx)
@@ -10299,7 +10301,10 @@ let test_cap_missing_needs_error () =
       cap
     end
   end|} in
-  Alcotest.(check bool) "undeclared Cap is an error" true (has_errors ctx)
+  (* The parameter is also retired (ocap phase 7b): assert Check 1's own
+     message, not merely that something is wrong. *)
+  Alcotest.(check bool) "undeclared Cap is an error" true
+    (has_error_with ctx "`IO` is not declared in `needs`")
 
 (* Module declares needs IO but never uses Cap(IO) anywhere — should warn *)
 let test_cap_unused_needs_warning () =
@@ -10330,8 +10335,8 @@ let test_cap_extern_block_counts_as_use () =
 let test_cap_supertype_covers_subtype () =
   let ctx = typecheck {|mod Test do
     needs IO
-    fn connect(cap : Cap(IO.Network)) do
-      cap
+    fn connect() needs IO.Network do
+      ()
     end
   end|} in
   Alcotest.(check bool) "needs IO covers Cap(IO.Network): no errors" false (has_errors ctx)
@@ -10345,14 +10350,14 @@ let test_cap_needs_wrong_subtype () =
     end
   end|} in
   Alcotest.(check bool) "needs IO.Network does not cover Cap(IO.FileRead): error" true
-    (has_errors ctx)
+    (has_error_with ctx "`IO.FileRead` is not declared in `needs`")
 
 (* Multiple needs declarations are supported *)
 let test_cap_multiple_needs () =
   let ctx = typecheck {|mod Test do
     needs IO.Network, IO.FileRead
-    fn connect(cap : Cap(IO.Network)) do cap end
-    fn read_file(cap : Cap(IO.FileRead)) do cap end
+    fn connect() needs IO.Network do () end
+    fn read_file() needs IO.FileRead do () end
   end|} in
   Alcotest.(check bool) "multiple needs: no errors" false (has_errors ctx)
 
@@ -10405,13 +10410,13 @@ let has_message_containing ctx needle =
 let test_cap_transitive_ok () =
   let ctx = typecheck {|mod Outer do
     mod Lib do
-      needs IO.Network
-      fn connect(cap : Cap(IO.Network)) do cap end
+      needs IO.Console
+      fn connect() do println("x") end
     end
     mod Test do
-      needs IO.Network
+      needs IO.Console
       use Lib.*
-      fn run(cap : Cap(IO.Network)) do Lib.connect(cap) end
+      fn run() do Lib.connect() end
     end
   end|} in
   Alcotest.(check bool) "transitive ok when needs declared" false (has_errors ctx)
@@ -10420,12 +10425,12 @@ let test_cap_transitive_ok () =
 let test_cap_transitive_missing_error () =
   let ctx = typecheck {|mod Outer do
     mod Lib do
-      needs IO.Network
-      fn connect(cap : Cap(IO.Network)) do cap end
+      needs IO.Console
+      fn connect() do println("x") end
     end
     mod Test do
       use Lib.*
-      fn run(cap) do connect(cap) end
+      fn run() do connect() end
     end
   end|} in
   Alcotest.(check bool) "transitive import without needs is an error" true (has_errors ctx);
@@ -10437,8 +10442,8 @@ let test_cap_transitive_missing_error () =
      above about propagation rather than about the mere presence of a `use`. *)
   let unreferenced = typecheck {|mod Outer do
     mod Lib do
-      needs IO.Network
-      fn connect(cap : Cap(IO.Network)) do cap end
+      needs IO.Console
+      fn connect() do println("x") end
     end
     mod Test do
       use Lib.*
@@ -10452,13 +10457,13 @@ let test_cap_transitive_missing_error () =
 let test_cap_transitive_supertype_ok () =
   let ctx = typecheck {|mod Outer do
     mod Lib do
-      needs IO.Network
-      fn connect(cap : Cap(IO.Network)) do cap end
+      needs IO.Console
+      fn connect() do println("x") end
     end
     mod Test do
       needs IO
       use Lib.*
-      fn run(cap : Cap(IO)) do cap end
+      fn run() do connect() end
     end
   end|} in
   Alcotest.(check bool) "parent cap covers transitive import" false (has_errors ctx)
@@ -10522,7 +10527,7 @@ let test_ffi_extern_explicit_symbol_ir () =
     extern "crc" : Cap(Ffi) do
       fn crc32(n: Int): Int = "crc32_compute"
     end
-    fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do Authority.ignore(println(int_to_string(crc32(255)))) end
+    fn main() : Unit needs IO.Console, IO.Foreign do Authority.ignore(println(int_to_string(crc32(255)))) end
   end|} in
   Alcotest.(check bool) "calls the explicit C symbol" true
     (ir_contains ir "@crc32_compute");
@@ -10537,7 +10542,7 @@ let test_ffi_extern_default_symbol_ir () =
     extern "crc" : Cap(Ffi) do
       fn crc32(n: Int): Int
     end
-    fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do Authority.ignore(println(int_to_string(crc32(255)))) end
+    fn main() : Unit needs IO.Console, IO.Foreign do Authority.ignore(println(int_to_string(crc32(255)))) end
   end|} in
   Alcotest.(check bool) "falls back to <lib>_<fn> when no symbol given" true
     (ir_contains ir "@crc_crc32")
@@ -10549,7 +10554,7 @@ let test_ffi_extern_default_symbol_ir () =
 let test_cap_effects_clean () =
   let src = {|mod Test do
     needs IO.Network
-    fn f(cap : Cap(IO.Network)) do cap end
+    fn f() needs IO.Network do () end
   end|} in
   let m = parse_and_desugar src in
   let ctx = March_effects.Effects.check_capabilities m in
@@ -10572,7 +10577,7 @@ let test_cap_eval_path_blocked () =
   let src = {|mod Test do
   needs IO.Network
     fn f(cap : Cap(IO.Network)) do cap end
-    fn main(_cap_network : Cap(IO.Network)) do f(42) end
+    fn main() needs IO.Network do f(42) end
   end|} in
   let ctx = typecheck src in
   Alcotest.(check bool) "eval path: capability error prevents evaluation" true
@@ -10679,14 +10684,19 @@ let test_proof_cap_pfn_forge_error () =
      which was doubly wrong: R2 removed `root_cap` from ordinary code, and
      `root_cap()` (the callable spelling) was ALREADY a typecheck error in its
      own right — so this assertion passed whether or not Check 6 fired at all.
-     Taking the capability as a parameter makes the test non-vacuous. *)
+     Taking the capability as a parameter made the test non-vacuous, until
+     ocap phase 7b retired `Cap(IO)` parameters and `cap_narrow` (each an
+     error of its own): the mint is now `mint_cap()`, and the assertion names
+     Check 6's message. *)
   let src = {|mod Db do
     proof cap Migrated
     needs IO
-    pfn bad_private_forge(c : Cap(IO)) : Cap(Db.Migrated) do cap_narrow(c) end
+    pfn bad_private_forge() : Cap(Db.Migrated) do mint_cap() end
+    fn migrated() : Cap(Db.Migrated) do bad_private_forge() end
   end|} in
   let ctx = typecheck src in
-  Alcotest.(check bool) "proof cap pfn forge: error for private function in declaring module" true (has_errors ctx)
+  Alcotest.(check bool) "proof cap pfn forge: error for private function in declaring module" true
+    (has_error_with ctx "The private function `bad_private_forge` in `Db` cannot mint")
 
 let test_proof_cap_pfn_passthrough_ok () =
   (* A pfn inside the declaring module CAN pass a proof cap through —
@@ -10711,7 +10721,7 @@ let test_opt_without_perceus () =
       end
     end
 
-    fn main(_cap_console : Cap(IO.Console)) : Unit do
+    fn main() : Unit needs IO.Console do
       let t = Node(Node(Leaf, 1, Leaf), 2, Node(Leaf, 3, Leaf))
       println(int_to_string(sum(t)))
       ()
@@ -10902,7 +10912,7 @@ let test_interp_sigterm_stops_compute_loop () =
     \  fn spin(n : Int) : Int do\n\
     \    if n == 0 do 0 else spin(n + 1) end\n\
     \  end\n\
-    \  fn main(_c : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    println(\"spinning\")\n\
     \    println(int_to_string(spin(1)))\n\
     \  end\n\
@@ -10963,7 +10973,7 @@ let test_guard_exhaustion_panics_compiled () =
     \      x when x < 0 -> \"neg\"\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    println(classify(0))\n\
     \  end\n\
      end\n"
@@ -11054,7 +11064,7 @@ let cancel_token_rc_src = {|mod CancelTok do
   needs IO.Console
   needs IO.Spawn
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let b = task_cancel_token_new()
     println(to_string(task_is_cancelled(b)))
     println(to_string(task_is_cancelled(b)))
@@ -11110,7 +11120,7 @@ let precancelled_spawn_src = {|mod PreCancel do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+  fn main() needs IO.Console, IO.Spawn do
     let tok = task_cancel_token_new()
     task_cancel(tok)
     let t = Authority.must(Task.async_cancellable(fn () -> 7, tok))
@@ -11180,7 +11190,7 @@ let test_precancelled_spawn_releases_closure_compiled () =
       spin(i + 1, n, s, acc + one)
     end
   end
-  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _f : Cap(IO.Foreign)) do
+  fn main() needs IO.Console, IO.Spawn, IO.Foreign do
     let warm = spin(0, 50, "w", 0)
     let base = live_allocs()
     let n = spin(0, 2000, "x", 0)
@@ -11230,7 +11240,7 @@ let http_inject_src = {|mod HttpInject do
 
   needs IO.Console
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let accept = Cons(Header("Accept", "text/plain"), Nil)
     report("plain", http_serialize_request("GET", "example.com", "/a%20b/c%2Fd", Some("x=1&y=%2F&z=a+b"), accept, ""))
     report("body", http_serialize_request("POST", "example.com", "/api", None, accept, "hello"))
@@ -11318,7 +11328,7 @@ let http_parse_src = {|mod HttpParse do
     end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     report("s200", "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
     report("s201", "HTTP/1.1 201 Created\r\n\r\n")
     report("s401", "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic\r\n\r\nno")
@@ -11376,7 +11386,7 @@ let short_circuit_src = {|mod ShortCircuit do
 
   type Win = Win(Int, NativeU8Arr)
 
-  fn side(_c : Cap(IO.Console), tag : String, v : Bool) : Bool do
+  fn side(tag : String, v : Bool) : Bool do
     println("ran " ++ tag)
     v
   end
@@ -11399,13 +11409,13 @@ let short_circuit_src = {|mod ShortCircuit do
     label ++ "=" ++ bool_to_string(b)
   end
 
-  fn main(c : Cap(IO.Console)) do
-    println(verdict("f&&", false && side(c, "A", true)))
-    println(verdict("t||", true || side(c, "B", false)))
-    println(verdict("t&&", true && side(c, "C", false)))
-    println(verdict("f||", false || side(c, "D", true)))
-    println(verdict("chain", 1 > 2 && side(c, "E", true) && side(c, "F", true)))
-    println(verdict("mixed", (1 > 2 && side(c, "G", true)) || side(c, "H", true)))
+  fn main() needs IO.Console do
+    println(verdict("f&&", false && side("A", true)))
+    println(verdict("t||", true || side("B", false)))
+    println(verdict("t&&", true && side("C", false)))
+    println(verdict("f||", false || side("D", true)))
+    println(verdict("chain", 1 > 2 && side("E", true) && side("F", true)))
+    println(verdict("mixed", (1 > 2 && side("G", true)) || side("H", true)))
     println(verdict("div0", ratio_ok(0)))
     println(verdict("div2", ratio_ok(2)))
     println(verdict("or0", ratio_or(0)))
@@ -11415,7 +11425,7 @@ let short_circuit_src = {|mod ShortCircuit do
     println(verdict("past", solid(w, 9)))
     println(verdict("named", named("y", Cons(1, Nil))))
     println(verdict("named2", named("x", Cons(1, Nil))))
-    let r = if 0 > 1 && side(c, "I", true) do "yes" else "no" end
+    let r = if 0 > 1 && side("I", true) do "yes" else "no" end
     println("if=" ++ r)
   end
 end
@@ -11505,7 +11515,7 @@ let narr_inline_src = {|mod NarrInline do
     if i >= n do acc else sum(a, i + 1, n, acc + NativeArray.get_int(a, i)) end
   end
 
-  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+  fn main() needs IO.Console, IO.Process do
     match Authority.must(System.argv()) do
       Cons(_, Cons("neg_get", _)) ->
         println(int_to_string(NativeArray.get_int(NativeArray.make_int(4, 0), 0 - 12)))
@@ -11606,7 +11616,7 @@ let test_http_transport_refuses_injected_path () =
   needs IO.NetConnect
   needs IO.Console
 
-  fn main(_net : Cap(IO.NetConnect), _console : Cap(IO.Console)) do
+  fn main() needs IO.NetConnect, IO.Console do
     match Http.get("http://127.0.0.1:%d/ok") do
     Err(_) -> println("URL")
     Ok(req) ->
@@ -11680,7 +11690,7 @@ let test_dir_beneath_symlink_linux () =
   needs IO.FileRead
   needs IO.Console
 
-  fn main(_r : Cap(IO.FileRead), _c : Cap(IO.Console)) do
+  fn main() needs IO.FileRead, IO.Console do
     match Authority.must(File.open_dir("%s")) do
     Err(e) -> println("OPEN_DIR " ++ to_string(e))
     Ok(d) ->
@@ -11721,7 +11731,7 @@ let test_other_module_function_value_compiled () =
   let (project_root, main_exe, src, tmp) =
     write_march_source ~name:"march_module_fn_value" {|mod Main do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let k = List.length
     println(int_to_string(k([1, 2])))
     println(int_to_string(k(["a", "b", "c"])))
@@ -11796,7 +11806,7 @@ let write_nested_parent_lib_path_project ~name =
   let (project_root, main_exe, src, tmp) = write_march_source ~name
     ("mod Main do\n\
      \  needs IO.Console\n\
-     \  fn main(_c : Cap(IO.Console)) do\n"
+     \  fn main() needs IO.Console do\n"
      ^ nested_parent_call_main_body ^
      "  end\n\
       end\n")
@@ -11817,7 +11827,7 @@ let nested_parent_call_entry_src () =
   "mod Main do\n\
   \  needs IO.Console\n"
   ^ indent nested_parent_call_outer_src ^
-  "\n  fn main(_c : Cap(IO.Console)) do\n"
+  "\n  fn main() needs IO.Console do\n"
   ^ nested_parent_call_main_body ^
   "  end\n\
    end\n"
@@ -11900,7 +11910,7 @@ let test_nested_module_sibling_call_lib_path_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_sibling"
     ("mod Main do\n\
      \  needs IO.Console\n\
-     \  fn main(_c : Cap(IO.Console)) do\n"
+     \  fn main() needs IO.Console do\n"
      ^ nested_sibling_main_body ^
      "  end\n\
       end\n")
@@ -11931,7 +11941,7 @@ let test_nested_module_sibling_call_entry_compiled () =
       ("mod Main do\n\
        \  needs IO.Console\n"
        ^ indent nested_sibling_outer_src ^
-       "\n  fn main(_c : Cap(IO.Console)) do\n"
+       "\n  fn main() needs IO.Console do\n"
        ^ nested_sibling_main_body ^
        "  end\n\
         end\n") in
@@ -11981,7 +11991,7 @@ fn role_b(s : Cap(Session.Live), st : Pq_B.Entry) : Pq_B.Yield do
 end
 
 -- From inside the declaring module: relative names.
-fn run_inside(c : Cap(IO)) : () do
+fn run_inside() : () do
   let t = Session.in_process()
   let s = Authority.must(Session.attach(t.ops))
   let _ = role_b(s, Pq_B.register(s, 0))
@@ -11990,16 +12000,16 @@ fn run_inside(c : Cap(IO)) : () do
 end
 
 -- Never called: the runner must typecheck (and link) from here.
-fn serve_b(c : Cap(IO)) : String do
-  match Pq_Run.run_B(c, "node-b", "secret", Pq_Run.addrs_from_env(), fn (s, st) -> role_b(s, st)) do
+fn serve_b() : String do
+  match Pq_Run.run_B("node-b", "secret", Pq_Run.addrs_from_env(), fn (s, st) -> role_b(s, st)) do
     Ok(_) -> "closed"
     Err(e) -> SessionNode.run_error_message(e)
   end
 end|}
 
 (* [P.] is replaced by the declaring module's path from the caller. *)
-let endpoints_placement_user = {|fn use_from_outside(c : Cap(IO)) : () do
-  P.run_inside(c)
+let endpoints_placement_user = {|fn use_from_outside() : () do
+  P.run_inside()
   let t = Session.in_process()
   let s = Authority.must(Session.attach(t.ops))
   let _ = P.Pq_B.script(s, P.Pq_B.register(s, 0), [P.Pq_B.Expect_Hi(fn n -> Authority.ignore(println("script B got " ++ int_to_string(n)))), P.Pq_B.Send_Back({ pq: 7, text: "scripted" })])
@@ -12039,7 +12049,7 @@ let endpoints_nested_src =
   \  mod Caller do\n" ^ endpoints_indent 4 endpoints_placement_needs ^ "\n"
   ^ endpoints_indent 4 (endpoints_placement_user_for "Outer") ^ "\n\
   \  end\n\
-  \  fn main(c : Cap(IO)) do Caller.use_from_outside(c) end\n\
+  \  fn main() needs IO do Caller.use_from_outside() end\n\
    end\n"
 
 (* The protocol in a MARCH_LIB_PATH module, driven from the app. *)
@@ -12047,7 +12057,7 @@ let write_endpoints_lib_project ~name =
   let (project_root, main_exe, src, tmp) = write_march_source ~name
     ("mod App do\n" ^ endpoints_indent 2 endpoints_placement_needs ^ "\n"
      ^ endpoints_indent 2 (endpoints_placement_user_for "PqLib") ^ "\n\
-     \  fn main(c : Cap(IO)) do use_from_outside(c) end\n\
+     \  fn main() needs IO do use_from_outside() end\n\
       end\n") in
   let lib_dir = Filename.concat tmp "lib" in
   Unix.mkdir lib_dir 0o755;
@@ -12085,7 +12095,7 @@ let write_endpoints_stdlib_project ~name ~main_body extra =
   let (project_root, main_exe, src, tmp) = write_march_source ~name
     ("mod Test do\n" ^ endpoints_indent 2 endpoints_placement_needs ^ "\n"
      ^ endpoints_indent 2 extra ^ "\n\
-     \  fn main(c : Cap(IO)) do\n" ^ main_body ^ "  end\n\
+     \  fn main() needs IO do\n" ^ main_body ^ "  end\n\
       end\n") in
   let stdlib_dir = Filename.concat tmp "stdlib" in
   let rc = Sys.command (Printf.sprintf "cp -R %s %s"
@@ -12165,7 +12175,7 @@ let test_endpoints_lib_compiled () =
 
 let endpoints_stdlib_project name =
   write_endpoints_stdlib_project ~name
-    ~main_body:"    use_from_outside(c)\n"
+    ~main_body:"    use_from_outside()\n"
     (endpoints_placement_user_for "Control")
 
 let test_endpoints_stdlib_interpreted () =
@@ -12247,7 +12257,7 @@ let borrowed_field_owner_src = {|mod Main do
       churn(n - 1, acc + String.byte_size(show(r)))
     end
   end
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     println(show({ a: "alpha" ++ int_to_string(1), b: "beta" ++ int_to_string(2), n: 7 }))
     let _ = churn(50, 0)
     let base = live_allocs()
@@ -12314,7 +12324,7 @@ let test_nested_module_qualified_parent_pfn_not_shadowed () =
     \      fn f(x : Int) : String do helper(int_to_string(Outer.helper(x))) end\n\
     \    end\n\
     \  end\n\
-    \  fn main(_c : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    println(Outer.Inner.f(41))\n\
     \  end\n\
      end\n"
@@ -12338,7 +12348,7 @@ let test_float_lit_match_arm_compiled () =
     \      1.5 -> \"one-and-a-half\" | 2.5 -> \"two-and-a-half\" | _ -> \"other\"\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    println(name(2.5))\n\
     \  end\n\
      end\n"
@@ -12381,7 +12391,7 @@ let unit_tail_discard_src =
   \    let _ = a\n\
   \    ()\n\
   \  end\n\
-  \  fn main(_cap_console : Cap(IO.Console)) do\n\
+  \  fn main() needs IO.Console do\n\
   \    f(\"x\")\n\
   \    println(\"ok\")\n\
   \  end\n\
@@ -12438,7 +12448,7 @@ let unit_tail_literal_discard_src =
   \    let _ = 1\n\
   \    ()\n\
   \  end\n\
-  \  fn main(_cap_console : Cap(IO.Console)) do\n\
+  \  fn main() needs IO.Console do\n\
   \    f()\n\
   \    println(\"ok\")\n\
   \  end\n\
@@ -12481,7 +12491,7 @@ let test_float_lit_no_wildcard_panics_compiled () =
     \      1.5 -> \"one-and-a-half\" | 2.5 -> \"two-and-a-half\"\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_process : Cap(IO.Process)) do\n\
+    \  fn main() needs IO.Console, IO.Process do\n\
     \    let n = int_to_float(List.length(Authority.must(Process.argv()))) +. 3.7\n\
     \    println(name(n))\n\
     \  end\n\
@@ -12555,7 +12565,7 @@ let test_string_literal_operand_no_leak_compiled () =
       concat_loop(buf, i + 1, n, acc + String.byte_size(s))
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
 -- Warm the literal site first, so its one permanent cell is already
 -- allocated when the baseline is sampled and only per-iteration growth
 -- can move the gauge.
@@ -12626,7 +12636,7 @@ let test_unboxed_aggregate_zero_live_allocs_compiled () =
       spin(i + 1, n, acc +. dot(v, v))
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     let warm = spin(0, 100, 0.0)
     let base = live_allocs()
     let bulk = spin(0, 20000, 0.0)
@@ -12688,7 +12698,7 @@ let test_unboxed_aggregate_branch_join_no_leak_compiled () =
       spin(i - 1, acc +. psum(p))
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     let warm = spin(100, 0.0)
     let base = live_allocs()
     let bulk = spin(20000, 0.0)
@@ -12816,7 +12826,7 @@ let float_join_mixed_fns = {|
 |}
 
 let float_join_print_main = {|
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(float_to_string(total(0, 50, table(), 0.0)))
     println(float_to_string(mtotal(0, 50, 0.0)))
     ()
@@ -12830,7 +12840,7 @@ let float_join_gauge_main = {|
   extern "m" : Cap(Ffi) do
     fn live_allocs(): Int = "march_live_allocs"
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     let warm = total(0, 100, table(), 0.0) +. mtotal(0, 100, 0.0)
     let base = live_allocs()
     let bulk = total(0, 20000, table(), 0.0) +. mtotal(0, 20000, 0.0)
@@ -12859,7 +12869,7 @@ let test_float_case_join_slot_is_double () =
   let (project_root, main_exe, src, _tmp) = write_march_source ~name:"march_floatjoin_ir"
     (float_join_src ~name:"FloatJoinIr" ~needs:"" float_join_fns
        {|
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(float_to_string(total(0, 50, table(), 0.0)))
     ()
   end
@@ -12877,7 +12887,7 @@ let test_float_case_join_mixed_arms_keep_ptr_slot () =
   let (project_root, main_exe, src, _tmp) = write_march_source ~name:"march_floatjoin_mixed_ir"
     (float_join_src ~name:"FloatJoinMixedIr" ~needs:"" float_join_mixed_fns
        {|
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(float_to_string(mtotal(0, 50, 0.0)))
     ()
   end
@@ -12919,7 +12929,7 @@ let array_field_fns = {|
 |}
 
 let array_field_main = {|
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let o = step({ name: "walkers", lanes: NativeArray.make_int(2000, 0), tags: [1, 2, 3], tick: 0 }, 0, 1500)
     println(o.name ++ " " ++ int_to_string(o.tick) ++ " " ++ int_to_string(NativeArray.get_int(o.lanes, 1499))
       ++ " " ++ int_to_string(NativeArray.sum_int(o.lanes)) ++ " " ++ int_to_string(List.length(o.tags)))
@@ -13025,7 +13035,7 @@ let test_static_closure_materialization_no_leak_compiled () =
       materialize_loop(i + 1, n, acc + apply_it(double, i))
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
 -- Warm the materialization site first, so its one permanent static
 -- closure is already allocated when the baseline is sampled and only
 -- per-iteration growth can move the gauge.
@@ -13084,7 +13094,7 @@ let test_lambda_static_closure_materialization_no_leak_compiled () =
       materialize_loop(i + 1, n, acc + apply_it(fn x -> x * 2, i))
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
 -- Warm the materialization site first, so its one permanent static
 -- closure is already allocated when the baseline is sampled and only
 -- per-iteration growth can move the gauge.
@@ -13147,7 +13157,7 @@ let test_capturing_closure_materialization_no_leak_compiled () =
       materialize_loop(i + 1, n, k, acc + apply_it(fn x -> x * k, i))
     end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     let warm = materialize_loop(0, 100, 2, 0)
     let base = live_allocs()
     let bulk = materialize_loop(0, 20000, 2, 0)
@@ -13223,7 +13233,7 @@ let test_self_recursive_capturing_closure_no_leak_compiled () =
     if i >= 20000 do acc
     else materialize_loop(i + 1, acc + outer(k, 5), k) end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+  fn main() : Unit needs IO.Console, IO.Foreign do
     let warm = materialize_loop(0, 0, 2)
     let base = live_allocs()
     let bulk = materialize_loop(0, 0, 2)
@@ -13270,7 +13280,7 @@ let test_self_recursive_capturing_closure_correct_compiled () =
     end
     apply_it(helper, n)
   end
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     println(int_to_string(outer(1, 0)))
     println(int_to_string(outer(1, 1)))
     println(int_to_string(outer(1, 6)))
@@ -13334,7 +13344,7 @@ let test_try_call_single_capture_no_double_free_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_trycallcap"
     "mod TryCallCap do\n\
     \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
+    \  fn main() : Unit needs IO.Console do\n\
     \    let threshold = 5\n\
     \    match __try_call(fn _ -> threshold > 0) do\n\
     \    Ok(_) -> println(\"ok\")\n\
@@ -13362,7 +13372,7 @@ let test_try_call_val_single_capture_no_double_free_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_trycallvalcap"
     "mod TryCallValCap do\n\
     \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
+    \  fn main() : Unit needs IO.Console do\n\
     \    let base = \"hi\"\n\
     \    match __try_call_val(fn _ -> base ++ \"!\") do\n\
     \    Ok(v) -> println(\"ok: \" ++ v)\n\
@@ -13392,7 +13402,7 @@ let test_try_call_panic_with_capture_no_double_free_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_trycallpanic"
     "mod TryCallPanic do\n\
     \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
+    \  fn main() : Unit needs IO.Console do\n\
     \    let label = \"boom\"\n\
     \    match __try_call(fn _ -> panic(label)) do\n\
     \    Ok(_) -> println(\"ok\")\n\
@@ -13437,7 +13447,7 @@ let test_try_finally_value_and_order_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_tryfin"
     {|mod TryFin do
   needs IO.Console
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let k = 40
     let n = try_finally(
       fn _ ->
@@ -13477,7 +13487,7 @@ let test_try_finally_cleanup_runs_on_panic_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_tryfinpanic"
     {|mod TryFinPanic do
   needs IO.Console
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let label = "kaboom"
     let _ = try_finally(
       fn _ ->
@@ -13530,7 +13540,7 @@ let test_file_with_lines_streaming_compiled () =
     {|mod WithLines do
   needs IO.Console
   needs IO.FileRead
-  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : Unit do
+  fn main() : Unit needs IO.Console, IO.FileRead do
     let path = "%s"
     match Authority.must(File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3)))) do
     Err(e) -> println("Error: " ++ to_string(e))
@@ -13599,7 +13609,7 @@ let test_native_array_map_reused_capturing_closure_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_arrmapcap"
     {|mod ArrMapCap do
   needs IO.Console
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let k = 7
     let closure = fn x -> x + k
     let a1 = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))
@@ -13647,7 +13657,7 @@ let test_native_array_set_int_alias_cow_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_setalias"
     {|mod SetAlias do
   needs IO.Console
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let a = NativeArray.make_int(4, 0)
     let b = NativeArray.set_int(a, 0, 99)
     -- a is read AFTER set_int -> aliased (rc>1) -> must be unchanged.
@@ -13686,7 +13696,7 @@ let test_native_array_set_int_inplace_churn_compiled () =
       go(arr2, i + 1, n)
     end
   end
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let arr = NativeArray.make_int(8, 0)
     println(int_to_string(go(arr, 0, 2000000)))
     ()
@@ -13735,7 +13745,7 @@ let test_blocking_ffi_pool_reuses_threads_compiled () =
     \    if n <= 0 do 0 else do let _ = nap(0)\n\
     \      spin(n - 1) end end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) do\n\
+    \  fn main() needs IO.Console, IO.Foreign do\n\
     \    let _ = spin(400)\n\
     \    println(int_to_string(calls()) ++ \" \" ++ int_to_string(spawned()))\n\
     \  end\n\
@@ -13791,7 +13801,7 @@ let test_signal_watch_capturing_handler_repeated_delivery_compiled () =
       delivered(seen, n, left - 1)
     end end
   end
-  fn main(_cap_console : Cap(IO.Console), _cap_signal : Cap(IO.Signal), _cap_mut : Cap(IO.Mut), _cap_clock : Cap(IO.Clock)) do
+  fn main() needs IO.Console, IO.Signal, IO.Mut, IO.Clock do
     let k = 99
     let seen : Vault(Int) = Authority.must(Vault.new("sigwatchcap_seen"))
     Signal.watch(Signal.Usr2, fn ->
@@ -13884,7 +13894,8 @@ end
    bug: `--check` cached a "clean check" CAS artifact after ANY successful
    check (bin/main.ml), then a later identical-source invocation hit that
    cache and `exit 0`ed BEFORE the diagnostic-printing pass — so a module
-   that emits a warning/hint (here: the Check-3 `Cap(IO)`-narrowing HINT)
+   that emits a warning/hint (here: the `deprecated_main_cap` warning; until
+   ocap phase 7b it was the Check-3 `Cap(IO)`-narrowing HINT, since removed)
    printed it on the first (cache-miss) run and stayed SILENT on every
    subsequent (cache-hit) run. Because the CAS store lives at the shared
    project-root `.march/cas` and is cleared intermittently (concurrent
@@ -13902,7 +13913,7 @@ let test_check_diagnostic_display_deterministic () =
     write_march_source ~name:"march_capcheck_determinism"
       "mod CapCheckDet do\n\
       \  needs IO\n\
-      \  fn run(io : Cap(IO)) do io end\n\
+      \  fn main(io : Cap(IO)) do () end\n\
        end\n"
   in
   let check_cmd = Printf.sprintf
@@ -13912,12 +13923,12 @@ let test_check_diagnostic_display_deterministic () =
   in
   let iterations = 12 in
   let first = read_cmd_output check_cmd in
-  (* The narrowing HINT must actually appear (otherwise the test is vacuous —
-     it would pass trivially if `--check` printed nothing at all). *)
+  (* The warning must actually appear (otherwise the test is vacuous — it
+     would pass trivially if `--check` printed nothing at all). *)
   Alcotest.(check bool)
-    "the Cap(IO)-narrowing HINT is present in --check output"
+    "the deprecated_main_cap warning is present in --check output"
     true
-    (ir_contains first "narrowing" || ir_contains first "HINT");
+    (ir_contains first "deprecated_main_cap");
   let all_identical = ref true in
   for _ = 2 to iterations do
     let out = read_cmd_output check_cmd in
@@ -13980,7 +13991,7 @@ let test_erased_option_niche_fbip_no_underflow_compiled () =
     \    )\n\
     \    task_await_unwrap(t)\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do\n\
+    \  fn main() needs IO.Console, IO.Spawn do\n\
     \    match checkout(spawn(Pool)) do\n\
     \    Ok(conn) -> println(describe(conn))\n\
     \    Err(e)   -> println(\"err: \" ++ e)\n\
@@ -14025,7 +14036,7 @@ let test_nested_tuple_let_destructure_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_tuple_let"
     "mod NestedTupleLet do\n\
     \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let ((a, b), (c, d)) = ((1, 2), (3, 4))\n\
     \    println(int_to_string(a + b + c + d))\n\
     \  end\n\
@@ -14057,7 +14068,7 @@ let test_nested_tuple_let_deep_wildcard_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_tuple_let_deep"
     "mod NestedTupleLetDeep do\n\
     \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let ((a, (b, c)), _, (d, e)) = ((1, (2, 3)), 99, (4, 5))\n\
     \    println(int_to_string(a + b + c + d + e))\n\
     \  end\n\
@@ -14216,7 +14227,7 @@ let task_poll_neutral_src = {|mod TaskPollNeutral do
     end
   end
 
-  fn main(_cap : Cap(IO)) do
+  fn main() needs IO do
     let t = task_spawn(fn _ -> 6 * 7)
     let (r, _n) = poll_until(t, 0)
     println("finished: " ++ show_int(r))
@@ -14372,7 +14383,7 @@ let task_poll_pending_src = {|mod TaskPollPending do
     live_allocs()
   end
 
-  fn main(_cap : Cap(IO)) do
+  fn main() needs IO do
     let g = Authority.must(Vault.new("task_poll_pending_gate"))
     let deadline = unix_time_ms() + 5000
     let slow = task_spawn(fn _ -> wait_gate(g, deadline) + 41)
@@ -14497,7 +14508,7 @@ let poly_let_none_src =
     f(1)
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println(pick(opt_float()))
     match opt_unit() do
     | None -> println("unit none")
@@ -14607,7 +14618,7 @@ let return_only_poly_src = {|mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let x : Option(Float) = make_none()
     println(pick(x))
     println(pick(make_none()))
@@ -14659,7 +14670,7 @@ let iface_method_as_value_src = {|mod Main do
     f(a, b)
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let m = OrderedMap.from_list([(2, "b"), (1, "a"), (3, "c")], compare)
     println(to_string(OrderedMap.to_list(m)))
     let s = OrderedMap.from_list([("y", 1), ("x", 2)], compare)
@@ -14727,7 +14738,7 @@ let builtin_named_user_type_src = {|mod Main do
     end
   end
 
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     Authority.ignore(println(to_string(Won(3))))
     Authority.ignore(println(to_string(Beaten)))
     Authority.ignore(println(to_string(Won(3) == Won(3))))
@@ -14791,7 +14802,7 @@ let builtin_shadow_list_src = {|mod Main do
       Link(n, rest) -> total(rest, acc + n)
     end
   end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let l = Link(1, Link(2, Link(3, End)))
     println(int_to_string(total(l, 0)))
     println(to_string(l))
@@ -14814,7 +14825,7 @@ let builtin_shadow_nested_result_src = {|mod Main do
     derive Show for Result
     fn won(n : Int) : Result do Won(n) end
   end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(to_string(Inner.won(3)))
     let r : Result(Int, String) = Ok(1)
     println(to_string(r))
@@ -14830,7 +14841,7 @@ let builtin_shadow_option_src = {|mod Main do
   needs IO.Console
   type Option = Has(Int) | Nada
   derive Show, Eq for Option
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(to_string(Has(3)))
     println(to_string(Nada))
     println(to_string(Has(3) == Has(3)))
@@ -14906,7 +14917,7 @@ let payload_atom_src = {|mod PayloadAtoms do
       _ -> "other"
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(describe(:ok(7))))
     println(int_to_string(describe(:error("bad"))))
     println(int_to_string(describe(:none)))
@@ -15027,7 +15038,7 @@ let payload_atom_leak_src = {|mod AtomLeak do
       loop(i - 1, acc + twice(a) + score(b) + holder_score(h) + sum(list_of(3, Nil), 0))
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let r0 = loop(10, 0)
     let before = live_allocs()
     let r = loop(2000, 0)
@@ -15079,7 +15090,7 @@ let test_nested_fn_name_shadows_toplevel_compiled () =
     \    Cons(h, t) -> go(t, Cons(h, acc))\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let r = go([1, 2, 3, 4, 5], [])\n\
     \    println(int_to_string(List.length(r)) ++ \"|\" ++ int_to_string(List.sum_int(r)))\n\
     \  end\n\
@@ -15140,7 +15151,7 @@ let test_nonentry_newtype_tuple_destructure_compiled () =
     \      end\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let a = Inner.mk([1, 2, 3])\n\
     \    let b = Inner.mk([4, 5])\n\
     \    println(int_to_string(Inner.sum_pair(a, b)))\n\
@@ -15189,7 +15200,7 @@ let test_erased_update_single_dyn_call_ir () =
   let src = {|mod ErasedUpd do
   needs IO.Console
     fn get_a(r) do r.a end
-    fn main(_cap_console : Cap(IO.Console)) do
+    fn main() needs IO.Console do
       let built = record_from_list([("a", 1), ("b", 2), ("c", 3)])
       let u = { built with a: 10, b: 20, c: 30 }
       println(int_to_string(get_a(u)))
@@ -15223,7 +15234,7 @@ let test_erased_update_missing_field_panics_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_erasedupd_miss"
     "mod ErasedUpdMiss do\n\
     \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let built = record_from_list([(\"a\", 1)])\n\
     \    let bad = { built with z: 99 }\n\
     \    match record_get(bad, \"z\") do\n\
@@ -15265,7 +15276,7 @@ let test_erased_update_multi_field_values_compiled () =
     \      None -> 0 - 1\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let built = record_from_list([(\"a\", 1), (\"b\", 2), (\"c\", 3)])\n\
     \    let u = { built with a: 11, b: 22, c: 33 }\n\
     \    println(int_to_string(get_i(u, \"a\")) ++ \" \" ++\n\
@@ -15362,7 +15373,7 @@ let test_nan_prints_without_sign_compiled () =
       None -> 0.0
     end
   end
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let n = parse("nan")
     println(float_to_string(n))
     println(float_to_string(-n))
@@ -15439,7 +15450,7 @@ let test_main_adapter_one_cap () =
     ~name:"march_staged_adapter1"
     ~src:{|mod Main do
   needs IO.Console
-  fn main(_cap_console : Cap(IO.Console)) : () do Authority.ignore(println("a1")) end
+  fn main() : () needs IO.Console do Authority.ignore(println("a1")) end
 end
 |}
     ~expected:"a1" ()
@@ -15450,7 +15461,7 @@ let test_main_adapter_two_caps () =
     ~src:{|mod Main do
   needs IO.Console
   needs IO.Clock
-  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) : () do
+  fn main() : () needs IO.Console, IO.Clock do
     let _t = Authority.must(System.now())
     println("a2")
     ()
@@ -15466,7 +15477,7 @@ let test_main_adapter_three_caps () =
   needs IO.Console
   needs IO.Clock
   needs IO.Random
-  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock), _cap_random : Cap(IO.Random)) : () do
+  fn main() : () needs IO.Console, IO.Clock, IO.Random do
     let _t = Authority.must(System.now())
     let _b = Authority.must(Crypto.random_bytes(4))
     println("a3")
@@ -15478,7 +15489,7 @@ end
 
 let test_compiled_no_opt_prunes_unreachable () =
   let src =
-    "mod Main do\n  needs IO.Console\n  fn main(_cap_console : Cap(IO.Console)) do println(\"hi\") end\nend\n" in
+    "mod Main do\n  needs IO.Console\n  fn main() needs IO.Console do println(\"hi\") end\nend\n" in
   let (project_root, main_exe, src_path, tmp) =
     write_march_source ~name:"no_opt_prune" src in
   let bin = Filename.concat tmp "no_opt_prune_bin" in
@@ -15512,7 +15523,7 @@ let test_shadowing_across_scopes_parity () =
          \      a -> a * 10\n\
          \    end\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    let g = fn a -> fn a -> a\n\
          \    let g1 = g(1)\n\
          \    println(int_to_string(g1(2)))\n\
@@ -15560,7 +15571,7 @@ let test_string_codepoint_parity () =
          \    end\n\
          \  end\n\
          \  pfn ints(xs) do ints_go(xs, \"\") end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(opt(String.from_codepoint(65)) ++ opt(String.from_codepoint(233)))\n\
          \    println(opt(String.from_codepoint(-1)) ++ opt(String.from_codepoint(55296)))\n\
          \    println(ints(String.to_codepoints(\"AB\")))\n\
@@ -15594,7 +15605,7 @@ let test_compiled_string_codepoint_builtin_parity () =
     ~name:"march_string_codepoint_builtin"
     ~src:"mod StringCodepointBuiltin do\n\
     \  needs IO.Console\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(string_to_codepoints(\"aé€𝄞\"))\n\
          \    println(string_to_codepoints(\"\"))\n\
          \    println(string_from_codepoint(65))\n\
@@ -15624,7 +15635,7 @@ let test_compiled_unix_time_ms_parity () =
     ~name:"march_unix_time_ms"
     ~src:"mod UnixTimeMsParity do\n\
     \  needs IO\n\
-         \  fn main(_cap : Cap(IO)) do\n\
+         \  fn main() needs IO do\n\
          \    let t0 = unix_time_ms(())\n\
          \    let secs = unix_time(())\n\
          \    println(t0 > 1700000000000)\n\
@@ -15648,7 +15659,7 @@ let test_compiled_int_div_euclid_parity () =
     ~name:"march_int_div_euclid"
     ~src:"mod IntDivEuclidParity do\n\
     \  needs IO.Console\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println([int_div_euclid(7, 2), int_div_euclid(-7, 2), \
                         int_div_euclid(-7, -2), int_div_euclid(7, -2)])\n\
          \  end\n\
@@ -15666,7 +15677,7 @@ let test_compiled_int_mod_euclid_parity () =
     ~name:"march_int_mod_euclid"
     ~src:"mod IntModEuclidParity do\n\
     \  needs IO.Console\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println([int_mod_euclid(7, 3), int_mod_euclid(-7, 3), \
                         int_mod_euclid(-7, -3), int_mod_euclid(7, -3)])\n\
          \  end\n\
@@ -15687,7 +15698,7 @@ let test_compiled_int_floor_parity () =
     \  needs IO.Console\n\
          \  fn vd(a : Int, b : Int) : Int do int_div_floor(a, b) end\n\
          \  fn vm(a : Int, b : Int) : Int do int_mod_floor(a, b) end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println([int_div_floor(23, 7), vd(23, 7), int_div_floor(-23, 7), vd(-23, 7), \
                         int_div_floor(23, -7), int_div_floor(-23, -7), int_div_floor(7, -2)])\n\
          \    println([int_mod_floor(23, 7), vm(23, 7), int_mod_floor(-23, 7), vm(-23, 7), \
@@ -15719,7 +15730,7 @@ let test_compiled_int_overflow_parity () =
     ~src:"mod IntOverflowParity do\n\
     \  needs IO.Console\n\
     \  fn apply(f, x) do f(x) end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let arr = NativeArray.from_list_int([4611686018427387903, -4611686018427387903, -8, -1, 1, 3, 62])\n\
     \    let mx = NativeArray.get_int(arr, 0)\n\
     \    let mn = NativeArray.get_int(arr, 1) - 1\n\
@@ -15772,7 +15783,7 @@ let test_js_int_subset_parity () =
     \      Cons(h, t) -> if i == 0 do h else at(t, i - 1) end\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let arr = [9007199254740991, 1, 2, -7, 52, -8, 3]\n\
     \    let big = at(arr, 0)\n\
     \    let one = at(arr, 1)\n\
@@ -15872,7 +15883,7 @@ let test_js_float_literal_bits () =
     \      _ -> \"other\"\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let big = %s *. 10.0\n\
     \    println(\"literal \" ++ bits(3.141592653589793))\n\
     \    println(\"literal \" ++ bits(0.30000000000000004))\n\
@@ -15947,7 +15958,7 @@ let test_js_diagnostics_observers () =
       None -> "none"
     end
   end
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println("outside: " ++ keys(Diagnostics.current_context()))
     let v = Diagnostics.with_context([("a", Diagnostics.DStr("x"))], fn ->
       Diagnostics.with_context([("b", Diagnostics.DBool(true))], fn ->
@@ -16017,7 +16028,7 @@ let test_output_path_errors () =
   let src =
     {|mod OutPath do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println("hello")
     ()
   end
@@ -16091,7 +16102,7 @@ let test_js_test_runner () =
       {|mod JsTestRunner do
   needs IO.Console
   fn double(n : Int) : Int do n * 2 end
-  fn main(_c : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println("main ran")
     ()
   end
@@ -16249,7 +16260,7 @@ let test_compiled_trmc_hole_fresh_after_churn () =
     \    end\n\
     \  end\n\
     \  pfn sum(xs : List(Int)) : Int do List.fold_left(xs, 0, fn (a, b) -> a + b) end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let dropped = churn(40000)\n\
     \    let shared = List.range(0, 20000)\n\
     \    let a = copy(shared)\n\
@@ -16281,7 +16292,7 @@ let test_compiled_int_overflow_lazy_norm_parity () =
     \  fn big(x : Int) : Int do int_wrapping_add(x, x) end\n\
     \  fn big2(x : Int) : Int do int_wrapping_add(int_wrapping_add(x, x), 2) end\n\
     \  fn pick(b : Bool, x : Int) : Int do if b do int_wrapping_add(x, x) else x - x end end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let arr = NativeArray.from_list_int([4611686018427387903, 1, 2, 0])\n\
     \    let mx = NativeArray.get_int(arr, 0)\n\
     \    let one = NativeArray.get_int(arr, 1)\n\
@@ -16336,7 +16347,7 @@ let test_compiled_int_overflow_trap_parity () =
     \      Err(e) -> e\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let arr = NativeArray.from_list_int([4611686018427387903, -4611686018427387903, 1, 2, 2147483648, 3])\n\
     \    let mx = NativeArray.get_int(arr, 0)\n\
     \    let mn = NativeArray.get_int(arr, 1) - 1\n\
@@ -16410,7 +16421,7 @@ let test_compiled_int_divmod_trap_parity () =
     \      Err(e) -> e\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let arr = NativeArray.from_list_int([23, 7, 0, -4611686018427387903, -1])\n\
     \    let a = NativeArray.get_int(arr, 0)\n\
     \    let b = NativeArray.get_int(arr, 1)\n\
@@ -16489,7 +16500,7 @@ let test_int_overflow_uncaught_panic () =
     let src = Printf.sprintf
       "mod OverflowUncaught do\n\
       \  needs IO.Console\n\
-      \  fn main(_cap_console : Cap(IO.Console)) do\n\
+      \  fn main() needs IO.Console do\n\
       \    let xs = [2305843009213693952, 2]\n\
       \    let h = List.head(xs)\n\
       \    println(\"before\")\n\
@@ -16583,7 +16594,7 @@ let test_float_to_int_range_panics () =
     \        rows(conv, rest)\n\
     \    end\n\
     \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let inf = parse(\"Infinity\")\n\
     \    let nan_v = parse(\"nan\")\n\
     \    let xs = [nan_v, inf, 0.0 -. inf, parse(\"1e20\"), parse(\"-1e20\"),\n\
@@ -16649,7 +16660,7 @@ let test_compiled_float_div_zero_literal () =
     let src = Printf.sprintf
       "mod FloatDivZero do\n\
       \  needs IO.Console\n\
-      \  fn main(_cap_console : Cap(IO.Console)) do\n\
+      \  fn main() needs IO.Console do\n\
       \    println(\"before\")\n\
       \    println(float_to_string(%s))\n\
       \    println(\"after\")\n\
@@ -16682,7 +16693,7 @@ let test_compiled_int_shift_range_panics () =
     let src = Printf.sprintf
       "mod ShiftRange do\n\
       \  needs IO.Console\n\
-      \  fn main(_cap_console : Cap(IO.Console)) do\n\
+      \  fn main() needs IO.Console do\n\
       \    let arr = NativeArray.from_list_int([63, -1])\n\
       \    let n = NativeArray.get_int(arr, 0)\n\
       \    let neg = NativeArray.get_int(arr, 1)\n\
@@ -16727,7 +16738,7 @@ let test_compiled_deque_pop_parity () =
          \    (Some(v), r) -> drain(r, acc + v)\n\
          \    end\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    let d = Deque.push_back(Deque.push_front(Deque.empty(), 1), 2)\n\
          \    match Deque.pop_front(d) do\n\
          \      (Some(v), _) -> println(int_to_string(v))\n\
@@ -16758,7 +16769,7 @@ let test_compiled_iolist_deep_flatten_parity () =
          \    if n == 0 do acc\n\
          \    else build(n - 1, IOList.append(acc, IOList.from_string(\"x\"))) end\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    let t = build(25000, IOList.empty())\n\
          \    println(int_to_string(IOList.byte_size(t)))\n\
          \    println(int_to_string(string_byte_length(IOList.to_string(t))))\n\
@@ -16781,7 +16792,7 @@ let test_compiled_float_nan_neq_parity () =
     ~name:"march_float_nan_neq"
     ~src:"mod FloatNanNeqParity do\n\
     \  needs IO.Console\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    let x = match string_to_float(\"nan\") do\n\
          \      Some(v) -> v\n\
          \      None -> 0.0\n\
@@ -16806,7 +16817,7 @@ let test_compiled_let_shadowing_parity () =
     ~name:"march_let_shadowing"
     ~src:"mod LetShadowParity do\n\
     \  needs IO.Console\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    let x = 10\n\
          \    let x = x + 5\n\
          \    let x = x * 2\n\
@@ -16834,7 +16845,7 @@ let test_compiled_entry_self_qual_parity () =
     \  needs IO.Console\n\
          \  fn bar(x) do x + 1 end\n\
          \  fn wrapped(x) do Foo.bar(x) end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do println(int_to_string(Foo.wrapped(5))) end\n\
+         \  fn main() needs IO.Console do println(int_to_string(Foo.wrapped(5))) end\n\
           end\n"
     ~expected:"6"
     ()
@@ -16852,7 +16863,7 @@ let test_compiled_entry_self_qual_nested_parity () =
          \    fn helper(x) do x + 1 end\n\
          \    fn wrapped(x) do helper(x) end\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do println(int_to_string(Outer.Inner.wrapped(5))) end\n\
+         \  fn main() needs IO.Console do println(int_to_string(Outer.Inner.wrapped(5))) end\n\
           end\n"
     ~expected:"6"
     ()
@@ -16872,7 +16883,7 @@ let test_compiled_entry_self_qual_no_overstrip_parity () =
          \  end\n\
          \  fn bar(x) do x + 1 end\n\
          \  fn wrapped(x) do bar(x) end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(int_to_string(wrapped(5)))\n\
          \    println(int_to_string(Inner.wrapped(5)))\n\
          \  end\n\
@@ -16903,7 +16914,7 @@ let test_compiled_entry_self_qual_extern_parity () =
          \  extern \"libc\": Cap(IO.FileSystem) do\n\
          \    fn my_abs(x : Int) : Int = \"labs\"\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) do println(int_to_string(Foo.my_abs(0 - 7))) end\n\
+         \  fn main() needs IO.Console, IO.Foreign do println(int_to_string(Foo.my_abs(0 - 7))) end\n\
           end\n"
     ~expected:"7"
     ()
@@ -16928,7 +16939,7 @@ let test_compiled_entry_self_qual_extern_nested_parity () =
          \    end\n\
          \    fn go(x) do my_abs(x) end\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) do println(int_to_string(Bar.go(0 - 7))) end\n\
+         \  fn main() needs IO.Console, IO.Foreign do println(int_to_string(Bar.go(0 - 7))) end\n\
           end\n"
     ~expected:"7"
     ()
@@ -16954,7 +16965,7 @@ let test_compiled_nested_interface_dispatch_parity () =
          \    end\n\
          \    fn go() : String do greet(1) end\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do println(Bar.go()) end\n\
+         \  fn main() needs IO.Console do println(Bar.go()) end\n\
           end\n"
     ~expected:"hi-nested"
     ()
@@ -16993,7 +17004,7 @@ let test_compiled_mpst_relay_parity () =
          \    Server -> Logger : String\n\
          \    Logger -> Client : String\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    let (cc, lc, sc) = MPST.new(Relay)\n\
          \    let cc2 = MPST.send(cc, Server, \"req\")\n\
          \    let (m1, sc2) = MPST.recv(sc, Client)\n\
@@ -17028,7 +17039,7 @@ let test_compiled_mpst_relay_distinct_parity () =
          \    Server -> Logger : String\n\
          \    Logger -> Client : String\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    let (cc, lc, sc) = MPST.new(Relay)\n\
          \    let cc2 = MPST.send(cc, Server, \"c2s\")\n\
          \    let (m1, sc2) = MPST.recv(sc, Client)\n\
@@ -17065,7 +17076,7 @@ let test_compiled_guarded_match_parity () =
          \      _ -> \"zero\"\n\
          \    end\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(classify(5))\n\
          \    println(classify(-3))\n\
          \    println(classify(0))\n\
@@ -17082,7 +17093,7 @@ let test_compiled_println_int_list_parity () =
     ~name:"march_ifaceimpl_intlist"
     ~src:"mod IfaceImplIntList do\n\
     \  needs IO.Console\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println([1, 2, 3, 4, 5])\n\
          \  end\n\
           end\n"
@@ -17097,7 +17108,7 @@ let test_compiled_println_string_list_parity () =
     ~name:"march_ifaceimpl_stringlist"
     ~src:"mod IfaceImplStringList do\n\
     \  needs IO.Console\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println([\"a\", \"b\"])\n\
          \  end\n\
           end\n"
@@ -17112,7 +17123,7 @@ let test_compiled_println_option_list_parity () =
     ~name:"march_ifaceimpl_optionlist"
     ~src:"mod IfaceImplOptionList do\n\
     \  needs IO.Console\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println([Some(42), None])\n\
          \  end\n\
           end\n"
@@ -17131,7 +17142,7 @@ let test_compiled_println_nested_list_parity () =
     ~name:"march_ifaceimpl_nestedlist"
     ~src:"mod IfaceImplNestedList do\n\
     \  needs IO.Console\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println([[1, 2], [3]])\n\
          \  end\n\
           end\n"
@@ -17152,7 +17163,7 @@ let test_compiled_println_atom_parity () =
     ~name:"march_atomshow"
     ~src:"mod AtomShow do\n\
     \  needs IO.Console\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(:ok)\n\
          \  end\n\
           end\n"
@@ -17168,7 +17179,7 @@ let test_compiled_show_atom_multi_parity () =
     ~name:"march_atomshow_multi"
     ~src:"mod AtomShowMulti do\n\
     \  needs IO.Console\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(show(:hello) ++ \" \" ++ show(:world_123))\n\
          \  end\n\
           end\n"
@@ -17309,7 +17320,7 @@ let test_scrutinee_borrowed_cross_branch_no_double_dec () =
          \      Nil -> -1\n\
          \    end\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do println(f(Nil, true)) end\n\
+         \  fn main() needs IO.Console do println(f(Nil, true)) end\n\
           end\n"
     ~expected:"-1"
     ()
@@ -17348,7 +17359,7 @@ let test_newtype_derived_eq_operator_vs_named_parity () =
     \  needs IO.Console\n\
          \  type Wrap = Wrap(Int)\n\
          \  derive Eq for Wrap\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    let a = Wrap(1)\n\
          \    let b = Wrap(1)\n\
          \    println(bool_to_string(a == b))\n\
@@ -17371,7 +17382,7 @@ let test_newtype_derived_ord_hash_named_compiled () =
     \  needs IO.Console\n\
          \  type Wrap = Wrap(Int)\n\
          \  derive Ord, Hash for Wrap\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(int_to_string(compare(Wrap(1), Wrap(2))))\n\
          \    println(int_to_string(hash(Wrap(7))))\n\
          \  end\n\
@@ -17389,7 +17400,7 @@ let test_newtype_derived_ord_string_payload_compiled () =
     \  needs IO.Console\n\
          \  type WrapS = WrapS(String)\n\
          \  derive Eq, Ord, Hash for WrapS\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(bool_to_string(eq(WrapS(\"a\"), WrapS(\"a\"))))\n\
          \    println(bool_to_string(eq(WrapS(\"a\"), WrapS(\"b\"))))\n\
          \    println(int_to_string(compare(WrapS(\"a\"), WrapS(\"b\"))))\n\
@@ -17407,7 +17418,7 @@ let test_boxed_pair_derived_methods_unaffected_compiled () =
     \  needs IO.Console\n\
          \  type Pair = Pair(Int, Int)\n\
          \  derive Eq, Ord, Hash for Pair\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(bool_to_string(eq(Pair(1, 2), Pair(1, 2))))\n\
          \    println(bool_to_string(eq(Pair(1, 2), Pair(1, 3))))\n\
          \    println(int_to_string(compare(Pair(1, 2), Pair(3, 4))))\n\
@@ -17425,7 +17436,7 @@ let test_multi_ctor_derived_methods_unaffected_compiled () =
     \  needs IO.Console\n\
          \  type Shape = Circle(Int) | Square(Int)\n\
          \  derive Eq, Ord, Hash for Shape\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(bool_to_string(eq(Circle(1), Circle(1))))\n\
          \    println(bool_to_string(eq(Circle(1), Square(1))))\n\
          \    println(int_to_string(compare(Circle(1), Square(1))))\n\
@@ -17451,7 +17462,7 @@ let test_derive_variant_name_collides_stdlib_record_compiled () =
     \  needs IO.Console\n\
          \  type Color = Red | Green | Blue\n\
          \  derive Eq, Show for Color\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(show(Green))\n\
          \    println(bool_to_string(eq(Red, Red)))\n\
          \    println(bool_to_string(eq(Red, Blue)))\n\
@@ -17475,7 +17486,7 @@ let test_derive_variant_name_collides_local_record_compiled () =
          \  end\n\
          \  type Color = Red | Green | Blue\n\
          \  derive Eq, Show for Color\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(show(Green))\n\
          \    println(bool_to_string(eq(Red, Red)))\n\
          \    println(bool_to_string(eq(Red, Blue)))\n\
@@ -17502,7 +17513,7 @@ let test_handwritten_impl_nested_match_newtype_compiled () =
          \      end\n\
          \    end\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(bool_to_string(eq(Wrap(1), Wrap(1))))\n\
          \    println(bool_to_string(eq(Wrap(1), Wrap(2))))\n\
          \  end\n\
@@ -17539,7 +17550,7 @@ let test_record_eq_distinct_shapes_compiled () =
   type Point = { x : Int, y : Int }
   derive Eq for User
   derive Eq for Point
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let user : User = { name: "ann", tags: [1, 2] }
     let point : Point = { x: 1, y: 2 }
     println(bool_to_string(user == { name: "ann", tags: [1, 2] }))
@@ -17568,7 +17579,7 @@ let test_record_eq_nested_generic_compiled () =
   derive Eq for Numbered
   type Cell(a) = { item : a }
   derive Eq for Cell
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let a : Named = { payload: { text: "ann" }, valid: true }
     let b : Numbered = { payload: { value: 1 }, valid: true }
     println(bool_to_string(a == { payload: { text: "ann" }, valid: true }))
@@ -17622,7 +17633,7 @@ let test_newtype_eq_operator_string_payload_compiled () =
     \  needs IO.Console\n\
          \  type WrapS = WrapS(String)\n\
          \  derive Eq for WrapS\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(bool_to_string(WrapS(\"a\") == WrapS(\"a\")))\n\
          \    println(bool_to_string(WrapS(\"a\") == WrapS(\"b\")))\n\
          \    println(bool_to_string(WrapS(\"a\") != WrapS(\"b\")))\n\
@@ -17641,7 +17652,7 @@ let test_newtype_eq_operator_int_payload_control_compiled () =
     \  needs IO.Console\n\
          \  type Wrap = Wrap(Int)\n\
          \  derive Eq for Wrap\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(bool_to_string(Wrap(1) == Wrap(1)))\n\
          \    println(bool_to_string(Wrap(1) == Wrap(2)))\n\
          \  end\n\
@@ -17663,7 +17674,7 @@ let test_newtype_eq_operator_boxed_payload_compiled () =
          \  type WrapR = WrapR(Inner)\n\
          \  derive Eq for Inner\n\
          \  derive Eq for WrapR\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(bool_to_string(WrapR(Inner(1, 2)) == WrapR(Inner(1, 2))))\n\
          \    println(bool_to_string(WrapR(Inner(1, 2)) == WrapR(Inner(1, 3))))\n\
          \  end\n\
@@ -17688,7 +17699,7 @@ let test_newtype_eq_operator_generic_payload_compiled () =
     \  needs IO.Console\n\
          \  type Wrap(a) = Wrap(a)\n\
          \  derive Eq for Wrap\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(bool_to_string(Wrap(\"x\") == Wrap(\"x\")))\n\
          \    println(bool_to_string(Wrap(\"x\") == Wrap(\"y\")))\n\
          \    println(bool_to_string(Wrap(1) == Wrap(1)))\n\
@@ -17726,7 +17737,7 @@ let test_not_before_operand_is_prefix_not () =
       _ -> not not p(n)
     end
   end
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println(bool_to_string(branch(-1)))
     println(bool_to_string(branch(-9)))
     println(bool_to_string(arms(0)) ++ " " ++ bool_to_string(arms(9)))
@@ -17759,7 +17770,7 @@ let test_newtype_over_generic_record_eq_compiled () =
   derive Eq for Wrap
   derive Eq for Pair
   derive Eq for WP
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let a : Cell(String) = { value: "ann" }
     let b : Cell(String) = { value: "bob" }
     let c : Cell(Int) = { value: 1 }
@@ -17791,7 +17802,7 @@ let test_local_fn_shadows_later_bulk_use_compiled () =
   needs IO.Console
   fn sum_int(xs : List(Int)) : Int do 100 + List.length(xs) end
   use List.*
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println(int_to_string(sum_int(append([1], [2]))))
     ()
   end
@@ -17821,7 +17832,7 @@ let test_user_generic_show_vs_show_iface_compiled () =
     end
   end
   fn mk(x : Int) : Result(String, String) do if x > 0 do Ok("pos") else Err("neg") end end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(show(mk(1)))
     println(mk(2))
   end
@@ -17844,7 +17855,7 @@ let test_user_typed_show_does_not_capture_println_compiled () =
     end
   end
   fn mk(x : Int) : Result(String, String) do if x > 0 do Ok("pos") else Err("neg") end end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(show(mk(1)))
     println(mk(2))
     println(to_string(mk(3)))
@@ -17865,7 +17876,7 @@ let test_user_show_vs_own_show_impl_compiled () =
   impl Show(Box) do
     fn show(b) do match b do Box(n) -> "Box " ++ int_to_string(n) end end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(show(Box(1)))
     println(Box(2))
   end
@@ -17883,7 +17894,7 @@ let test_user_compare_hash_vs_iface_compiled () =
   needs IO.Console
   fn compare(_a, _b) do 99 end
   fn hash(_x) do 7 end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(compare(1, 2)))
     println(int_to_string(hash("x")))
     println(to_string((1, 2) < (1, 3)))
@@ -17904,7 +17915,7 @@ let test_nested_module_fn_named_like_iface_method_compiled () =
     fn eq(a, b) do a != b end
     fn both(a, b) do eq(a, b) && eq(b, a) end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(to_string(Util.eq(1, 1)))
     println(to_string(Util.eq("a", "b")))
     println(to_string(Util.both(1, 2)))
@@ -17935,7 +17946,7 @@ let test_derived_impl_not_captured_by_user_method_fn_compiled () =
   fn eq(_a : Int, _b : Int) : Bool do false end
   fn compare(_a : Int, _b : Int) : Int do 0 end
   fn hash(_x : Int) : Int do 7 end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(P(1, "a"))
     println(to_string(P(1, "a") == P(1, "a")))
     println({ a: 1, b: "x" })
@@ -17967,7 +17978,7 @@ let test_derived_impl_not_captured_in_nested_module_compiled () =
     fn mk(n : Int) : Pt do { x: n, tag: "t" } end
   end
   fn show(_x : Int) : String do "V" end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(Shapes.Box(3))
     println(Shapes.Box(Shapes.mk(4)))
     println(to_string(Shapes.mk(1) < Shapes.mk(2)))
@@ -17992,7 +18003,7 @@ let test_qualified_builtin_iface_method_compiled () =
   derive Show, Hash for P
   derive Show, Hash for R
   fn show(_x : Int) : String do "U" end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(Show.show(5) ++ show(5))
     println(to_string(Ord.compare(1, 2)))
     println(to_string(Eq.eq("a", "a")))
@@ -18017,7 +18028,7 @@ let test_user_module_named_like_stdlib_module_compiled () =
     fn sum_int(_xs : List(Int)) : Int do 42 end
     fn twice(xs : List(Int)) : Int do sum_int(xs) + sum_int(xs) end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(List.sum_int([1, 2])))
     println(int_to_string(List.twice([1, 2])))
     println(int_to_string(List.length([1, 2, 3])))
@@ -18038,7 +18049,7 @@ let test_record_eq_pair_then_triple_compiled () =
   derive Eq for Pair
   type Triple = { c : Int, d : Int, e : Int }
   derive Eq for Triple
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let p1 : Pair = { a: 1, b: 2 }
     let p2 : Pair = { a: 1, b: 2 }
     let t1 : Triple = { c: 1, d: 2, e: 3 }
@@ -18064,7 +18075,7 @@ let test_record_eq_triple_then_pair_compiled () =
   derive Eq for Pair
   type Triple = { c : Int, d : Int, e : Int }
   derive Eq for Triple
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let t1 : Triple = { c: 1, d: 2, e: 3 }
     let t2 : Triple = { c: 1, d: 2, e: 3 }
     let p1 : Pair = { a: 1, b: 2 }
@@ -18089,7 +18100,7 @@ let test_record_eq_strings_then_ints_compiled () =
   derive Eq for Name
   type Point = { x : Int, y : Int }
   derive Eq for Point
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let n1 : Name = { first: "a", last: "b" }
     let n2 : Name = { first: "a", last: "b" }
     let q1 : Point = { x: 1, y: 2 }
@@ -18116,7 +18127,7 @@ let test_record_eq_nested_and_list_compiled () =
   derive Eq for Inner
   type Outer = { inner : Inner, tag : Int }
   derive Eq for Outer
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let p1 : Pair = { a: 1, b: 2 }
     let p2 : Pair = { a: 1, b: 2 }
     println(to_string(p1 == p2))
@@ -18142,7 +18153,7 @@ let test_tuple_eq_nested_shape_collision_compiled () =
     ~name:"march_tup_eq_shapes"
     ~src:{|mod Main do
   needs IO.Console
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let b1 = ((1, 2, 3), 4)
     let b2 = ((1, 2, 3), 4)
     let ip = (1, 2)
@@ -18222,7 +18233,7 @@ let test_msgpack_cross_module_ctor_resolution_compiled () =
          \      Err(e)               -> \"err:\" ++ e\n\
          \    end\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(String.from_int(List.length(Msgpack.encode(Msgpack.int(42)))))\n\
          \    println(describe(Msgpack.encode(Msgpack.int(7))))\n\
          \    println(describe(Msgpack.encode(Msgpack.array(Cons(Msgpack.int(1), Cons(Msgpack.int(2), Nil))))))\n\
@@ -18271,7 +18282,7 @@ let test_module_qualified_colliding_ctor_pattern_compiled () =
          \      Err(e)             -> \"err:\" ++ e\n\
          \    end\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(describe(\"[1]\"))\n\
          \    println(describe(\"null\"))\n\
          \    println(describe(\"{\\\"a\\\":1}\"))\n\
@@ -18317,7 +18328,7 @@ let test_module_qualified_pattern_qualifier_is_stdlib_type_compiled () =
          \      Tree.Leaf(n) -> n\n\
          \    end\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(String.from_int(top(Tree.Leaf(6))))\n\
          \    println(String.from_int(top(Tree.Node(Tree.Leaf(1), Tree.Leaf(2)))))\n\
          \    println(String.from_int(f(Tree.Node(Tree.Leaf(1), Tree.Leaf(2)))))\n\
@@ -18385,7 +18396,7 @@ let test_qualified_pattern_arm_returns_scrutinee_compiled () =
       Node(a, b) -> "Node " ++ int_to_string(a) ++ " " ++ int_to_string(b)
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(name(keep(Shapes.Square(5), Shapes.Dot)))
     println(name(keep(Shapes.Square(1), Shapes.Dot)))
     println(name(keep2(Shapes.Square(5), Shapes.Dot)))
@@ -18436,7 +18447,7 @@ let test_qualified_actor_msg_pattern_in_some_arm_compiled () =
       Reset -> "Reset"
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(tag(w(V1.OldBump(5), Reset)))
     println(tag(w(V1.OldBump(137), Reset)))
     println(tag(w(V1.OldBump(-1), Reset)))
@@ -18496,7 +18507,7 @@ let test_qualified_pattern_returns_scrutinee_colliding_types_compiled () =
       _ -> t
     end
   end
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(DcA.name(DcA.keep(DcA.Shared(5), DcA.Other(0))))
     println(DcB.name(DcB.keep(DcB.Shared(5), DcB.Extra(0))))
     println(DcA.name(keep_a(DcA.Shared(5), DcA.Other(0))))
@@ -19121,7 +19132,7 @@ declare ptr  @march_csv_close(ptr %handle)
 declare void @march_own(ptr %pid, ptr %value)
 ; Capability builtins
 declare ptr  @march_cap_narrow(ptr %cap)
-declare ptr  @march_mint_cap(ptr %cap)
+declare ptr  @march_mint_cap()
 declare ptr  @march_cap_impl(ptr %cap, ptr %dict)
 declare ptr  @march_cap_dict(ptr %cap)
 ; Monitor/supervision builtins
@@ -19827,7 +19838,7 @@ let test_cross_tls_gzip_linux_amd64_elf () =
       "mod XTls do\n\
     \  needs IO.Console\n\
       \  needs IO.NetConnect.TLS\n\
-      \  fn main(_cap_console : Cap(IO.Console), _cap_tls : Cap(IO.NetConnect.TLS)) do\n\
+      \  fn main() needs IO.Console, IO.NetConnect.TLS do\n\
       \    let payload = Bytes.from_string(\"march cross tls+gzip probe\")\n\
       \    let gz = match stdlib_gzip_encode(payload, -1) do\n\
       \      Ok(c)  -> c\n\
@@ -19902,7 +19913,7 @@ let test_compiled_default_args_parity () =
          \  fn greet(name, greeting \\\\ \"Hi\", punct \\\\ \"!\") do\n\
          \    greeting ++ \", \" ++ name ++ punct\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(greet(\"Bob\"))\n\
          \    println(greet(\"Al\", \"Yo\"))\n\
          \    println(greet(\"Cy\", \"Hey\", \"?\"))\n\
@@ -19924,7 +19935,7 @@ let test_compiled_nested_default_args_parity () =
          \  mod B do\n\
          \    fn f(x, y \\\\ 100) do x + y end\n\
          \  end\n\
-         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \  fn main() needs IO.Console do\n\
          \    println(int_to_string(B.f(1)))\n\
          \    println(int_to_string(B.f(2, 20)))\n\
          \  end\n\
@@ -19953,7 +19964,7 @@ let vectorize_source_inlined_reuse_fail = {|mod Main do
     let a2 = native_float_arr_map(a1, f)
     native_float_arr_map(a2, f)
   end
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let arr = native_float_arr_make(4, 1.0)
     let out = scale(arr, 2.0)
     println(native_float_arr_get(out, 0))
@@ -19976,7 +19987,7 @@ let vectorize_check_fail_src = {|mod Main do
     let _ = f(1.0)
     native_float_arr_map(arr, f)
   end
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
@@ -20013,7 +20024,7 @@ let vectorize_source_ok = {|mod Main do
   fn scale(arr) do
     native_float_arr_map(arr, fn x -> x *. 2.0)
   end
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
@@ -20058,7 +20069,7 @@ let vectorize_source_warn_ok = {|mod Main do
   fn scale(arr) do
     native_float_arr_map(arr, fn x -> x *. 2.0)
   end
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
@@ -20072,7 +20083,7 @@ let vectorize_source_ok_int = {|mod Main do
   fn double_all(arr) do
     native_int_arr_map(arr, fn x -> x * 2)
   end
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let arr = native_int_arr_make(4, 1)
     let doubled = double_all(arr)
     println(native_int_arr_get(doubled, 0))
@@ -20088,7 +20099,7 @@ let vectorize_source_reuse_fail = {|mod Main do
     let _ = f(1.0)
     native_float_arr_map(arr, f)
   end
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
@@ -20104,7 +20115,7 @@ let vectorize_source_reuse_warn = {|mod Main do
     let _ = f(1.0)
     native_float_arr_map(arr, f)
   end
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
@@ -20118,7 +20129,7 @@ let vectorize_source_ok_map2 = {|mod Main do
   fn combine(a, b) do
     native_float_arr_map2(a, b, fn (x, y) -> x +. y)
   end
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let a = native_float_arr_make(4, 1.0)
     let b = native_float_arr_make(4, 2.0)
     let summed = combine(a, b)
@@ -20135,7 +20146,7 @@ let vectorize_source_reuse_fail_map2 = {|mod Main do
     let _ = f(1.0, 1.0)
     native_float_arr_map2(a, b, f)
   end
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let a = native_float_arr_make(4, 1.0)
     let b = native_float_arr_make(4, 2.0)
     let summed = combine(a, b)
@@ -20150,7 +20161,7 @@ let vectorize_source_misuse = {|mod Main do
   fn scale(arr) do
     arr
   end
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
@@ -20164,7 +20175,7 @@ let vectorize_source_misuse_warn = {|mod Main do
   fn scale(arr) do
     arr
   end
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
@@ -20214,7 +20225,7 @@ let vectorize_source_reuse_fail_int = {|mod Main do
     let _ = f(1)
     native_int_arr_map(arr, f)
   end
-  fn main(_cap_console : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     let arr = native_int_arr_make(4, 1)
     let doubled = double_all(arr)
     println(native_int_arr_get(doubled, 0))
@@ -20361,7 +20372,7 @@ let derive_json_single_src = {|mod JsonOne do
   type Flat = { name : String, age : Int }
   derive Json for Flat
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     match Json.parse("{\"name\":\"a\",\"age\":3}") do
     Err(e) -> println("parse err")
     Ok(v) -> match from_json(v) do
@@ -20401,7 +20412,7 @@ let derive_json_ambiguous_src = {|mod JsonTwo do
   type Other = { id : Int }
   derive Json for Other
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     match Json.parse("{\"name\":\"a\",\"age\":3}") do
     Err(e) -> println("parse err")
     Ok(v) -> match from_json(v) do
@@ -20481,7 +20492,7 @@ let test_compiled_interpreter_only_supervisor_dsl_rejected () =
     \    init  { n: 0 }\n\
     \    on Inc() do { n: state.n + 1 } end\n\
     \  end\n\
-    \  fn main(_c : Cap(IO.Console)) do\n\
+    \  fn main() needs IO.Console do\n\
     \    let _spec = worker(Counter)\n\
     \    println(\"unreachable compiled\")\n\
     \  end\n\
@@ -20509,7 +20520,7 @@ let test_compiled_worker_local_fn_still_compiles () =
     ~src:"mod W do\n\
     \  needs IO.Console\n\
          \  fn worker(n) do n * 2 end\n\
-         \  fn main(_c : Cap(IO.Console)) do println(int_to_string(worker(21))) end\n\
+         \  fn main() needs IO.Console do println(int_to_string(worker(21))) end\n\
           end\n"
     ~expected:"42"
     ()
@@ -20533,7 +20544,7 @@ let compile_expect_rejected ?(extra_args = "") ~(tag : string) ~(body : string) 
      \    init { x: 0 }\n\
      \    on Compute() do { x: 42 } end\n\
      \  end\n\
-     \  fn main(_c : Cap(IO)) do\n" ^ body ^ "\n\
+     \  fn main() needs IO do\n" ^ body ^ "\n\
      \    println(\"unreachable compiled\")\n\
      \  end\n\
       end\n");

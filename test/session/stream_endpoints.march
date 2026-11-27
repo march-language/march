@@ -72,7 +72,7 @@ mod StreamEndpoints do
       end)
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     -- The stdlib's in-process transport; it prints its own `close` lines.
     let t = Session.in_process_with(fn line -> Authority.ignore(IO.puts(line)))
     let s = Authority.must(Session.attach(t.ops))

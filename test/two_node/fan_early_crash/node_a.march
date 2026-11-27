@@ -26,9 +26,9 @@ mod FanEarlyCrashNodeA do
       Fan_A.close(s, st2))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-a: up")
-    match Fan_Run.run_A(c, "node-a", "fan-secret", Fan_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
+    match Fan_Run.run_A("node-a", "fan-secret", Fan_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
       Ok(_) -> println("A: closed")
       Err(SessionNode.Cancelled(role, cause)) ->
         println("A: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)

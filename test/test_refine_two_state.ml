@@ -112,7 +112,7 @@ let proved =
           \      { n: state.n + k }\n\
           \    end\n\
           \  end\n\
-          \  fn main(_c : Cap(IO.Console)) : Unit do\n\
+          \  fn main() : Unit needs IO.Console do\n\
           \    let c = spawn(C)\n\
           \    Actor.cast(c, Inc(2))\n\
           \    run_until_idle()\n\

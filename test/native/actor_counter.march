@@ -21,7 +21,7 @@ mod ActorCounter do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let c = spawn(Counter)
     let _ = send(c, Increment(5))
     let result = Actor.call(c, CallGet, 5000)

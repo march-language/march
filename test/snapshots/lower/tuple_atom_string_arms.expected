@@ -15,7 +15,7 @@ let x : Int = $f1 in
   _ -> panic("non-exhaustive pattern match")
 
 ## main
-fn main(_cap_console : Cap(IO.Console)) : () =
+fn main() : () =
   let $t2 : String = let $t1 : (Int, Int) = (0, 0) in
 describe($t1) in
 println($t2);

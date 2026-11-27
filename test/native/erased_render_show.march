@@ -34,7 +34,7 @@ mod ErasedRenderShow do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     -- show convention: strings bare inside List/Result
     let e1 = Bx(Cons(fn x -> to_string(x), Nil))
     println("erased_list=" ++ apply_first(e1, Cons("a", Cons("b", Nil))))

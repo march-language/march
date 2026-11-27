@@ -178,7 +178,7 @@ mod NativeArrSort do
       if acc == "" do s else acc ++ " " ++ s end)
   end
 
-  fn main(_cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println("sorted: " ++ int_to_string(score(sorted_l)))
     println("reversed: " ++ int_to_string(score(reversed_l)))
     println("equal: " ++ int_to_string(score(equal_l)))

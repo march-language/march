@@ -44,5 +44,5 @@ mod Main do
     Logging_C.recv_Msg_I_C_1(s, st1, fn (_report, st2) -> Logging_C.close(s, st2))
   end
 
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

@@ -97,7 +97,7 @@ mod Main do
     if k <= 0 do acc else idf32fold_rt(a, k - 1, acc +. NativeArray.fold_f32(a, 1.0, f), f) end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = 20000
     let fa = NativeArray.make_float(4, 1.5)
     let f3 = NativeArray.make_f32(4, 1.5)

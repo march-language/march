@@ -24,7 +24,7 @@ mod Main do
     on Deposit(k : Int) do state.sum + k end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let t = spawn(Total)
     send(t, Deposit(5))
   end
@@ -45,7 +45,7 @@ mod Main do
     on Deposit(k : Int) do { state with sum: state.sum + k } end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let t = spawn(Total)
     send(t, Deposit(5))
   end

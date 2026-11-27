@@ -29,17 +29,17 @@ mod Main do
     Ping_Client.recv_Answer(s, Ping_Client.send_Ask(s, st, "hi"), fn (_r, st1) -> Ping_Client.close(s, st1))
   end
 
-  pfn rounds(io : Cap(IO), node : Cap(ClusterNode.Live), n : Int) : Int do
+  pfn rounds(node : Cap(ClusterNode.Live), n : Int) : Int do
     if n <= 0 do 0 else
       let bad = match Ping_Run.initiate_Client(node, fn (s, st) -> client(s, st)) do
         Ok(_) -> 0
         Err(_) -> 1
       end
-      bad + rounds(io, node, n - 1)
+      bad + rounds(node, n - 1)
     end
   end
 
-  fn main(io : Cap(IO)) : () do
+  fn main() : () needs IO do
     let node = match ClusterNode.start(ClusterNode.config("party-1", 0, "", Nil, "party-secret", 1)) do
       Ok(h) -> h
       Err(e) -> panic(e)
@@ -49,10 +49,10 @@ mod Main do
       Err(e) -> panic(SessionNode.run_error_message(e))
     end
     sleep_ms(300)
-    let _ = rounds(io, node, 3)
+    let _ = rounds(node, 3)
     sleep_ms(200)
     let a0 = live_allocs()
-    let bad = rounds(io, node, 20)
+    let bad = rounds(node, 20)
     sleep_ms(300)
     let per = (live_allocs() - a0) / 20
     println("sessions failed: " ++ int_to_string(bad))

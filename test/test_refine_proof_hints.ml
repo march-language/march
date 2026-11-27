@@ -80,7 +80,7 @@ let assert_by =
   fn boom(x : Int) : {Unit | x == x} do
     ()
   end
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     assert 1 == 1 by boom(3)
     println("ran")
     ()
@@ -135,7 +135,7 @@ let reveal_fuel =
           run ~args:""
             {|mod H do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     with fuel(main, 3) do
       println("body ran")
     end
@@ -326,7 +326,7 @@ let soft =
   needs IO.Console
   fn calc() : Int do 1 end
   fn reveal(x : Int) : Int do x + 1 end
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main() : Unit needs IO.Console do
     let calc_v = calc()
     let reveal = reveal(calc_v)
     println(int_to_string(reveal))

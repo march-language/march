@@ -569,7 +569,7 @@ mod MyStack do
   end
 
   -- Using the stack:
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let s0 = MyStack.empty()
     let s1 = MyStack.push(s0, 1)
     let s2 = MyStack.push(s1, 2)

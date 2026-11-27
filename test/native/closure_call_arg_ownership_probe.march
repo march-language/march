@@ -119,7 +119,7 @@ mod Main do
     ()
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let n = 5000
     let reader = first_str([fn (s : String) -> string_length(s)])
     let ignorer = first_str([fn (s : String) -> 7])

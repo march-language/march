@@ -44,7 +44,9 @@ let cap_host_unproven = "cap_host_unproven"
 let cap_impl_invalid = "cap_impl_invalid"
 let cap_mismatch = "cap_mismatch"
 let cap_narrow_invalid = "cap_narrow_invalid"
+let cap_narrow_retired = "cap_narrow_retired"
 let cap_needs = "cap_needs"
+let cap_param_retired = "cap_param_retired"
 let cap_restrict = "cap_restrict"
 let cap_result_unhandled = "cap_result_unhandled"
 let cap_root_broad = "cap_root_broad"
@@ -61,6 +63,7 @@ let dep_grant_invalid = "dep_grant_invalid"
 let dep_grant_scope = "dep_grant_scope"
 let dep_module_conflict = "dep_module_conflict"
 let deprecated = "deprecated"
+let deprecated_main_cap = "deprecated_main_cap"
 let deterministic_violation = "deterministic_violation"
 let diverges_conflict = "diverges_conflict"
 let division_by_zero = "division_by_zero"
@@ -280,7 +283,9 @@ let all = [
   cap_impl_invalid;
   cap_mismatch;
   cap_narrow_invalid;
+  cap_narrow_retired;
   cap_needs;
+  cap_param_retired;
   cap_restrict;
   cap_result_unhandled;
   cap_root_broad;
@@ -297,6 +302,7 @@ let all = [
   dep_grant_scope;
   dep_module_conflict;
   deprecated;
+  deprecated_main_cap;
   deterministic_violation;
   diverges_conflict;
   division_by_zero;
@@ -539,7 +545,8 @@ let category_table : (string * string list) list = [
     cap_bound; cap_bound_needs; cap_bound_iface; cap_ceiling; cap_deserialize;
     cap_dict_misuse; cap_dict_type; cap_grant; cap_grant_exceeded;
     cap_host_annotation; cap_host_scope; cap_host_unproven;
-    cap_impl_invalid; cap_mismatch; cap_narrow_invalid; cap_needs;
+    cap_impl_invalid; cap_mismatch; cap_narrow_invalid; cap_narrow_retired; cap_needs;
+    cap_param_retired; deprecated_main_cap;
     cap_restrict; cap_result_unhandled; cap_root_broad; cap_scope_violation; cap_unchecked; cap_widen;
     dep_grant_exceeded; dep_grant_invalid; dep_grant_scope; extern_cap_missing;
     extern_needs_foreign; import_cap_missing; invalid_cap_scope;

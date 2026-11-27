@@ -6,7 +6,7 @@ mod Main do
     10 / d
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(int_to_string(scale(2)))
   end
 end

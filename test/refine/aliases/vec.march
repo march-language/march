@@ -23,7 +23,7 @@ mod Vec do
 
   fn rows(r : Int, c : Int, m : Matrix(r, c)) : Int do r end
 
-  fn main(cap : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let xs = replicate(3, 2)
     let ys = push(2, 5, replicate(2, 5))
     println(int_to_string(dot(3, xs, ys)))

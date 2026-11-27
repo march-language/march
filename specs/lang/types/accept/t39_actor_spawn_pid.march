@@ -27,7 +27,7 @@ mod Main do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let p = spawn(Counter)
     println(bool_to_string(is_alive(p)))
   end

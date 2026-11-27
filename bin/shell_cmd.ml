@@ -16,9 +16,11 @@
 
    Pre-bound capabilities (they exist only as names the input may use; the
    node checks the ones an input uses against $MARCH_SHELL_POLICY):
-     console  Cap(IO.Console)     clock  Cap(IO.Clock)
      intro    Cap(Actor.Introspect)
      debug    Cap(Actor.Debug)
+   An input's IO (the console, the clock) is not a name: it is read off the
+   operations the input reaches, as for any fragment (ocap phase 7b retired
+   the `console` / `clock` values, which no function takes any more).
 
    A deploy ends the session (the node answers `epoch_changed`). *)
 
@@ -29,11 +31,13 @@ let default_limit = 50
 
 (* name, cap path, how the fragment obtains it *)
 let caps = [
-  ("console", "IO.Console", "cap_narrow(root_cap)", "Cap(IO.Console)");
-  ("clock", "IO.Clock", "cap_narrow(root_cap)", "Cap(IO.Clock)");
   ("intro", "Actor.Introspect", "Authority.must(Actor.introspect())", "Cap(Actor.Introspect)");
   ("debug", "Actor.Debug", "Authority.must(Actor.debug())", "Cap(Actor.Debug)");
 ]
+
+(* The kinds every fragment's module declares: the IO an input may use
+   directly, and the pre-bound proof capabilities. *)
+let fragment_needs = [ "IO.Console"; "IO.Clock"; "Actor.Introspect"; "Actor.Debug" ]
 
 (* ── small helpers ── *)
 
@@ -244,7 +248,7 @@ let eval_on_node s ~(kind : string) ~(src : string)
 let fragment_source ?(fns = "") s ~src ~body =
   let used = List.filter (fun (name, _, _, _) -> mentions src name) caps in
   let needs =
-    String.concat "" (List.map (fun (_, path, _, _) -> Printf.sprintf "  needs %s\n" path) caps) in
+    String.concat "" (List.map (fun path -> Printf.sprintf "  needs %s\n" path) fragment_needs) in
   let cap_lets =
     String.concat "" (List.map (fun (name, _, how, ty) ->
         Printf.sprintf "    let %s : %s = %s\n" name ty how) used) in
@@ -498,7 +502,7 @@ let handle s line =
      | _ -> print_endline "usage: :limit N")
   else if starts_with line ":t " then type_of s (String.sub line 3 (String.length line - 3))
   else if mentions line "root_cap" then
-    print_endline "error: the shell's capabilities are the pre-bound names (:caps), not root_cap"
+    print_endline "error: root_cap no longer exists; the shell's capabilities are the pre-bound names (:caps) and the console and clock an input uses directly"
   else
     match parse_let line with
     | Some (name, rhs) -> eval_let s name rhs

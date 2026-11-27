@@ -31,7 +31,7 @@ mod Main do
       end
     end
   end
-  fn main(c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let h = spawn(Host)
     send(h, Open(1))
     send(h, Step(1, false))

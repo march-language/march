@@ -25,9 +25,9 @@ mod GoneNodeA do
       Gone_A.close(s, st1))
   end
 
-  fn main(c : Cap(IO)) do
+  fn main() needs IO do
     println("node-a: up")
-    match Gone_Run.run_A(c, "node-a", "gone-secret", Gone_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
+    match Gone_Run.run_A("node-a", "gone-secret", Gone_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
       Ok(_) -> println("A: clean end")
       Err(SessionNode.Cancelled(role, _)) -> println("A: role " ++ int_to_string(role) ++ " gone")
       Err(e) -> panic(SessionNode.run_error_message(e))

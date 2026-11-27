@@ -70,7 +70,7 @@ mod ClusterFramesBench do
     tcp_close(listen_fd)
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main() needs IO do
     run(64, 5000)
     run(1024, 2000)
     run(16384, 300)

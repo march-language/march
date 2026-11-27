@@ -20,5 +20,5 @@ mod Main do
     Stream_Prod.offer_more_done(s, st1,
       fn (_b, st2) -> prod(s, st2, next + 1))
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

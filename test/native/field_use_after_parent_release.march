@@ -68,7 +68,7 @@ mod FieldUseAfterParentRelease do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     println(classify({ tag: "tag-" ++ int_to_string(12345), n: 1 }))
     println(int_to_string(classify_loop(20000, 0)))
     List.each([1, 2, 3], fn i ->

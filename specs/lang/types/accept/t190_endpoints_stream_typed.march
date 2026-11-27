@@ -31,5 +31,5 @@ mod Main do
         Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))
       end)
   end
-  fn main(c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end

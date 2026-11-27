@@ -7,6 +7,9 @@
 -- IO.NetConnect.TLS) are now registered, matching the hierarchy in
 -- lib/caps/cap_lattice.ml. See core-march-types.md §2.8.11. IO.Registry (ocap
 -- phase 2) is registered the same way.
+-- Ocap phase 7b retired `Cap(IO.X)` values: the same coverage is now shown with a
+-- function `needs` clause, which must lie within the module's `needs`
+-- (`cap_bound_needs`); the comment above describes the original form.
 mod HierApp do
   needs IO.Random
   needs IO.Mut
@@ -14,13 +17,7 @@ mod HierApp do
   needs IO.Telemetry
   needs IO.Registry
 
-  fn use_caps(
-    _r : Cap(IO.Random),
-    _m : Cap(IO.Mut),
-    _f : Cap(IO.Foreign),
-    _t : Cap(IO.Telemetry),
-    _g : Cap(IO.Registry)
-  ) : Int do
+  fn use_caps() : Int needs IO.Random, IO.Mut, IO.Foreign, IO.Telemetry, IO.Registry do
     0
   end
 end

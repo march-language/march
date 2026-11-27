@@ -23,7 +23,7 @@ mod Main do
     on Bump(k : Int) do { state with n: state.n + k } end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let p = spawn(Bump)
     send(p, Bump(1))
   end
@@ -44,7 +44,7 @@ mod Main do
     on Bump(k : Int) do { state with n: state.n + k } end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main() needs IO.Console do
     let p = spawn(Counter)
     send(p, Bump(1))
   end

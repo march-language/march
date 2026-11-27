@@ -24,5 +24,5 @@ mod Main do
         Pump_A.close(s, Pump_A.choose_quit(s, st4, true))))
   end
 
-  fn main(_c : Cap(IO)) do () end
+  fn main() needs IO do () end
 end
