@@ -159,6 +159,23 @@ eager parts (prelude, impl methods, user code), the stub checks (an AST walk and
 parameter types of every deferred fn) and the post-lowering passes before the `lower`
 stamp.
 
+## Found by CI after review
+
+- **A name minted after lowering by a pass merged from main.** `Auth_rt.frames` (scoped
+  tail calls, #1338) calls `Authority.frame_in_force`; `Auth_rt.minted_callees` now lists it.
+  The tripwire named it on `test/snapshots/src/auth_tail_hop.march` and
+  `test/cap_conformance/frame_mutual_tail.march`. The gate now also covers
+  `test/cap_conformance` (62 programs compile, 30 are rejected both ways).
+- **The walk's roots were not the prune's roots.** The prune pins every RPC stub and every
+  policy-tagged fn wherever it lives; the walk pinned them only among stdlib stubs and relied
+  on user code being seeded for the rest. Under `--stdlib-source` the entry file is a
+  stdlib-span file, so `demo/load_server.march`'s eagerly lowered `report_load__rpc_stub` was
+  neither, and the tripwire fired on `ClusterLoad.local`. The rule is now one function,
+  `Dce_pre_mono.is_pinned`, used by the prune and by the walk for stubs and eagerly lowered
+  fns alike. `LAZY_GATE_FLAGS` passes extra flags to both sides of the gate, and CI runs it
+  over `demo/*.march` with `--stdlib-source`, as `demo/dune` builds them: red on
+  `load_server` before the fix, 8 identical after (1 rejected both ways).
+
 ## Not done
 
 - The scopes-not-reinstated perturbation was not run over the whole corpus.

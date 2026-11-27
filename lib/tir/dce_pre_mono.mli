@@ -22,6 +22,11 @@ val prune :
 (** [__rpc_stub] functions, which [prune] pins. *)
 val is_rpc_stub : string -> bool
 
+(** A function [prune] keeps whatever calls it (an RPC stub, or one with a
+    [Tagged] policy parameter).  Lazy lowering's demand walk roots the same
+    set, among stubs and eagerly lowered functions alike. *)
+val is_pinned : Tir.fn_def -> bool
+
 (** [walk ~iface_methods ~known ~defs ?extra roots]: the worklist [prune]
     runs, shared with lazy lowering so the two agree edge for edge.  From
     [roots], visits each name once; for each definition [defs n] (every one,

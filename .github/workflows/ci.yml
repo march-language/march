@@ -1240,6 +1240,13 @@ jobs:
         timeout-minutes: 40
         run: scripts/lazy-lower-gate.sh -w "$RUNNER_TEMP/lazy-lower-gate"
 
+      # demo/*.march are built with --stdlib-source (demo/dune), which makes
+      # the entry file a stdlib-span file: the case that once left an eagerly
+      # lowered RPC stub out of the demand walk's roots.
+      - name: Lazy-lowering identity gate (demo/, --stdlib-source)
+        timeout-minutes: 10
+        run: LAZY_GATE_FLAGS=--stdlib-source scripts/lazy-lower-gate.sh -w "$RUNNER_TEMP/lazy-lower-gate-demo" demo/*.march
+
   # Differential-oracle CI (test/test_properties.ml's "oracle: interp = compiled"
   # group, ~1090 QCheck-generated compile-vs-interpret comparisons). This is NOT
   # wired into `dune runtest`'s Test step above: MARCH_BIN isn't set there, so

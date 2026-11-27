@@ -105,6 +105,15 @@ let walk ~(iface_methods : (string, (string * string) list) Hashtbl.t)
 let is_unlowered (fd : Tir.fn_def) : bool =
   StringSet.mem Tir_names.unlowered_marker (mentioned fd.Tir.fn_body)
 
+(** A function the prune keeps whatever calls it: an RPC stub (dispatched by
+    name at run time) or one with a [Tagged] policy parameter (read by the
+    policy audit; nothing calls it).  Shared with lazy lowering's demand walk
+    ([Lower.lower_module ~lazy_bodies]), which must start from the prune's
+    roots: it used to pin these only among stdlib stubs and left an eagerly
+    lowered one (the entry file's, under --stdlib-source) unrooted. *)
+let is_pinned (fd : Tir.fn_def) : bool =
+  is_rpc_stub fd.Tir.fn_name || Policy_dce.policies_of_fn fd <> []
+
 let prune ?(iface_methods = Hashtbl.create 0) ~(extra_roots : string list)
     ~(fail_open : bool) (m : Tir.tir_module)
   : Tir.tir_module * (string, unit) Hashtbl.t =
@@ -118,9 +127,7 @@ let prune ?(iface_methods = Hashtbl.create 0) ~(extra_roots : string list)
     (extra_roots @ Dce.remote_ref_targets m);
   let pins = List.filter_map (fun (fd : Tir.fn_def) ->
       let n = fd.Tir.fn_name in
-      if Hashtbl.mem wanted n || is_rpc_stub n
-         || Policy_dce.policies_of_fn fd <> []
-      then Some n else None) m.Tir.tm_fns in
+      if Hashtbl.mem wanted n || is_pinned fd then Some n else None) m.Tir.tm_fns in
   let roots =
     Dce.root_names ~fail_open
       { m with Tir.tm_exports = m.Tir.tm_exports @ pins } in

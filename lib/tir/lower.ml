@@ -1205,8 +1205,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                         { fn_name = qname; fn_params = Lower_decls.fn_params mod_env def;
                           fn_ret_ty = Tir.TUnit; fn_body = unlowered_body;
                           fn_kind = Tir.FnNormal } in
-                      (* A policy-tagged fn is a prune root (nothing calls it). *)
-                      if Policy_dce.policies_of_fn stub <> [] then begin
+                      (* A fn the prune pins (policy-tagged: nothing calls it)
+                         is a root: lowered now. *)
+                      if Dce_pre_mono.is_pinned stub then begin
                         Hashtbl.replace lazy_seeds qname ();
                         lower_named ()
                       end else begin
@@ -1549,6 +1550,12 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           (* The prune pins the remote-ref targets of every body it is given,
              reached or not. *)
           @ Dce.remote_ref_targets_of_fns (Hashtbl.fold (fun _ fd acc -> fd :: acc) eager [])
+          (* ... and every RPC stub or policy-tagged fn, wherever it lives.  The
+             seeds above cover user code and pinned stubs; an eagerly lowered
+             fn in a stdlib-span file (the entry file under --stdlib-source,
+             demo/load_server.march's [report_load__rpc_stub]) is neither. *)
+          @ Hashtbl.fold (fun n fd acc ->
+              if Dce_pre_mono.is_pinned fd then n :: acc else acc) eager []
         in
         ignore (Dce_pre_mono.walk ~iface_methods:!_iface_methods ~known ~defs
                   ~extra:(fun fd -> Dce.remote_ref_targets_of_fns [ fd ]) roots)

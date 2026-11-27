@@ -71,7 +71,11 @@ export MARCH_STDLIB="${MARCH_STDLIB:-$ROOT/stdlib}"
 # The switch must come from this script alone.
 unset MARCH_DISABLE_PASS
 EAGER_EXTRA="${LAZY_GATE_EAGER_EXTRA:-}"
-export EXE WORK EAGER_EXTRA
+# Extra compiler flags for BOTH sides, as the programs are built elsewhere
+# (CI runs demo/*.march with LAZY_GATE_FLAGS=--stdlib-source, as demo/dune
+# does).  Word-split on purpose.
+FLAGS="${LAZY_GATE_FLAGS:-}"
+export EXE WORK EAGER_EXTRA FLAGS
 
 # One program: compile both ways, compare.  Writes parts/<tag> as
 #   SAME <tag> <engaged 0|1> | DIFF <tag> <why> | SKIP <tag>
@@ -90,11 +94,12 @@ gate_one() {
   done
   # Relative path from inside the directory, as ir-oracle does: the .ll
   # embeds the source path as given.
-  (cd "$WORK/lazy/$tag" && "$EXE" --emit-llvm --timings "$base.march") \
+  # shellcheck disable=SC2086
+  (cd "$WORK/lazy/$tag" && "$EXE" --emit-llvm --timings $FLAGS "$base.march") \
     >"$WORK/lazy/$tag/log" 2>&1
   lz=$?
   # shellcheck disable=SC2086
-  (cd "$WORK/eager/$tag" && "$EXE" --emit-llvm --timings --disable-pass "lazy-lower$EAGER_EXTRA" "$base.march") \
+  (cd "$WORK/eager/$tag" && "$EXE" --emit-llvm --timings $FLAGS --disable-pass "lazy-lower$EAGER_EXTRA" "$base.march") \
     >"$WORK/eager/$tag/log" 2>&1
   ez=$?
   lll="$WORK/lazy/$tag/$base.ll"; ell="$WORK/eager/$tag/$base.ll"
