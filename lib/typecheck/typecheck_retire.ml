@@ -120,6 +120,40 @@ let delete_runs (lines : string array) ~file (items : (pos * pos) list) (flags :
 
 let deletion (sp : Ast.span) : Err.fix_kind = Err.FReplace { span = sp; text = "" }
 
+(* The empty span just before the `do` that opens clause [c]'s body: where a
+   `needs` clause goes, after any return type.  None without the source. *)
+let before_do (lines : string array) ~(file : string) (c : Ast.fn_clause) : Ast.span option =
+  let after = end_of c.Ast.fc_params_span in
+  let body = start_of (Typecheck_types.span_of_expr c.Ast.fc_body) in
+  let between = slice lines after body in
+  let is_word ch = ch = '_' || (ch >= 'a' && ch <= 'z') in
+  (* the last `do` before the body *)
+  let rec find_do i =
+    if i < 0 then None
+    else if i + 2 <= String.length between && String.sub between i 2 = "do"
+            && (i = 0 || not (is_word between.[i - 1]))
+            && (i + 2 = String.length between || not (is_word between.[i + 2]))
+    then Some i
+    else find_do (i - 1)
+  in
+  match find_do (String.length between - 2) with
+  | None -> None
+  | Some i ->
+    let pre = String.sub between 0 i in
+    (* map the offset back to a position *)
+    let l = ref (fst after) and col = ref (snd after) in
+    String.iter (fun ch -> if ch = '\n' then (incr l; col := 0) else incr col) pre;
+    Some { Ast.file; start_line = !l; start_col = !col; end_line = !l; end_col = !col }
+
+(* The empty span where [def]'s `needs` clause goes (see [before_do]),
+   reading [def]'s source file. *)
+let needs_insert_point (def : Ast.fn_def) : Ast.span option =
+  match def.Ast.fn_clauses with
+  | c :: _ -> (
+    let file = c.Ast.fc_params_span.Ast.file in
+    match lines_of file with Some lines -> before_do lines ~file c | None -> None)
+  | [] -> None
+
 (* ── Which types are retired ─────────────────────────────────────────────── *)
 
 let is_io_kind (k : string) = k = "IO" || L.cap_subsumes "IO" k || String.starts_with ~prefix:"IO." k
@@ -181,8 +215,22 @@ let param_start = function
 let check_module ?(wrapped = false) ~(iter_expr : (Ast.expr -> unit) -> Ast.expr -> unit) (errors : Err.ctx)
     (decls : Ast.decl list) : unit =
   (* The declarations a program's entry `main` sits among. *)
-  let entry_decls =
+  let base_entry_decls =
     if wrapped then List.concat_map (function Ast.DMod (_, _, ds, _) -> ds | _ -> []) decls else decls
+  in
+  (* With no top-level `main`, the entry is the last nested module's `main`
+     ([March_ast.Cap_request.entry_main], the rule every backend applies). *)
+  let entry_def =
+    match March_ast.Cap_request.entry_main { Ast.mod_name = { Ast.txt = ""; span = Ast.dummy_span }; mod_decls = decls } with
+    | Some (_, def, _) -> Some def
+    | None -> None
+  in
+  let is_entry_def (def : Ast.fn_def) = match entry_def with Some d -> d == def | None -> false in
+  let entry_decls =
+    match entry_def with
+    | Some d when not (List.exists (function Ast.DFn (d', _) -> d' == d | _ -> false) base_entry_decls) ->
+      base_entry_decls @ [ Ast.DFn (d, Ast.dummy_span) ]
+    | _ -> base_entry_decls
   in
   let fns : fn_info list ref = ref [] in
   (* Every expression of a declaration, with its nested ones visited. *)
@@ -217,7 +265,7 @@ let check_module ?(wrapped = false) ~(iter_expr : (Ast.expr -> unit) -> Ast.expr
   let note_plain_params (ps : Ast.param list) = List.iter (fun (p : Ast.param) -> Option.iter note p.Ast.param_ty) ps in
   let rec types_of_decl ~prefix ~top (d : Ast.decl) =
     match d with
-    | Ast.DFn (def, _) when top && def.Ast.fn_name.Ast.txt = "main" ->
+    | Ast.DFn (def, _) when (top && def.Ast.fn_name.Ast.txt = "main") || is_entry_def def ->
       (* `main`'s parameters are the deprecated request form (below); its
          return type is an ordinary type. *)
       Option.iter note def.Ast.fn_ret_ty
@@ -317,35 +365,19 @@ let check_module ?(wrapped = false) ~(iter_expr : (Ast.expr -> unit) -> Ast.expr
                    written before the `do` that opens the body. *)
                 let needs_edit =
                   match def.Ast.fn_needs with
-                  | Some (_, nsp) ->
-                    Some (Err.FReplace { span = { nsp with Ast.start_line = nsp.Ast.end_line; start_col = nsp.Ast.end_col };
-                                         text = ", " ^ String.concat ", " uniq })
+                  | Some (paths, nsp) ->
+                    let have = List.map (fun (p, _) -> String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) p)) paths in
+                    (match List.filter (fun k -> not (List.mem k have)) uniq with
+                     | [] -> Some (Err.FMulti [])
+                     | add ->
+                       Some (Err.FReplace { span = { nsp with Ast.start_line = nsp.Ast.end_line; start_col = nsp.Ast.end_col };
+                                            text = ", " ^ String.concat ", " add }))
                   | None ->
-                    let after = end_of c.Ast.fc_params_span in
-                    let body = start_of (span_of_expr c.Ast.fc_body) in
-                    let between = slice lines after body in
-                    (* the last `do` before the body *)
-                    let rec find_do i =
-                      if i < 0 then None
-                      else if i + 2 <= String.length between && String.sub between i 2 = "do"
-                              && (i = 0 || not (Char.equal between.[i - 1] '_' || (between.[i - 1] >= 'a' && between.[i - 1] <= 'z')))
-                              && (i + 2 = String.length between
-                                  || not (between.[i + 2] = '_' || (between.[i + 2] >= 'a' && between.[i + 2] <= 'z')))
-                      then Some i
-                      else find_do (i - 1)
-                    in
-                    (match find_do (String.length between - 2) with
-                     | None -> None
-                     | Some i ->
-                       let pre = String.sub between 0 i in
-                       (* map the offset back to a position *)
-                       let l = ref (fst after) and col = ref (snd after) in
-                       String.iter (fun ch -> if ch = '\n' then (incr l; col := 0) else incr col) pre;
-                       let at = { Ast.file; start_line = !l; start_col = !col; end_line = !l; end_col = !col } in
-                       (* no return type is added: a `main` without one
-                          returns whatever its last expression does *)
-                       let text = "needs " ^ String.concat ", " uniq ^ " " in
-                       Some (Err.FReplace { span = at; text }))
+                    (* no return type is added: a `main` without one
+                       returns whatever its last expression does *)
+                    Option.map
+                      (fun at -> Err.FReplace { span = at; text = "needs " ^ String.concat ", " uniq ^ " " })
+                      (before_do lines ~file c)
                 in
                 (match params_edit, needs_edit with
                  | Some ps, Some n -> Some (Err.FMulti (ps @ [ n ]))

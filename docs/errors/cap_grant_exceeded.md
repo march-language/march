@@ -8,7 +8,7 @@ permalink: /docs/errors/cap_grant_exceeded/
 
 # `cap_grant_exceeded`: the program reaches a capability `main` was not granted
 
-`main`'s capability parameters are the program's grant: everything the program
+`main`'s `needs` clause is the program's grant: everything the program
 can do, through any chain of calls, must fit inside it. This error points at a
 use (a builtin call) that needs a capability outside the grant, and labels each
 call on the way from `main` to it. A module's `needs` line does not raise the
@@ -35,8 +35,8 @@ end
 
 ## The fix
 
-Grant `main` the capability too, by adding a parameter for it (or remove the
-use):
+Grant `main` the capability too, by adding it to `main`'s `needs` clause (or remove
+the use):
 
 ```march
 mod Main do

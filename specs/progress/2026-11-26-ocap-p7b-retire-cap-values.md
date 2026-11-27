@@ -51,7 +51,15 @@ Follows phase 7a (`2026-11-24-ocap-p7a-mock.md`) and its gap fixes
   returning `Result((), CapError)`; the stdlib mints with `mint_cap()`.
 - **Where `main` is**: a file's `main` under `march check` (which wraps each file in a
   synthetic `LibCheck` module) is recognised as the entry, so its deprecated `Cap` form
-  warns there as under `--check` and its `needs` clause is not a bound point.
+  warns there as under `--check`. Its `needs` clause stays a bound point there, since
+  `check_main_grant` sees only a top-level `main`: it is judged as a bound, as before.
+- **Retirement everywhere**: the retirement pass also runs in `check_module_with_env` (the
+  REPL, `--shell`, the editor's incremental check), and a nested entry `main` (no top-level
+  one, `Cap_request.entry_main`) gets the deprecation warning, not the hard error.
+- **`cap_grant`'s fix** writes the clause before the `do` (after any return type), or the
+  module `needs` line when the module has none and no other diagnostic adds one.
+- **`--topology-isolate-foreign`** checks a hook's `needs IO.Foreign` clause, the form
+  that replaced its `Cap(IO.Foreign)` parameter.
 - **`--cap-sandbox`**: the embedded profile counts `main`'s `needs` clause among the
   program's own capabilities (`own_caps_of_this_module`, `bin/main.ml`), as `main`'s `Cap`
   parameter types were; without it a `needs`-form server was denied network.

@@ -103,13 +103,19 @@ end|}
 (* An IO cap has no declaring module, so the declaring-module rule has nothing
    to bind to.  Outside a --test build this must be refused outright; the
    test-build admission is a separate, build-mode-gated path. *)
-let impl_io_cap = bad "cap_impl on an IO cap is rejected in a normal build" {|mod App do
+(* The `Cap(IO.Console)` parameter is itself retired (ocap phase 7b), so
+   "some error" would hold without the check this pins: assert its message. *)
+let impl_io_cap =
+  Alcotest.test_case "cap_impl on an IO cap is rejected in a normal build" `Quick (fun () ->
+      let ctx = typecheck {|mod App do
   needs IO.Console
   type Ops = { write : (String) -> () }
   fn boot(c : Cap(IO.Console)) : Cap(IO.Console) do
     cap_impl(c, { write: fn s -> println(s) })
   end
-end|}
+end|} in
+      Alcotest.(check bool) "an IO capability has no dictionary" true
+        (has_error_with ctx "an IO capability has no dictionary to attach"))
 
 (* Same forge vector [check_mint_cap_sites] rejects: a generalized let-bound
    lambda whose result cap never gets pinned is a supplier polymorphic in the
@@ -274,7 +280,8 @@ let impl_io_cap_test_build =
   end
 end|})
       in
-      Alcotest.(check bool) "refused under --test" true (has_errors ctx))
+      Alcotest.(check bool) "refused under --test" true
+        (has_error_with ctx "an IO capability has no dictionary to attach"))
 
 (* ── runtime: the dictionary actually dispatches ──────────────────────── *)
 

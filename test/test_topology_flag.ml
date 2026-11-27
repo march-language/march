@@ -354,6 +354,19 @@ let test_foreign_needs_isolation () =
   let (_, _, err) = run ~src ~digest_text:d () in
   Alcotest.(check bool) "only with the flag" false (contains err "is not isolated")
 
+(* The hook half: a hook asks for `IO.Foreign` with its `needs` clause (it once
+   took a `Cap(IO.Foreign)` parameter; ocap phase 7b retired those). *)
+let test_foreign_hook_needs_isolation () =
+  let h = {|
+    fn start(_node : Cap(ClusterNode.Live)) : Env needs IO.Foreign do { factor: 10 } end
+|} in
+  let src = entry_src ~back:(h ^ serve_one) () in
+  let d = digest () in
+  expect_error (run ~flags:"--topology-isolate-foreign" ~src ~digest_text:d ())
+    "hook 'App.Back.start' asks for `needs IO.Foreign`, but the pool is not isolated";
+  let (_, _, err) = run ~src ~digest_text:d () in
+  Alcotest.(check bool) "only with the flag" false (contains err "is not isolated")
+
 let test_unknown_pool_flag () =
   expect_error (run ~flags:"--topology-pools nope" ~src:ok_src ~digest_text:(digest ()) ())
     "--topology-pools: no pool \"nope\" in the topology"
@@ -501,6 +514,7 @@ let tests = [
   Alcotest.test_case "a hook that still takes a Cap(P) is refused" `Quick test_hook_cap_beyond_written_caps;
   Alcotest.test_case "a hook that reaches beyond the written caps" `Quick test_reach_beyond_written_caps;
   Alcotest.test_case "IO.Foreign in a non-isolated pool, when opted in" `Quick test_foreign_needs_isolation;
+  Alcotest.test_case "a hook asking for IO.Foreign in a non-isolated pool, when opted in" `Quick test_foreign_hook_needs_isolation;
   Alcotest.test_case "a role granted Actor.Introspect: main requests it" `Quick test_actor_kind_role_grant_ok;
   Alcotest.test_case "an Actor.Introspect grant beyond the pool's written caps" `Quick test_actor_kind_grant_beyond_written_caps;
   Alcotest.test_case "a role that reaches Actor.Introspect beyond the written caps" `Quick test_actor_kind_reach_beyond_written_caps;

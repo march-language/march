@@ -735,15 +735,6 @@ help: add `IO.FileWrite` to `main`'s request (its `needs` clause, or the module'
 9 +   fn main() needs IO.Console, IO.FileWrite do
 
     run `march --explain cap_grant_exceeded`
-
-
--- CAPABILITY ----------------------- missing-needs.march
-
-`main` is bounded by `needs IO.Console`, but reaches `IO.FileWrite` (via save). [cap_bound]
-help: add `IO.FileWrite` to the bound, or remove the use.
-
-9 |   fn main() needs IO.Console do
-                ^^^^^^^^^^^^^^^^
 ```
 <!-- /error-tour -->
 

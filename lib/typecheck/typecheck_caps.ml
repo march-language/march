@@ -870,14 +870,6 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       true
     | None -> false
   in
-  (* The program's entry `main`: bare at the entry module, and one file
-     module down under `march check`, which wraps each checked file in a
-     synthetic [LibCheck] module ([bin/main.ml]'s [run_check_cmd]). *)
-  let is_entry_main (qname : string) =
-    qname = "main"
-    || (env.current_module = "LibCheck" && env.cap_qual_prefix = ""
-        && cap_qname_prefix = mod_name.Ast.txt && qname = mod_name.Ast.txt ^ ".main")
-  in
   let record_fn_bound ?(origin = Fn_decl) ~(qname : string) (def : Ast.fn_def) : unit =
     match def.Ast.fn_needs with
     | None -> ()
@@ -905,7 +897,11 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          ocap phase 7b every program asks this way, and a bound point makes
          [check_fn_bounds] solve rows over the whole environment, which grows
          without limit in a long-lived env (the LSP, the property suite). *)
-      if not (is_entry_main qname && origin = Fn_decl) then
+      (* Under `march check` (each file wrapped in a synthetic [LibCheck]
+         module) a file's `main` is one level down, where [check_main_grant]
+         does not see it; there its clause stays a bound point, so it is
+         still judged. *)
+      if not (qname = "main" && origin = Fn_decl) then
         Hashtbl.replace env.fn_bound_points qname
           { fb_caps = List.sort_uniq String.compare bound; fb_span = nsp;
             fb_site = def.Ast.fn_name.Ast.span; fb_origin = origin }
@@ -2223,7 +2219,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               | [] -> ""
               | os ->
                 Printf.sprintf "; its code also reaches %s"
-                  (String.concat ", " (List.map (fun c -> Printf.sprintf "`Cap(%s)`" c) os)))
+                  (String.concat ", " (List.map (fun c -> Printf.sprintf "`%s`" c) os)))
              (if others = [] then "this" else "these")
              display_lines })
   ;

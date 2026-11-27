@@ -10301,7 +10301,10 @@ let test_cap_missing_needs_error () =
       cap
     end
   end|} in
-  Alcotest.(check bool) "undeclared Cap is an error" true (has_errors ctx)
+  (* The parameter is also retired (ocap phase 7b): assert Check 1's own
+     message, not merely that something is wrong. *)
+  Alcotest.(check bool) "undeclared Cap is an error" true
+    (has_error_with ctx "`IO` is not declared in `needs`")
 
 (* Module declares needs IO but never uses Cap(IO) anywhere — should warn *)
 let test_cap_unused_needs_warning () =
@@ -10347,7 +10350,7 @@ let test_cap_needs_wrong_subtype () =
     end
   end|} in
   Alcotest.(check bool) "needs IO.Network does not cover Cap(IO.FileRead): error" true
-    (has_errors ctx)
+    (has_error_with ctx "`IO.FileRead` is not declared in `needs`")
 
 (* Multiple needs declarations are supported *)
 let test_cap_multiple_needs () =
@@ -10681,14 +10684,19 @@ let test_proof_cap_pfn_forge_error () =
      which was doubly wrong: R2 removed `root_cap` from ordinary code, and
      `root_cap()` (the callable spelling) was ALREADY a typecheck error in its
      own right — so this assertion passed whether or not Check 6 fired at all.
-     Taking the capability as a parameter makes the test non-vacuous. *)
+     Taking the capability as a parameter made the test non-vacuous, until
+     ocap phase 7b retired `Cap(IO)` parameters and `cap_narrow` (each an
+     error of its own): the mint is now `mint_cap()`, and the assertion names
+     Check 6's message. *)
   let src = {|mod Db do
     proof cap Migrated
     needs IO
-    pfn bad_private_forge(c : Cap(IO)) : Cap(Db.Migrated) do cap_narrow(c) end
+    pfn bad_private_forge() : Cap(Db.Migrated) do mint_cap() end
+    fn migrated() : Cap(Db.Migrated) do bad_private_forge() end
   end|} in
   let ctx = typecheck src in
-  Alcotest.(check bool) "proof cap pfn forge: error for private function in declaring module" true (has_errors ctx)
+  Alcotest.(check bool) "proof cap pfn forge: error for private function in declaring module" true
+    (has_error_with ctx "The private function `bad_private_forge` in `Db` cannot mint")
 
 let test_proof_cap_pfn_passthrough_ok () =
   (* A pfn inside the declaring module CAN pass a proof cap through —

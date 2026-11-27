@@ -1534,8 +1534,9 @@ Inputs:
 The two table commands print the table instead of a record per actor. For the
 rows as values, call `Recon.top(intro, "mailbox", 10)` (a list of `TopRow`).
 
-Capabilities are pre-bound names: `console` (`Cap(IO.Console)`), `clock`,
-`intro` (`Cap(Actor.Introspect)`), `debug` (`Cap(Actor.Debug)`).
+Two capabilities are pre-bound names: `intro` (`Cap(Actor.Introspect)`) and `debug`
+(`Cap(Actor.Debug)`). Console and clock operations need no name: they use the current
+authority.
 
 ### How values print
 

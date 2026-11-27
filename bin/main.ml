@@ -4190,8 +4190,8 @@ let compile filename =
         | d :: rest when no_needs && prints ->
           { d with March_errors.Errors.notes = d.March_errors.Errors.notes @ [
                 "After this is fixed, `main` will also need permission to print: add \
-                 `needs IO.Console` to the module, and give `main` the grant, \
-                 `fn main(_console : Cap(IO.Console))`." ] } :: rest
+                 `needs IO.Console` to the module, and ask for it in `main`, \
+                 `fn main() needs IO.Console do`." ] } :: rest
         | _ -> diags in
       (* The fix is shown under the error with the tier it earned. *)
       let diags = Fix_verify.verify_parse ~filename ~src diags in

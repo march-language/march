@@ -386,7 +386,7 @@ single error naming all four once (each other capability's first use is a label)
 with one fix that inserts all four `needs` lines at once:
 
 ```
--- CAPABILITY -- `main` prints, but module `Main` declares no `needs IO.Console`; its code also reaches `Cap(IO.FileWrite)`, `Cap(IO.Random)`, `Cap(Time.Clock)`.
+-- CAPABILITY -- `main` prints, but module `Main` declares no `needs IO.Console`; its code also reaches `IO.FileWrite`, `IO.Random`, `Time.Clock`.
 hint: add these to the module body —
         needs IO.Console
         needs IO.FileWrite

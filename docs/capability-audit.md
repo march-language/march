@@ -22,8 +22,8 @@ read: every module states the capabilities it needs, and the compiler checks
 those declarations against what the code does.
 
 Every route a module can use to reach a capability must be covered by its
-`needs`, or the module does not compile: a capability passed as a value (a
-function taking `Cap(IO.FileWrite)`), a capability builtin called directly
+`needs`, or the module does not compile: a function's own `needs` clause, a
+capability builtin called directly
 (`file_write(path, data)`, an error since 2026-08-06; it was only a warning
 before), and a standard-library wrapper such as `File.write` (caught by the
 [capability upper limit]({{ site.baseurl }}/docs/capabilities/#cap-strict),

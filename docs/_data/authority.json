@@ -25,7 +25,7 @@
     "probe": "mod Probe do\n  needs IO.FileWrite\n  needs IO.Clock\n  needs IO.Spawn\n"
   },
   "generated": {
-    "commit": "594c80d2e",
+    "commit": "37a63b0e2",
     "date": "2026-11-26",
     "inputs_sha256": "9465d0e6849f19ec1481188a8df75e7f413c82720cf4aa0bf15374e0fbd2ec37"
   },
@@ -1185,7 +1185,7 @@
     "ceiling": {
       "exit": 1,
       "headline": "`main` is granted `needs IO.Clock, IO.FileWrite`, but the program reaches `IO.NetConnect` (reached from `main`: main \u2192 Probe.report \u2192 Socket.connect). The grant is a ceiling on the WHOLE program \u2014 declaring `needs IO.NetConnect` does not raise it. [cap_grant_exceeded]",
-      "output": "-- CAPABILITY ----------------------------- ceiling.march\n\n`main` is granted `needs IO.Clock, IO.FileWrite`, but the program reaches `IO.NetConnect` (reached from `main`: main \u2192 Probe.report \u2192 Socket.connect). The grant is a ceiling on the WHOLE program \u2014 declaring `needs IO.NetConnect` does not raise it. [cap_grant_exceeded]\nhelp: add `IO.NetConnect` to `main`'s request (its `needs` clause, or the module's `needs` line when `main` has no clause), or request all of `IO`, or remove the use.\n\n21 |   fn main() : () needs IO.FileWrite, IO.Clock do\n       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n\n    fix (`forge fix` applies it):\n\n21 -   fn main() : () needs IO.FileWrite, IO.Clock do\n21 +   fn main() : () needs IO.FileWrite, IO.Clock, IO.NetConnect do\n\n    run `march --explain cap_grant_exceeded`\n\n\n-- CAPABILITY ----------------------------- ceiling.march\n\n`main` is bounded by `needs IO.Clock, IO.FileWrite`, but reaches `IO.NetConnect` (via Probe.report \u2192 Socket.connect). [cap_bound]\nhelp: add `IO.NetConnect` to the bound, or remove the use.\n\n21 |   fn main() : () needs IO.FileWrite, IO.Clock do\n                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n",
+      "output": "-- CAPABILITY ----------------------------- ceiling.march\n\n`main` is granted `needs IO.Clock, IO.FileWrite`, but the program reaches `IO.NetConnect` (reached from `main`: main \u2192 Probe.report \u2192 Socket.connect). The grant is a ceiling on the WHOLE program \u2014 declaring `needs IO.NetConnect` does not raise it. [cap_grant_exceeded]\nhelp: add `IO.NetConnect` to `main`'s request (its `needs` clause, or the module's `needs` line when `main` has no clause), or request all of `IO`, or remove the use.\n\n21 |   fn main() : () needs IO.FileWrite, IO.Clock do\n       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n\n    fix (`forge fix` applies it):\n\n21 -   fn main() : () needs IO.FileWrite, IO.Clock do\n21 +   fn main() : () needs IO.FileWrite, IO.Clock, IO.NetConnect do\n\n    run `march --explain cap_grant_exceeded`\n",
       "shown": "fn main() : () needs IO.FileWrite, IO.Clock do\n  Probe.report(\"/tmp\")\nend\n"
     },
     "undeclared": {

@@ -94,6 +94,7 @@ type fn_info = {
   fi_params : (string * ty option) list;
   fi_ret    : ty option;
   fi_path   : string list;   (** enclosing module path, entry name first *)
+  fi_needs  : string list;   (** the kinds of its `needs` clause, as written *)
 }
 
 type actor_info = {
@@ -161,7 +162,12 @@ let collect ~entry ~(entry_decls : decl list) ~(imports : decl list) : facts =
           (match def.fn_clauses with
            | c :: _ ->
              Hashtbl.replace f.fns (qualify path def.fn_name.txt)
-               { fi_params = params_of c; fi_ret = def.fn_ret_ty; fi_path = path }
+               { fi_params = params_of c; fi_ret = def.fn_ret_ty; fi_path = path;
+                 fi_needs =
+                   (match def.fn_needs with
+                    | Some (paths, _) ->
+                      List.map (fun (p, _) -> String.concat "." (List.map (fun (n : name) -> n.txt) p)) paths
+                    | None -> []) }
            | [] -> ())
         | DActor (_, nm, a, _) ->
           Hashtbl.replace f.actors (qualify path nm.txt)
@@ -262,11 +268,6 @@ let grants_for f (r : role) =
   | Some pi -> Option.value ~default:[] (List.assoc_opt r.r_role pi.pi_grants)
   | None -> []
 
-(* The grants a body takes as `Cap(P)` parameters: the IO kinds.  An actor
-   kind is used through the body's own checked call. *)
-let param_grants_for f (r : role) =
-  List.filter (March_caps.Cap_lattice.cap_subsumes "IO") (grants_for f r)
-
 
 let hook_info f (p : pool) = match p.p_start with Some s -> Hashtbl.find_opt f.fns s | None -> None
 
@@ -332,7 +333,11 @@ let check ?(foreign_isolated = false) ?pools (f : facts) (t : t) : string list =
             err "pool \"%s\": hook '%s' takes %d parameters; it takes one, the node, `Cap(ClusterNode.Live)` (since capability values were retired a hook takes no `Cap(P)`: it uses the current authority)"
               p.p_name s (List.length hi.fi_params));
          if hi.fi_ret = None then
-           err "pool \"%s\": hook '%s' needs a declared return type: it is the environment its roles' bodies receive" p.p_name s
+           err "pool \"%s\": hook '%s' needs a declared return type: it is the environment its roles' bodies receive" p.p_name s;
+         (* A hook asks for `IO.Foreign` with its `needs` clause, as it once
+            did with a `Cap(IO.Foreign)` parameter (ocap phase 7b). *)
+         if foreign_isolated && not p.p_isolate && List.mem "IO.Foreign" hi.fi_needs then
+           err "pool \"%s\": hook '%s' asks for `needs IO.Foreign`, but the pool is not isolated (`isolate = true`)" p.p_name s
        | _ -> ());
       List.iter (fun rn ->
           match role_by_name t rn with

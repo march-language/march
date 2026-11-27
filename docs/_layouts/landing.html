@@ -525,7 +525,7 @@
       <div class="m-feature-card">
         <p class="m-feature-label">Authority</p>
         <h3 class="m-feature-h3">Give code only the authority it needs</h3>
-        <p class="m-feature-p"><code>main</code>'s capability parameter is the program's grant. Everything it reaches has to fit under it: every helper, every stdlib call, every dependency. Reach past it and the build fails, naming the chain that got there.</p>
+        <p class="m-feature-p"><code>main</code>'s <code>needs</code> clause is the program's grant. Everything it reaches has to fit under it: every helper, every stdlib call, every dependency. Reach past it and the build fails, naming the chain that got there.</p>
         <pre class="m-feature-pre"><code id="grant-code"></code></pre>
       </div>
 
@@ -791,11 +791,11 @@ const HERO_EXAMPLES = [
   end
 end
 
-fn main(cap : Cap(IO.Console)) do
+fn main() needs IO.Console do
   send(spawn(Logger), Log("started"))
 end
 
--- ! main is granted Cap(IO.Console), but
+-- ! main is granted needs IO.Console, but
 -- ! the program reaches IO.FileWrite
 -- ! (main → Logger → Logger_Log).` },
   { label: 'Actors', learn: '/docs/actors/', code: `actor Counter do
@@ -950,12 +950,12 @@ run_until_idle()`;
 
 const GRANT = `mod Report do
   needs IO.Console
-  fn main(cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println("report done")
     save_to_disk()         -- a helper that calls file_write
   end
 end
--- ! \`main\` is granted Cap(IO.Console), but the program
+-- ! \`main\` is granted \`needs IO.Console\`, but the program
 -- ! reaches IO.FileWrite (main → save_to_disk). The grant is
 -- ! a ceiling on the WHOLE program; declaring \`needs
 -- ! IO.FileWrite\` does not raise it.`;

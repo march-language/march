@@ -10836,7 +10836,7 @@ let main_request_caps (decls : Ast.decl list) (def : Ast.fn_def)
 let launch_request : Ast.module_ -> string * bool =
   March_ast.Cap_request.launch_request
 
-let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
+let check_main_grant ?rows ?mod_name (env : env) (decls : Ast.decl list) : unit =
   (* [rows] lets the caller hand in an already-solved row table. Stage C made
      the flat closure a projection of that solve, and stage D added a second
      end-of-module consumer ([check_fn_grants]) — so without sharing, every
@@ -10939,14 +10939,44 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
             flip is the only migration help code outside this repo gets.
 
             Since ocap phase 7b the grant is a `needs` clause: the fix writes
-            one after the (empty) parameter list.  A `main` with a return type
-            already has `: T` there; then the clause belongs after it, which
-            this fix does not find, so it writes `needs ...` right after the
-            parameter list, which is valid only without a return type. *)
+            one before the `do` that opens `main`'s body, so after any return
+            type ([Typecheck_retire.needs_insert_point]).  Without the source
+            text it falls back to right after the parameter list, which is
+            valid only without a return type. *)
+         let main_def =
+           List.find_map
+             (function Ast.DFn (def, _) when def.Ast.fn_name.txt = "main" -> Some def | _ -> None)
+             decls
+         in
+         let has_module_needs = List.exists (function Ast.DNeeds _ -> true | _ -> false) decls in
+         (* Another diagnostic (a missing `needs` for an import, say) may
+            already add a line after the module header; two such lines would
+            both be applied, so then the clause on `main` is the fix, which
+            verifies once that line is in. *)
+         let header_taken (mn : Ast.name) =
+           List.exists (fun (d : Err.diagnostic) ->
+               (match d.Err.fix with
+                | Some { Err.edit = Err.FInsert { after_line; _ }; _ } -> after_line = mn.Ast.span.Ast.start_line
+                | _ -> false)
+               (* their fix, a module `needs` line, may be attached later *)
+               || List.mem (Err.Code.slug_of d.Err.code)
+                    [ "import_cap_missing"; "cap_needs"; "cap_ceiling"; "extern_needs_foreign" ])
+             env.errors.Err.diagnostics
+         in
          let grant_fix =
-           Err.FReplace { span = { params_span with Ast.start_line = params_span.Ast.end_line;
-                                                     start_col = params_span.Ast.end_col };
-                          text = Printf.sprintf " needs %s" suggested } in
+           match mod_name, Option.bind main_def Typecheck_retire.needs_insert_point with
+           | Some (mn : Ast.name), _ when not has_module_needs && mn.Ast.span.Ast.file <> "" && not (header_taken mn) ->
+             (* No module `needs` line at all: a clause on `main` would lie
+               outside the module's `needs` (`cap_bound_needs`).  The
+               module's line is `main`'s request when `main` has no clause,
+               so writing it is the whole fix. *)
+             Err.FInsert { after_line = mn.Ast.span.Ast.start_line;
+                           text = String.concat "\n" (List.map (fun c -> "  needs " ^ c) named) }
+           | _, Some at -> Err.FReplace { span = at; text = Printf.sprintf "needs %s " suggested }
+           | _, None ->
+             Err.FReplace { span = { params_span with Ast.start_line = params_span.Ast.end_line;
+                                                       start_col = params_span.Ast.end_col };
+                            text = Printf.sprintf " needs %s" suggested } in
          (* `main`'s own `needs` clause, when it has one: with an empty
             request that can only be `needs ()`. *)
          let main_needs_span =
@@ -13733,7 +13763,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   let cap_rows = fn_capability_rows_tbl ~with_rows:false final_env in
   dump_cap_rows final_env;
   refine_cap_mismatches final_env m.Ast.mod_decls;
-  check_main_grant ~rows:cap_rows final_env m.Ast.mod_decls;
+  check_main_grant ~rows:cap_rows ~mod_name:m.Ast.mod_name final_env m.Ast.mod_decls;
   check_fn_bounds ~rows:cap_rows final_env;
   check_restrict_reach ~rows:cap_rows final_env;
   (* Dependency grants: the reached code of each granted package, held
@@ -14076,6 +14106,9 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
   (* Pass 3: tail-call enforcement *)
   check_nonregular_types errors m.Ast.mod_decls;
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
+  (* The retired capability forms (ocap phase 7b) are refused at the REPL, in
+     `--shell` and in the editor's incremental check as by [check_module_core]. *)
+  Typecheck_retire.check_module ~iter_expr errors m.Ast.mod_decls;
   (errors, type_map)
 
 (** Like [check_module_with_env] but also returns the final typing env.

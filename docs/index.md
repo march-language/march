@@ -23,16 +23,16 @@ March checks more than types and function signatures. Side effects are part of t
 
 ### Give code only the authority it needs
 
-`main`'s capability parameter is the program's grant, and everything the program can
-reach has to fit under it: every helper, every stdlib call, every dependency. Declare
-`Cap(IO.Console)` and the build fails the moment anything in that closure opens a file
+`main`'s `needs` clause is the program's grant, and everything the program can
+reach has to fit under it: every helper, every stdlib call, every dependency. Ask for
+`needs IO.Console` and the build fails the moment anything in that closure opens a file
 or a socket, naming the chain that got there.
 
 ```march
 mod Report do
   needs IO.Console
 
-  fn main(cap : Cap(IO.Console)) : () do
+  fn main() : () needs IO.Console do
     println("report done")      -- fine
     save_to_disk()              -- a helper that calls file_write
   end
@@ -40,11 +40,11 @@ end
 ```
 
 ```
-`main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite`
+`main` is granted `needs IO.Console`, but the program reaches `IO.FileWrite`
 (reached from `main`: main → save_to_disk). The grant is a ceiling on the WHOLE
 program — declaring `needs IO.FileWrite` does not raise it.
-help: add a `Cap(IO.FileWrite)` parameter to `main`, or widen the grant to `Cap(IO)`,
-or remove the use.
+help: add `IO.FileWrite` to `main`'s request (its `needs` clause, or the module's
+`needs` line when `main` has no clause), or request all of `IO`, or remove the use.
 ```
 
 Every module also declares what it touches with `needs`, and the compiler checks that
@@ -67,7 +67,7 @@ mod ChunkReader do
   tag Open                                   --     tracked Open vs Closed
   tag Closed
 
-  fn open(cap : Cap(IO.FileRead), path : String) : File(Open) do ... end
+  fn open(path : String) : File(Open) needs IO.FileRead do ... end
 
   fn read_chunk(
     f      : File(Open),

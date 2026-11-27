@@ -163,7 +163,7 @@ let test_attenuation_widening_is_rejected () =
 end|} in
   Alcotest.(check bool)
     "Cap(IO.Console) -> Cap(IO.FileWrite) is rejected: a sibling is not a parent"
-    true (has_errors ctx)
+    true (has_error_with ctx "`Cap(IO.Console)` cannot be widened to `Cap(IO.FileWrite)`")
 
 (* ── R3 under return-type dispatch (2026-09-09) ───────────────────────────
 
