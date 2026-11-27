@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: is not used after this call
+mod Main do
+  needs IO.Console
+  needs IO.NetListen
+  needs IO.NetConnect
+
+  fn main() do
+    let l = match Authority.must(Socket.listen(0)) do
+      Ok(l) -> l
+      Err(e) -> panic(Socket.error_message(e))
+    end
+    let port = match Socket.local_port(l) do
+      Ok(p) -> p
+      Err(_) -> 0
+    end
+    match Authority.must(Socket.connect("127.0.0.1", port)) do
+      Ok(_) -> println("connected")
+      Err(e) -> println("refused: " ++ Socket.error_message(e))
+    end
+  end
+end

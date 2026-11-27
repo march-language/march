@@ -28,6 +28,13 @@ val empty_env : env
 
 (** {1 Entry point} *)
 
+(** Lazy lowering of stdlib fn bodies (see [lower_module]).
+    [lz_extra_roots ()]: the functions the passes between lowering and the
+    pre-mono prune may add calls of (e.g. [Auth_rt.minted_callees]). *)
+type lazy_bodies = {
+  lz_extra_roots : unit -> string list;
+}
+
 val lower_module :
   ?type_map:(Ast.span, Typecheck.ty) Hashtbl.t ->
   ?stdlib_context:Ast.decl list ->
@@ -35,8 +42,19 @@ val lower_module :
   ?hot_reload:bool ->
   ?shadow_builtins:bool ->
   ?resumable:bool ->
-  ?launch:bool -> Ast.module_ -> Tir.tir_module
-(** [launch] (default [false]): the module is a program, so its entry calls
+  ?launch:bool ->
+  ?lazy_bodies:lazy_bodies -> Ast.module_ -> Tir.tir_module
+(** [lazy_bodies] (default: none, eager): lower a stdlib module fn's body only
+    when [Dce_pre_mono.walk] reaches it from the pre-mono prune's roots plus
+    [lz_extra_roots ()] (asked once Pass 2 is done), and leave the others as
+    stubs ([Tir_names.unlowered_marker]) that the prune removes.  The emitted
+    program is the same as eager lowering's.  Only for a pipeline that runs
+    the prune on this module with nothing in between that could reach a stub:
+    the native compile passes it (bin/main.ml), and every other caller lowers
+    eagerly.  Ignored with [test_mode], [hot_reload], [resumable] or a
+    [stdlib_context].
+
+    [launch] (default [false]): the module is a program, so its entry calls
     [Authority.launch_init] with `main`'s request first (ocap phase 4): at
     the front of [main], or of the setup_all block of a test binary.  The
     program pipelines pass [true]; REPL fragments and analyses do not.

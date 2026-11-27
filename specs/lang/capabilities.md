@@ -895,6 +895,24 @@ mod Wire do
 end
 ```
 
+**A handle is closed at its last use in compiled code.** A handle is released when its last
+reference goes, which in a compiled program is right after the last line that mentions it;
+the interpreter keeps it until the program ends. That is usually what you want, with one
+trap: a `Listener` whose last use is `Socket.local_port` is closed before the next line, so a
+later connect to that port is refused, compiled only.
+
+```march
+let l = ... Socket.listen(0) ...
+let port = ... Socket.local_port(l) ...
+Socket.connect("127.0.0.1", port)      -- refused: l was closed on the line above
+```
+
+Use the listener again where you are done with it (`Socket.close_listener(l)`, or the
+accept loop that serves the port). The compiler warns (`listener_closed_early`) when a
+`Socket.local_port(l)` call is the last mention of `l` in its block and more of the block
+follows. The listener is not kept alive to the end of its scope instead: that would be an
+exception, for one type, to the last-use release that in-place updates rely on.
+
 An operation is refused at run time when it lies outside the current
 authority: `main`'s request, narrowed by `--grant` or `MARCH_GRANT` at launch,
 and by each function `needs` clause and `restrict` block it runs under; see

@@ -381,21 +381,22 @@ let report (m : Tir.tir_module) : unit =
 
 let trmc_ctr = ref 0
 
-(** Reset the fresh-name counter.  Called at the top of every
-    [transform_module], so emitted TIR depends only on the module being
-    transformed and not on how many modules the process transformed before it.
+(** Reset the fresh-name counter.  [transform_module] calls it before each
+    TOP-LEVEL function, so a function's [$trmcN] names depend only on that
+    function: not on how many modules the process transformed before, and not
+    on which functions of this module came before it.
 
-    Without this the counter is monotonic across calls, which makes a
-    function's [$trmcN] names a function of run order.  That is not cosmetic:
-    the CAS cache key is a digest of emitted code, so order-dependent names
-    make two builds of the same source hash differently, and it makes any
-    golden or snapshot over TRMC'd TIR fail depending on what ran first.
-    [Perceus.perceus] resets [_rc_fresh_ctr] at entry for exactly this reason.
+    Without the first the CAS cache key (a digest of emitted code) and any
+    snapshot over TRMC'd TIR depended on run order.  Without the second,
+    adding a function, or lowering functions in another order, renumbered
+    every function after it
+    (specs/progress/2026-11-26-function-local-fresh-counters.md).
 
-    Per-module (rather than cross-call like [Defun.lambda_counter]) is the
-    right granularity because [fresh_var] only mints FUNCTION-LOCAL variable
-    names: two modules both using [$trmc1] never collide, since the names
-    never escape the function body they are bound in. *)
+    Per function is sound because [fresh_var] only mints FUNCTION-LOCAL
+    variable names: a function, its nested local fns and the [$dps] helper
+    made from them are all rewritten between two resets, so their names are
+    distinct from each other, and a name never escapes the body it is bound
+    in. *)
 let reset_counter () = trmc_ctr := 0
 
 let fresh_var (ty : Tir.ty) : Tir.var =
@@ -624,9 +625,9 @@ let rec transform_nested ~(on_decline : string -> string -> unit)
 (** Apply TRMC across a module.  Unconditional: every pipeline that lowers
     runs it (compiled, REPL-JIT, LSP, contract check). *)
 let transform_module (m : Tir.tir_module) : Tir.tir_module =
-  reset_counter ();
   let report = Sys.getenv_opt "MARCH_TRMC_REPORT" <> None in
   let out = List.concat_map (fun fn ->
+    reset_counter ();
     (* No silent caps: a function the ANALYSIS considers transformable but
        the TRANSFORM declines is a coverage gap, and it must be visible in
        the report rather than inferred from a missing TRMCXFORM line.  The

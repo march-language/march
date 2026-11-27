@@ -24,23 +24,43 @@ module Typecheck = March_typecheck.Typecheck
 
 (* ── Fresh name generation ──────────────────────────────────────── *)
 
-(** Monotonic fresh-name counter ($lamN/$tN/$pN/$jpN/…).
+(** Fresh names for a body's temporaries ([$t7], [$f3], [$p1], [$guard2],
+    [$jp_clo4], …): FUNCTION-LOCAL names, numbered per top-level function.
 
-    NOT converted to an env field (Wave 3 Task 8): a pure accumulator —
-    mutated without restore across the entire module traversal, reset to 0
-    exactly once per [lower_module] call via [reset_counter ()] (that
-    per-call restart is load-bearing: the TIR snapshot corpus and the REPL
-    JIT's per-fragment numbering both depend on it — see
-    test/test_snapshots.ml's determinism note). The direct lower.ml
-    analogue of perceus's [_rc_fresh_ctr], which chunk-1 Task 4 kept as a
-    ref under the same "accumulator/table-build semantics" law clause. *)
-let _lower_counter = ref 0
+    [_fn_counter] restarts at 0 for each top-level fn's body
+    ([enter_fn_body] below), so the names in a function depend on that
+    function alone, not on how many functions were lowered before it or in
+    which order (specs/progress/2026-11-26-function-local-fresh-counters.md;
+    a module-wide counter renumbered every later function when one was
+    added, and would renumber the whole program under on-demand lowering).
+
+    Code lowered OUTSIDE any function body (the initialiser of an
+    entry-module `let`) draws from [_module_counter] and spells its names
+    [$top_t7]: [lower_module] folds such an initialiser into every function
+    that uses the let, where a plain [$t7] could meet the function's own.
+    Nothing else mints a [$top_] name, so the two sequences cannot collide.
+
+    Both are reset per [lower_module] call ([reset_counter]); a REPL fragment
+    is one such call.  Names that must be unique across the module (a lambda,
+    a join point, a restrict layer: anything that becomes a symbol) do not
+    come from here: [fresh_nested_name]. *)
+let _fn_counter = ref 0
+let _module_counter = ref 0
+let _in_fn_body = ref false
 
 let fresh_name (prefix : string) : string =
-  incr _lower_counter;
-  Printf.sprintf "$%s%d" prefix !_lower_counter
+  if !_in_fn_body then begin
+    incr _fn_counter;
+    Printf.sprintf "$%s%d" prefix !_fn_counter
+  end else begin
+    incr _module_counter;
+    Printf.sprintf "$top_%s%d" prefix !_module_counter
+  end
 
-let reset_counter () = _lower_counter := 0
+let reset_counter () =
+  _fn_counter := 0;
+  _module_counter := 0;
+  _in_fn_body := false
 
 (* ── Structural names for nested functions (B1) ──────────────────────────
    Every function minted while lowering a body (a lambda, an `own(...)` drop
@@ -119,14 +139,44 @@ let current_host ~(mod_prefix : string) () : string =
 let fresh_nested_name ~(host : string) (prefix : string) : string =
   let k = Option.value ~default:0 (Hashtbl.find_opt _nested_ordinals (host, prefix)) in
   Hashtbl.replace _nested_ordinals (host, prefix) (k + 1);
-  (* Still tick the temp counter, as the old [fresh_name "lam"] did: a
-     function-local [$t<n>] never reaches a symbol, and keeping its numbering
-     unchanged keeps the snapshot and IR diffs of this rename symbol-only. *)
-  incr _lower_counter;
   Printf.sprintf "$%s%d_%s" prefix k (Tir_names.structural_tag host)
 
 let fresh_var ?(lin = Tir.Unr) (ty : Tir.ty) : Tir.var =
   { v_name = fresh_name "t"; v_ty = ty; v_lin = lin }
+
+(* ── One top-level function's body ───────────────────────────────────────
+   Whatever lowers the body of ONE top-level fn (a parsed fn, a module-level
+   let's zero-arg fn, an actor handler or spawn glue, a test) brackets it
+   with [enter_fn_body] / [leave_fn_body], or [with_fn_body].  The scope
+   - numbers the body's temporaries from 1 ([_fn_counter]), and
+   - collects the local named fns met inside it; the caller attaches them to
+     the fn ([Provenance.attach_locals]) under the name it has then.
+   Scopes nest (a module lowered lazily in the middle of a body lowers its
+   own functions): each saves and restores the enclosing one, so the outer
+   body's numbering is the same whether or not that happened inside it. *)
+type fn_body_scope = {
+  fb_locals : Provenance.locals;
+  fb_counter : int;
+  fb_in_fn : bool;
+}
+
+let enter_fn_body () : fn_body_scope =
+  let s = { fb_locals = Provenance.enter_locals ();
+            fb_counter = !_fn_counter; fb_in_fn = !_in_fn_body } in
+  _fn_counter := 0;
+  _in_fn_body := true;
+  s
+
+let leave_fn_body (s : fn_body_scope) : Provenance.locals =
+  _fn_counter := s.fb_counter;
+  _in_fn_body := s.fb_in_fn;
+  Provenance.leave_locals s.fb_locals
+
+let with_fn_body (f : unit -> 'a) : 'a * Provenance.locals =
+  let s = enter_fn_body () in
+  match f () with
+  | r -> (r, leave_fn_body s)
+  | exception e -> ignore (leave_fn_body s); raise e
 
 (** Function-typed module-level lets outside the entry module: qualified TIR
     fn name -> the let's value type (a [TFn]).  Such a let is lowered to a
@@ -887,6 +937,80 @@ let _module_alias_snapshots : (string, (string, string) Hashtbl.t) Hashtbl.t ref
    NOT converted to env fields: pure diagnostic accumulators (never
    consulted for a lowering DECISION, only for an optional stderr report),
    reset via [Hashtbl.reset] at [lower_module] entry. *)
+(* ── Alias tables as of a point in Pass 2 (lazy lowering) ────────────────
+   [Lower.lower_module ~lazy_bodies] lowers most stdlib fn bodies after Pass 2,
+   but each must resolve names exactly as it would have at its declaration.
+   Three tables grow during Pass 2: the program-global [_use_aliases] and
+   [_module_aliases], and each module's [current_module_aliases]; the entry
+   file's imports, processed after every stdlib module, would otherwise be
+   visible to a stdlib body lowered late (a user `import U` defining
+   [unwrap_or] changed the code of a stdlib fn that calls the prelude's).
+
+   So while [alias_history] is on, every write is logged with a clock value
+   ([alias_clock]), and a lookup made while [alias_view] is set answers as
+   the table stood at that clock value.  With the history off (every caller
+   but the main compile) a write is a plain [Hashtbl.replace] and a lookup a
+   plain [Hashtbl.find_opt]. *)
+let alias_history = ref false
+let alias_clock = ref 0
+let alias_view = ref max_int   (* [max_int]: the live tables *)
+
+(* Program-global tables: key -> (clock, value before the write), newest
+   first ([Hashtbl.add]). *)
+let use_alias_log : (string, int * string option) Hashtbl.t = Hashtbl.create 0
+let module_alias_log : (string, int * string option) Hashtbl.t = Hashtbl.create 0
+(* Per-module tables are first-wins (a key is written once per table, so an
+   entry written after the view was absent at the view): key -> (the table,
+   clock). *)
+let module_import_log : (string, (string, string) Hashtbl.t * int) Hashtbl.t =
+  Hashtbl.create 0
+
+let reset_alias_history ~(on : bool) =
+  alias_history := on;
+  alias_clock := 0;
+  alias_view := max_int;
+  Hashtbl.reset use_alias_log;
+  Hashtbl.reset module_alias_log;
+  Hashtbl.reset module_import_log
+
+let log_global_write log (tbl : (string, string) Hashtbl.t) (k : string) (v : string) =
+  if !alias_history then begin
+    incr alias_clock;
+    Hashtbl.add log k (!alias_clock, Hashtbl.find_opt tbl k)
+  end;
+  Hashtbl.replace tbl k v
+
+let find_global_as_of log (tbl : (string, string) Hashtbl.t) (k : string) : string option =
+  let cur = Hashtbl.find_opt tbl k in
+  if !alias_view = max_int then cur
+  else
+    (* Newest first: the last write after the view to fold in is the oldest
+       such, and the value it replaced is the table's value at the view. *)
+    List.fold_left (fun acc (t, prev) -> if t > !alias_view then prev else acc)
+      cur (Hashtbl.find_all log k)
+
+(** Write [k -> v] into [_use_aliases]. *)
+let set_use_alias (k : string) (v : string) = log_global_write use_alias_log !_use_aliases k v
+
+(** Write [k -> v] into [_module_aliases]. *)
+let set_module_alias (k : string) (v : string) =
+  log_global_write module_alias_log !_module_aliases k v
+
+(** Write [k -> v] into a module's own import table ([current_module_aliases]). *)
+let set_module_import (tbl : (string, string) Hashtbl.t) (k : string) (v : string) =
+  if !alias_history then begin
+    incr alias_clock;
+    Hashtbl.add module_import_log k (tbl, !alias_clock)
+  end;
+  Hashtbl.replace tbl k v
+
+let find_module_import (tbl : (string, string) Hashtbl.t) (k : string) : string option =
+  if !alias_view <> max_int
+     && List.exists (fun (tb, t) -> tb == tbl && t > !alias_view)
+          (Hashtbl.find_all module_import_log k)
+  then None
+  else Hashtbl.find_opt tbl k
+
 let _alias_candidates : (string, string list) Hashtbl.t = Hashtbl.create 64
 let _alias_reported   : (string, unit) Hashtbl.t = Hashtbl.create 16
 let alias_audit_on = lazy (Sys.getenv_opt "MARCH_ALIAS_AUDIT" <> None)
@@ -1086,7 +1210,7 @@ let resolve_use_alias (env : env) (name : string) : string =
   (* The current module's OWN imports take precedence over the program-global
      table, so [import Connection] in this module resolves [close] to
      Connection.close even if another module globally registered Db.close. *)
-  else match Hashtbl.find_opt env.current_module_aliases name with
+  else match find_module_import env.current_module_aliases name with
   | Some qualified -> qualified
   | None ->
   (* A bare call to a fn of a lexically enclosing module: keep it bare here;
@@ -1107,7 +1231,7 @@ let resolve_use_alias (env : env) (name : string) : string =
      per-module import scoping.  Dotted names fall through to the explicit
      module-alias prefix rewrite below. *)
   match (if String.contains name '.' then None
-         else Hashtbl.find_opt !_use_aliases name) with
+         else find_global_as_of use_alias_log !_use_aliases name) with
   | Some qualified ->
     (* GLOBAL-fallback resolution: the current module did not import this name
        itself.  If several distinct qualified candidates exist program-wide,
@@ -1134,7 +1258,7 @@ let resolve_use_alias (env : env) (name : string) : string =
      | None -> name
      | Some i ->
        let head = String.sub name 0 i in
-       match Hashtbl.find_opt !_module_aliases head with
+       match find_global_as_of module_alias_log !_module_aliases head with
        | Some real_path ->
          real_path ^ String.sub name i (String.length name - i)
        | None -> name)
@@ -1179,6 +1303,18 @@ let _lowered_modules : (string, unit) Hashtbl.t ref = ref (Hashtbl.create 8)
     [lower_fn_def] for the lazily-loaded module's own body) as its first
     argument. *)
 let _ensure_module_lowered : (env -> string -> unit) ref = ref (fun _ _ -> ())
+
+(** The fn whose deferred body lazy lowering ([Lower.lower_module
+    ~lazy_bodies]) is lowering, if any. *)
+let lazy_forcing : string option ref = ref None
+
+(** Called by [_ensure_module_lowered] with a module's name just before it
+    loads that module from disk and appends its fns.  A load happens where
+    the body that names the module is lowered, so lazy lowering, which
+    lowers some bodies late, installs a check here that refuses a load that
+    could land elsewhere than eager lowering puts it (see
+    [Lower.lower_module]).  A no-op otherwise. *)
+let lazy_module_load_hook : (string -> unit) ref = ref (fun _ -> ())
 
 (* ── Interface method resolution ────────────────────────────────── *)
 

@@ -14,16 +14,16 @@ panic("non-exhaustive pattern match")
 
 ## main
 fn main() : () =
-  let $t10 : List(Int) = let $t9 : List(Int) = let $t8 : List(Int) = alloc List.Nil(Int)() in
-alloc List.Cons(1, $t8) in
-bump_head($t9) in
-case $t10 of
-  Cons($f11, $f12) -> dec_rc $t10;
-dec_rc $f12;
-let h : Int = $f11 in
+  let $t3 : List(Int) = let $t2 : List(Int) = let $t1 : List(Int) = alloc List.Nil(Int)() in
+alloc List.Cons(1, $t1) in
+bump_head($t2) in
+case $t3 of
+  Cons($f4, $f5) -> dec_rc $t3;
+dec_rc $f5;
+let h : Int = $f4 in
 println(h)
-  Nil() -> dec_rc $t10;
+  Nil() -> dec_rc $t3;
 println(0)
-  _ -> dec_rc $t10;
+  _ -> dec_rc $t3;
 panic("non-exhaustive pattern match")
 

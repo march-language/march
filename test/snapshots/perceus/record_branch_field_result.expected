@@ -3,23 +3,23 @@ record Rel { seq : Int, signature : String }
 -- fns (3) --
 ## main
 fn main() : () =
-  let $t9 : String = let $t8 : { seq : Int, signature : String } = let $t7 : String = let $t6 : String = int_to_string(1) in
-let $rc_8 : '_ = ++("s", $t6) in
-dec_rc $t6;
+  let $t4 : String = let $t3 : { seq : Int, signature : String } = let $t2 : String = let $t1 : String = int_to_string(1) in
+let $rc_8 : '_ = ++("s", $t1) in
+dec_rc $t1;
 $rc_8 in
-{ seq = 1, signature = $t7 } in
-let $rc_7 : String = ser($t8) in
-dec_rc $t8;
+{ seq = 1, signature = $t2 } in
+let $rc_7 : String = ser($t3) in
+dec_rc $t3;
 $rc_7 in
-let $rc_6 : () = println($t9) in
-dec_rc $t9;
+let $rc_6 : () = println($t4) in
+dec_rc $t4;
 $rc_6;
-let $t11 : String = let $t10 : { seq : Int, signature : String } = { seq = 2, signature = "" } in
-let $rc_5 : String = sig_of($t10) in
-dec_rc $t10;
+let $t6 : String = let $t5 : { seq : Int, signature : String } = { seq = 2, signature = "" } in
+let $rc_5 : String = sig_of($t5) in
+dec_rc $t5;
 $rc_5 in
-let $rc_4 : () = println($t11) in
-dec_rc $t11;
+let $rc_4 : () = println($t6) in
+dec_rc $t6;
 $rc_4
 
 ## ser
@@ -37,9 +37,9 @@ $rc_2
 
 ## sig_of
 fn sig_of(r : { seq : Int, signature : String }) : String =
-  let $t5 : Bool = let $t4 : String = r.signature in
-==($t4, "") in
-case $t5 of
+  let $t2 : Bool = let $t1 : String = r.signature in
+==($t1, "") in
+case $t2 of
   True() -> "-"
   _ -> let $rc_3 : String = r.signature in
 inc_rc $rc_3;

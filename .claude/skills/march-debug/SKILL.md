@@ -168,6 +168,15 @@ the bug is in a mandatory pass, codegen or the runtime. Any build takes
 `--list-passes` names the passes. Each probe is a full compile, so expect about
 twenty of them. `MARCH_BISECT_TIMEOUT` (seconds, default 60) bounds each run.
 
+Two of the switches only save compile time and never change the program:
+`dce-pre-mono` (the reachability prune before Mono) and `lazy-lower` (lower
+only the stdlib fn bodies that prune can reach; the rest stay stubs). A
+compile that dies with `the pre-mono prune reached X, a standard-library
+function whose body lazy lowering did not lower` or `lazy lowering: ...` is a
+lazy-lowering bug: `--disable-pass lazy-lower` works around it, and
+`scripts/lazy-lower-gate.sh FILE` shows whether the two modes emit different
+IR (specs/progress/2026-11-26-lazy-stdlib-lowering.md).
+
 Outside the TIR passes: `MARCH_NO_UNBOX=1`, `MARCH_NO_INLINE_RC=1`, `--no-opt`
 (triage.sh tries these). `MARCH_NO_TRMC` **does not exist** (removed
 2026-09-21; TRMC is mandatory).

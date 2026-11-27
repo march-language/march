@@ -474,7 +474,15 @@ mod Socket do
       end)
   end
 
-  doc "The port l is bound to (the one the OS picked for port 0)."
+  doc """
+  The port l is bound to (the one the OS picked for port 0).
+
+  In a compiled program a Listener is closed at its last use: if this call
+  is the last line that mentions `l`, the listening socket is closed right
+  after it, and a connection to the port is refused. Use `l` again where
+  you are done with it (`close_listener(l)`, or the accept loop). The
+  compiler warns about this case (`listener_closed_early`).
+  """
   fn local_port(l : Listener) : Result(Int, SocketError) do
     with_listener(l, fn fd ->
       match tcp_local_port(fd) do

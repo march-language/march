@@ -2,11 +2,11 @@
 -- fns (2) --
 ## main
 fn main() : () =
-  let $t3 : Int = let $t2 : Option(Int) = alloc Option.Some(7) in
-let $rc_1 : Int = unwrap_or_die($t2) in
-dec_rc $t2;
+  let $t2 : Int = let $t1 : Option(Int) = alloc Option.Some(7) in
+let $rc_1 : Int = unwrap_or_die($t1) in
+dec_rc $t1;
 $rc_1 in
-println($t3)
+println($t2)
 
 ## unwrap_or_die
 fn unwrap_or_die(o : Option(Int)) : Int =

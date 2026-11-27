@@ -1,0 +1,22 @@
+-- A function `needs` clause with a scope gets a run-time frame (ocap phase 4,
+-- lib/tir/auth_rt.ml `frames`): the pass wraps `report` in a call of
+-- `Authority.enter_fn` and builds its layer with `Authority.frame_layer`,
+-- after lowering and before the pre-mono prune, and closures made under it
+-- capture the authority. No body the program wrote calls either stdlib
+-- function, so lazy lowering (lib/tir/lower.ml, `~lazy_bodies`) must lower
+-- them because the pass will call them (`Auth_rt.minted_callees`); without
+-- that the prune reaches an unlowered stub and the compile fails.
+mod LazyLowerFnNeeds do
+  needs IO.Console
+  needs IO.FileRead
+
+  pfn report(xs : List(Int)) : Unit needs IO.Console, IO.FileRead("/srv/") do
+    let doubled = List.map(xs, fn x -> x * 2)
+    println("sum: " ++ int_to_string(List.fold_left(doubled, 0, fn (a, b) -> a + b)))
+    ()
+  end
+
+  fn main() do
+    report([1, 2, 3, 4])
+  end
+end

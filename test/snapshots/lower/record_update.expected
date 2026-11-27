@@ -5,8 +5,8 @@ record Point { x : Int, y : Int }
 fn main() : () =
   let p : { x : Int, y : Int } = { x = 1, y = 2 } in
 let moved : { x : Int, y : Int } = move_right(p) in
-let $t3 : Int = moved.x in
-println($t3)
+let $t1 : Int = moved.x in
+println($t1)
 
 ## move_right
 fn move_right(p : { x : Int, y : Int }) : { x : Int, y : Int } =

@@ -48,8 +48,11 @@
         [$lam<k>_<host>], its apply fn [<lam>$apply$<k>_<host>], a fused
         helper [$fused_mf_<host>_<k>], so a dump depends only on the program
         being lowered, never on what else this process lowered first.
-        [Lower.lower_module] and [Perceus.perceus] still reset their
-        function-local temp counters ($t<n>) at entry.  Verified by the
+        Lowering numbers a function's temporaries ($t<n>, $f<n>, …) per
+        top-level function ([Lower_state.enter_fn_body]), and TRMC its
+        $trmc<n> likewise, so a snapshot's function does not change when
+        another function of its program does; [Perceus.perceus] still
+        resets its $rc_<n> counter once per module.  Verified by the
         determinism canary below and the 3-run check at landing. *)
 
 let update_mode = Sys.getenv_opt "UPDATE_SNAPSHOTS" = Some "1"

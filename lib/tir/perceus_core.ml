@@ -2332,13 +2332,18 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
                 else acc)
               live_before_br s)
       in
+      (* The releases are emitted in name order, and for two compiler-minted
+         names of one kind that must mean the order they were MINTED in:
+         plain string order puts [$f10] before [$f9], so which of two sibling
+         fields was released first changed whenever the numbering moved
+         across a power of ten ([Tir_names.compare_minted_order]). *)
       let prepend body =
-        StringSet.fold (fun name body_acc ->
+        List.fold_left (fun body_acc name ->
           match StringMap.find_opt name env.var_ctx with
           | Some v when v.Tir.v_lin = Tir.Unr && needs_rc env v.Tir.v_ty ->
             Tir.ESeq (decrc_for env v (Tir.AVar v), body_acc)
           | _ -> body_acc
-        ) dead_here body
+        ) body (List.sort Tir_names.compare_minted_order (StringSet.elements dead_here))
       in
       (* Keep the scrutinee's destructuring release ([add_scrutinee_free_for])
          at the HEAD of the arm, with these releases after it.  Codegen

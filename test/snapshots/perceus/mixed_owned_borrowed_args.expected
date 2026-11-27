@@ -12,9 +12,9 @@ borrowed
 ## main
 fn main() : () =
   let s : String = "shared" in
-let $t2 : String = inc_rc s;
+let $t1 : String = inc_rc s;
 both(s, s, 1) in
-let $rc_1 : () = println($t2) in
-dec_rc $t2;
+let $rc_1 : () = println($t1) in
+dec_rc $t1;
 $rc_1
 

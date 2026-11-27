@@ -13738,6 +13738,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      [DMod] per file, so a file's `main` is one level down there. *)
   Typecheck_retire.check_module ~wrapped:(m.Ast.mod_name.Ast.txt = "LibCheck") ~iter_expr final_env.errors
     m.Ast.mod_decls;
+  (* A Listener whose last use is Socket.local_port (decision D-a). *)
+  Listener_lint.check_module ~iter_expr
+    ~own_exprs:Typecheck_caps.module_own_exprs final_env.errors m.Ast.mod_decls;
   check_cap_narrow_sites final_env;
   (* Validate capability declarations for the top-level module *)
   (* The entry module's own name is NOT a prefix segment for cap-closure keys:

@@ -54,6 +54,13 @@ git log is authoritative for exact commits.
   (and fix with) a `needs` clause on `main`, or a `needs` line when the module's is `main`'s
   request, instead of a `Cap` parameter; the old fix could produce `fn main(, ...)`.
 
+- **Compiles lower only the standard-library functions the program can reach.** The
+  native compile used to lower all ~4,200 stdlib module functions to the compiler's IR and
+  then drop the ~4,100 the program never calls; it now lowers a function's body only when
+  something reached names it (hello world: lowering takes about half as long). The
+  generated program is byte-for-byte the same (CI compares the two over the whole IR
+  corpus). `--disable-pass lazy-lower` turns it off.
+
 - **`with_cap` is gone; tests mock with `mock` blocks** (object capabilities, phase 7).
   `with_cap`, and `cap_impl` / `cap_ops_empty` on an IO capability, are removed: write
   `mock IO.Console with { print_line: Some(f) } do ... end` instead (see Added).
@@ -134,6 +141,11 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A warning when a `Listener`'s last use is `Socket.local_port`.** A compiled program
+  closes a handle right after the last line that mentions it, so a later connect to the
+  listener's port is refused, while the interpreter keeps it open. The new
+  `listener_closed_early` warning points at the call; the handles chapter of the
+  capabilities reference explains it.
 - **`mock` blocks for tests** (object capabilities, phase 7). In a test build (`march test`,
   `forge test`, `--test`), `mock SCOPE with HANDLER do ... end` sends the scope's
   interceptable IO operations to the handler record, whose literal names only the
@@ -1423,6 +1435,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **An overflow panic inside a local function names that function's own file and line.** A
+  local function (`fn go(...)` inside another function) was reported at the declaration of
+  whichever local function of the same name the compiler had processed last, so an Int
+  overflow in the standard library's `length` printed a line of `stdlib/shell_render.march`.
+  The same wrong location was in the function table that crash backtraces and
+  `--debug-info` read. Each local function now reports its own declaration, and a
+  top-level standard-library function such as `reverse` or `map`, which could lose its
+  location to a module function of the same name, keeps it.
 - **Roles, topologies and `restrict` handle the actor kinds** (object capabilities, phase
   7). `role R needs Actor.Introspect` (or `Actor.Debug`) is now accepted, and a role whose
   code reaches `Actor.introspect()`, `Actor.pid_from_int` or `Actor.debug()` without that

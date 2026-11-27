@@ -7,9 +7,9 @@ fn main() : () =
 let moved : { x : Int, y : Int } = let $rc_1 : { x : Int, y : Int } = move_right(p) in
 dec_rc p;
 $rc_1 in
-let $t3 : Int = moved.x in
+let $t1 : Int = moved.x in
 dec_rc moved;
-println($t3)
+println($t1)
 
 ## move_right
 fn move_right(p : { x : Int, y : Int }) : { x : Int, y : Int } =

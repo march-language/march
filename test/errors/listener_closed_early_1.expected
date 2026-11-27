@@ -1,0 +1,10 @@
+exit: 0
+-- WARNING: PROGRAM -- errors/listener_closed_early_1.march
+
+`l` is not used after this call, so a compiled program closes the listener here, before the next line runs: a connection to its port is refused. (The interpreter keeps it open, so the program behaves differently there.) Use `l` again where you are done with it, for example `Socket.close_listener(l)`. [listener_closed_early]
+
+12 |     let port = match Socket.local_port(l) do
+                          ^^^^^^^^^^^^^^^^^^^^
+
+
+

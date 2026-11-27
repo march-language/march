@@ -4935,8 +4935,42 @@ let compile filename =
     (* Phase 1: AST after parse+desugar — user file only (no stdlib). *)
     (if !dump_phases then
        phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
+    (* Lazy lowering of stdlib fn bodies (Lower.lower_module ~lazy_bodies):
+       only where the pre-mono prune runs and nothing between lowering and
+       the prune reads functions the program does not reach.  Off, so eager
+       as before: wherever the prune is off; the dumps and query/verify
+       modes, which show every lowered function; a shared object, wasm and
+       test builds; --report-contracts; the TRMC report and alias audit, which
+       read every body; and three ocap features whose passes analyse whole
+       modules before the prune (dependency grants, host-scoped network
+       capabilities, test-build mocking).  The emitted program is the same
+       either way (scripts/lazy-lower-gate.sh). *)
+    let lazy_bodies =
+      let t = parse_target !target_str in
+      let net_scoped () =
+        not (List.for_all (fun (_, ds) -> ds = [])
+               (March_typecheck.Typecheck.declared_net_scopes typecheck_env
+                  ~entry_module:desugared.March_ast.Ast.mod_name.March_ast.Ast.txt)) in
+      if !opt_enabled && !hot_reload_prefix = None && not is_js_target
+         && not (March_tir.Llvm_emit.is_wasm_target t) && t <> March_tir.Llvm_emit.Js
+         && not !compile_so && not !do_test && not !report_contracts
+         && March_tir.Pass_switch.on "dce-pre-mono" && March_tir.Pass_switch.on "lazy-lower"
+         && not !dump_phases && dump_txt = None
+         && !query_collector = None && !query_req = None
+         && not (March_tir.Tir_verify.enabled ())
+         && Sys.getenv_opt "MARCH_TRMC_REPORT" = None
+         && Sys.getenv_opt "MARCH_ALIAS_AUDIT" = None
+         && not (cap_mocking ())
+         && March_caps.Dep_grants.active () = []
+         && not (net_scoped ())
+      then
+        Some { March_tir.Lower.lz_extra_roots = (fun () ->
+            March_tir.Auth_rt.minted_callees ~needs:March_tir.Lower.fn_needs_tbl
+              ~sites:March_tir.Lower.restrict_sites ~grants:March_tir.Lower.fn_grant_tbl) }
+      else None
+    in
     let tir =
-      try March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) ~launch:true desugared
+      try March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) ~launch:true ?lazy_bodies desugared
       with
       | March_errors.Errors.Diagnostic_exn d ->
         (* A positioned rejection of something the compiled backend does not

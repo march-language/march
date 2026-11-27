@@ -3,8 +3,8 @@
 ## first_or_recheck
 fn first_or_recheck(xs : List(String), flag : Bool) : String =
   case xs of
-  Cons($f7, $f8) -> let t : List(String) = $f8 in
-let h : String = $f7 in
+  Cons($f5, $f6) -> let t : List(String) = $f6 in
+let h : String = $f5 in
 case flag of
   True() -> h
   _ -> case xs of
@@ -17,8 +17,8 @@ h2
 
 ## main
 fn main() : () =
-  let $t15 : String = let $t14 : List(String) = let $t13 : List(String) = alloc List.Nil(String)() in
-alloc List.Cons("a", $t13) in
-first_or_recheck($t14, true) in
-println($t15)
+  let $t3 : String = let $t2 : List(String) = let $t1 : List(String) = alloc List.Nil(String)() in
+alloc List.Cons("a", $t1) in
+first_or_recheck($t2, true) in
+println($t3)
 

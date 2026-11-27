@@ -24,18 +24,18 @@ alloc V.A($t12)
 
 ## main
 fn main() : () =
-  let my_id : { name : String, node_id : String } = let $t13 : String = ++("node-", "b") in
-let $t14 : String = ++("pk-", "b") in
-{ name = $t13, node_id = $t14 } in
-let h : { identity : { name : String, node_id : String }, nonce : String } = let $t15 : String = ++("n", "1") in
+  let my_id : { name : String, node_id : String } = let $t1 : String = ++("node-", "b") in
+let $t2 : String = ++("pk-", "b") in
+{ name = $t1, node_id = $t2 } in
+let h : { identity : { name : String, node_id : String }, nonce : String } = let $t3 : String = ++("n", "1") in
 inc_rc my_id;
-{ identity = my_id, nonce = $t15 } in
-let $p17 : V = let $rc_1 : V = enc(h) in
+{ identity = my_id, nonce = $t3 } in
+let $p5 : V = let $rc_1 : V = enc(h) in
 dec_rc h;
 $rc_1 in
-dec_rc $p17;
-let $t16 : String = my_id.node_id in
-let $rc_3 : () = println($t16) in
+dec_rc $p5;
+let $t4 : String = my_id.node_id in
+let $rc_3 : () = println($t4) in
 dec_rc my_id;
 $rc_3
 

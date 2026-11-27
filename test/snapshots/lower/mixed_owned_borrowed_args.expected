@@ -10,6 +10,6 @@ case $t1 of
 ## main
 fn main() : () =
   let s : String = "shared" in
-let $t2 : String = both(s, s, 1) in
-println($t2)
+let $t1 : String = both(s, s, 1) in
+println($t1)
 

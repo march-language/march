@@ -222,6 +222,170 @@ let test_on_emits_function_level_dbg () =
   verify_text "--debug-info IR" ir;
   verify_text "--debug-info IR after inline-RC rewrite" (March_tir.Llvm_rc_inline.rewrite ir)
 
+(* ── Local named fns: each gets ITS OWN declaration's span and host ─────
+   specs/progress/2026-11-26-local-fn-provenance.md.  A local `fn go` keeps
+   its source name through lowering, so a span staged under that bare name
+   was overwritten by whichever `go` was lowered last, and every `go` in the
+   program reported that one's file and line. *)
+
+let local_src = {|mod Test do
+  fn first(n : Int) : Int do
+    fn go(i : Int, acc : Int) : Int do
+      if i == 0 do acc else go(i - 1, acc + 1) end
+    end
+    go(n, 0)
+  end
+
+  fn second(n : Int) : Int do
+    fn go(i : Int, acc : Int) : Int do
+      if i == 0 do acc else go(i - 1, acc + 2) end
+    end
+    go(n, 0)
+  end
+
+  fn both(n : Int) : Int do
+    if n > 0 do
+      fn go(i : Int, acc : Int) : Int do
+        if i == 0 do acc else go(i - 1, acc + 3) end
+      end
+      go(n, 0)
+    else
+      fn go(i : Int, acc : Int) : Int do
+        if i == 0 do acc else go(i - 1, acc + 4) end
+      end
+      go(0 - n, 0)
+    end
+  end
+
+  fn main() : Int do first(3) + second(4) + both(5) end
+end|}
+
+(* Lifted local fns named [go], as (host, line), sorted. *)
+let local_go_rows () =
+  March_tir.Provenance.all ()
+  |> List.filter_map (fun (n, (o : March_tir.Provenance.origin)) ->
+      if starts_with "go$apply$" n || starts_with "go$sh" n || starts_with "go$dps$apply$" n then
+        Some (Option.value ~default:"-" o.host,
+              match o.src_span with Some sp -> sp.March_ast.Ast.start_line | None -> 0)
+      else None)
+  |> List.sort compare
+
+let test_local_fns_keep_their_own_span () =
+  ignore (pipeline_of local_src);
+  Alcotest.(check (list (pair string int)))
+    "each local `go`: its own host and its own declaration line"
+    [ ("both", 18); ("both", 23); ("first", 3); ("second", 10) ]
+    (local_go_rows ())
+
+(* The same program with the two hosts declared in the other order: nothing
+   about a local fn's provenance may depend on which was lowered last. *)
+let test_local_fn_span_is_order_independent () =
+  let swapped = {|mod Test do
+  fn second(n : Int) : Int do
+    fn go(i : Int, acc : Int) : Int do
+      if i == 0 do acc else go(i - 1, acc + 2) end
+    end
+    go(n, 0)
+  end
+
+  fn first(n : Int) : Int do
+    fn go(i : Int, acc : Int) : Int do
+      if i == 0 do acc else go(i - 1, acc + 1) end
+    end
+    go(n, 0)
+  end
+
+  fn main() : Int do first(3) + second(4) end
+end|} in
+  ignore (pipeline_of swapped);
+  Alcotest.(check (list (pair string int))) "hosts swapped in the source"
+    [ ("first", 10); ("second", 3) ] (local_go_rows ())
+
+(* A fn that keeps its bare name (entry module, prelude) declared BEFORE a
+   module fn of the same name: the module fn is noted under the bare name and
+   renamed right after, and that rename took the earlier fn's span and local
+   fns with it. *)
+let test_bare_name_survives_a_later_module_fn () =
+  let src = {|mod Test do
+  fn count(n : Int) : Int do
+    fn go(i : Int, acc : Int) : Int do
+      if i == 0 do acc else go(i - 1, acc + 1) end
+    end
+    go(n, 0)
+  end
+
+  mod Inner do
+    fn count(n : Int) : Int do
+      fn go(i : Int, acc : Int) : Int do
+        if i == 0 do acc else go(i - 1, acc + 2) end
+      end
+      go(n, 0)
+    end
+  end
+
+  fn main() : Int do count(3) + Inner.count(4) end
+end|} in
+  ignore (pipeline_of src);
+  Alcotest.(check (option int)) "the entry fn keeps its span" (Some 2) (span_line "count");
+  Alcotest.(check (option int)) "the module fn has its own" (Some 10) (span_line "Inner.count");
+  Alcotest.(check (list (pair string int))) "and each keeps its local fn"
+    [ ("Inner.count", 11); ("count", 3) ] (local_go_rows ())
+
+(* TRMC splits a modulo-cons local fn into `go` and a `go$dps` helper beside
+   it: both are that one declaration. *)
+let test_local_fn_dps_helper_keeps_the_span () =
+  let src = {|mod Test do
+  type IntList = INil | ICons(Int, IntList)
+  fn squares(n : Int) : IntList do
+    fn go(i : Int) : IntList do
+      if i >= n do INil else ICons(i * i, go(i + 1)) end
+    end
+    go(0)
+  end
+
+  fn cubes(n : Int) : IntList do
+    fn go(i : Int) : IntList do
+      if i >= n do INil else ICons(i * i * i, go(i + 1)) end
+    end
+    go(0)
+  end
+
+  fn len(xs : IntList) : Int do
+    match xs do
+    INil -> 0
+    ICons(_, t) -> 1 + len(t)
+    end
+  end
+
+  fn main() : Int do len(squares(3)) + len(cubes(4)) end
+end|} in
+  ignore (pipeline_of src);
+  Alcotest.(check bool) "TRMC made a $dps helper for the local fn" true
+    (List.exists (fun (n, _) -> starts_with "go$dps$apply$" n) (March_tir.Provenance.all ()));
+  Alcotest.(check (list (pair string int))) "go and go$dps: their declaration's line"
+    [ ("cubes", 11); ("cubes", 11); ("squares", 4); ("squares", 4) ]
+    (local_go_rows ())
+
+(* What the emitter prints from it: the overflow site of the `+` inside each
+   `go` carries that `go`'s line. *)
+let test_local_fn_overflow_site_line () =
+  let pipe = pipeline_of local_src in
+  let ir = March_tir.Llvm_emit.emit_module ~k_table:pipe.March_tir.Contract_pipeline.k_table
+      pipe.March_tir.Contract_pipeline.final in
+  let cur = ref "" and sites = ref [] in
+  List.iter (fun l ->
+      if starts_with "define " l then cur := l
+      else if contains l "@march_int_overflow(" && contains !cur "@go$apply$" then begin
+        let host = List.find (fun h -> contains !cur ("_" ^ h ^ "(")) ["first"; "second"; "both"] in
+        let i = String.rindex l ' ' in
+        let line = int_of_string (String.sub l (i + 1) (String.length l - i - 2)) in
+        if not (List.mem (host, line) !sites) then sites := (host, line) :: !sites
+      end) (lines ir);
+  (* [both]'s second `go` is not emitted: `both(5)` folds to its first arm. *)
+  Alcotest.(check (list (pair string int))) "overflow sites inside each local go"
+    [ ("both", 18); ("first", 3); ("second", 10) ]
+    (List.sort compare !sites)
+
 (* ── attach_call_dbg, RED-first ──────────────────────────────────────── *)
 
 let test_attach_call_dbg () =
@@ -299,6 +463,16 @@ let suites = [
         test_user_fns_keep_their_span;
       Alcotest.test_case "mono / defun / fusion derivations and hosts" `Quick
         test_derivations;
+      Alcotest.test_case "local fns: own host and declaration line" `Quick
+        test_local_fns_keep_their_own_span;
+      Alcotest.test_case "local fns: span independent of declaration order" `Quick
+        test_local_fn_span_is_order_independent;
+      Alcotest.test_case "a bare-named fn keeps its span past a later module fn of that name" `Quick
+        test_bare_name_survives_a_later_module_fn;
+      Alcotest.test_case "local fns: a TRMC $dps helper keeps its declaration's line" `Quick
+        test_local_fn_dps_helper_keeps_the_span;
+      Alcotest.test_case "local fns: overflow site carries the local fn's line" `Quick
+        test_local_fn_overflow_site_line;
       Alcotest.test_case "debug_info off: no metadata in the module" `Quick
         test_off_emits_no_metadata;
       Alcotest.test_case "debug_info on: !dbg per define, provenance, verifier-clean (+inline RC)" `Quick

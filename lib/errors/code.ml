@@ -241,6 +241,7 @@ let unknown_session_op = "unknown_session_op"
 let unsatisfied_constraint = "unsatisfied_constraint"
 let unsendable_type = "unsendable_type"
 let unused_binding = "unused_binding"
+let listener_closed_early = "listener_closed_early"
 let unused_import = "unused_import"
 let unused_needs = "unused_needs"
 let vectorize_failed = "vectorize_failed"
@@ -481,6 +482,7 @@ let all = [
   unsatisfied_constraint;
   unsendable_type;
   unused_binding;
+  listener_closed_early;
   unused_import;
   unused_needs;
   vault_check_then_act;
@@ -603,7 +605,8 @@ let category_table : (string * string list) list = [
      the same renderer, so a failed test reads like a diagnostic. *)
   "TEST FAILURE", [ assert_failed; property_failed; test_panicked ];
   "PROGRAM", [
-    attribute_no_effect; compiled_unsupported; deprecated; internal_error; main_and_app;
+    attribute_no_effect; compiled_unsupported; deprecated; internal_error; listener_closed_early;
+    main_and_app;
     redundant_csrf_token; stdlib_internal; unknown_attribute ];
 ]
 

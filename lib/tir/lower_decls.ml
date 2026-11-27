@@ -231,8 +231,11 @@ let uniquify_fn (fn : Tir.fn_def) : Tir.fn_def =
       let env', fns_named =
         List.fold_left (fun (env, acc) (f : Tir.fn_def) ->
             if SMap.mem f.Tir.fn_name env then
+              (* No [Provenance.rename]: a nested fn that can shadow is a
+                 local named fn, and its span is not kept under its name
+                 ([Provenance.local_span] reads `go$sh1` as `go`).  A rename
+                 here moved the span of a TOP-LEVEL fn of that name. *)
               let nn = fresh f.Tir.fn_name in
-              Provenance.rename ~old:f.Tir.fn_name ~new_:nn;
               (SMap.add f.Tir.fn_name nn env, { f with Tir.fn_name = nn } :: acc)
             else
               (SMap.add f.Tir.fn_name f.Tir.fn_name env, f :: acc)) (env, []) fns in
@@ -293,9 +296,16 @@ let call_fn_typed_module_lets (lets : (string, Tir.ty) Hashtbl.t)
     (fn : Tir.fn_def) : Tir.fn_def =
   let module SSet = Set.Make (String) in
   let is_let bound name = Hashtbl.mem lets name && not (SSet.mem name bound) in
+  (* The temporaries are numbered per fn, under a prefix of their own: this
+     runs over every fn after lowering, outside any fn-body scope, and a name
+     from the lowering counters would either repeat one of [fn]'s own or
+     depend on how many lets the fns before it used. *)
+  let n_calls = ref 0 in
   let call_var (v : Tir.var) : Tir.var * Tir.expr =
     let ty = Hashtbl.find lets v.Tir.v_name in
-    (Lower_state.fresh_var ty, Tir.EApp ({ v with Tir.v_ty = Tir.TFn ([], ty) }, []))
+    incr n_calls;
+    ({ Tir.v_name = Printf.sprintf "$mlet%d" !n_calls; v_ty = ty; v_lin = Tir.Unr },
+     Tir.EApp ({ v with Tir.v_ty = Tir.TFn ([], ty) }, []))
   in
   let rec mentions bound (e : Tir.expr) =
     let atom = function Tir.AVar v -> is_let bound v.Tir.v_name | _ -> false in
@@ -387,13 +397,37 @@ let call_fn_typed_module_lets (lets : (string, Tir.ty) Hashtbl.t)
 
 (* ── Declaration lowering ───────────────────────────────────────── *)
 
+let the_clause (def : Ast.fn_def) : Ast.fn_clause =
+  match def.fn_clauses with
+  | [c] -> c
+  | _ -> failwith (Printf.sprintf "TIR lower: fn %s has %d clauses (expected 1 after desugaring)"
+                     def.fn_name.txt (List.length def.fn_clauses))
+
+(* For polymorphic fn_defs, prefer the typechecker's inferred type over the
+   surface annotation (see [lower_fn_def]). *)
+let ty_from_tc_or_ann (tc_ty : Tir.ty) (ann : Ast.ty option) : Tir.ty =
+  match tc_ty, ann with
+  | Tir.TVar "_", Some t -> Lower_types.lower_ty t
+  | Tir.TVar "_", None -> tc_ty
+  | _ -> tc_ty
+
+(** A fn's TIR parameters, as [lower_fn_def] gives them, without its body. *)
+let fn_params (env : Lower_state.env) (def : Ast.fn_def) : Tir.var list =
+  List.map (fun fp ->
+      match fp with
+      | Ast.FPNamed p ->
+        let ty = ty_from_tc_or_ann (Lower_state.ty_of_span env p.Ast.param_name.span) p.param_ty in
+        { Tir.v_name = p.param_name.txt;
+          v_ty = ty;
+          v_lin = Lower_types.lower_linearity p.param_lin }
+      | Ast.FPPat (Ast.PatVar n) ->
+        { Tir.v_name = n.txt; v_ty = Lower_state.ty_of_span env n.span; v_lin = Tir.Unr }
+      | _ -> failwith "TIR lower: unexpected pattern param after desugaring"
+    ) (the_clause def).fc_params
+
 (** Lower a single function definition (post-desugaring: exactly 1 clause). *)
 let lower_fn_def (env : Lower_state.env) (def : Ast.fn_def) : Tir.fn_def =
-  let clause = match def.fn_clauses with
-    | [c] -> c
-    | _ -> failwith (Printf.sprintf "TIR lower: fn %s has %d clauses (expected 1 after desugaring)"
-                       def.fn_name.txt (List.length def.fn_clauses))
-  in
+  let clause = the_clause def in
   (* For polymorphic fn_defs, prefer the typechecker's inferred type over the
      surface annotation.  The typechecker has already unified the source-level
      named type variable (e.g. `a` in `fn nth(xs: List(a), n: Int) : a`) with
@@ -405,23 +439,7 @@ let lower_fn_def (env : Lower_state.env) (def : Ast.fn_def) : Tir.fn_def =
      named e.g. `List.nth$List_V__1771$Int`, causing runtime infinite recursion.
      Only when the typechecker has no record for this span (placeholder
      [TVar "_"]) do we fall back to the source annotation. *)
-  let ty_from_tc_or_ann (tc_ty : Tir.ty) (ann : Ast.ty option) : Tir.ty =
-    match tc_ty, ann with
-    | Tir.TVar "_", Some t -> Lower_types.lower_ty t
-    | Tir.TVar "_", None -> tc_ty
-    | _ -> tc_ty
-  in
-  let params = List.map (fun fp ->
-      match fp with
-      | Ast.FPNamed p ->
-        let ty = ty_from_tc_or_ann (Lower_state.ty_of_span env p.param_name.span) p.param_ty in
-        { Tir.v_name = p.param_name.txt;
-          v_ty = ty;
-          v_lin = Lower_types.lower_linearity p.param_lin }
-      | Ast.FPPat (Ast.PatVar n) ->
-        { Tir.v_name = n.txt; v_ty = Lower_state.ty_of_span env n.span; v_lin = Tir.Unr }
-      | _ -> failwith "TIR lower: unexpected pattern param after desugaring"
-    ) clause.fc_params in
+  let params = fn_params env def in
   let ret_ty =
     (* Same rationale as params: prefer the typechecker's inferred return type,
        falling back to the source annotation only when the typechecker has no
@@ -435,13 +453,15 @@ let lower_fn_def (env : Lower_state.env) (def : Ast.fn_def) : Tir.fn_def =
   let saved_scope = Hashtbl.copy Lower_state._fn_param_types in
   Hashtbl.clear Lower_state._fn_param_types;
   List.iter (fun v -> Hashtbl.replace Lower_state._fn_param_types v.Tir.v_name v.Tir.v_ty) params;
-  let body =
-    Lower_state.with_host
-      (Lower_state.host_name ~mod_prefix:env.Lower_state.mod_prefix def.fn_name.txt)
-      (fun () -> Lower_match.lower_expr env clause.fc_body) in
+  let body, locals =
+    Lower_state.with_fn_body (fun () ->
+        Lower_state.with_host
+          (Lower_state.host_name ~mod_prefix:env.Lower_state.mod_prefix def.fn_name.txt)
+          (fun () -> Lower_match.lower_expr env clause.fc_body)) in
   Hashtbl.clear Lower_state._fn_param_types;
   Hashtbl.iter (fun k v -> Hashtbl.replace Lower_state._fn_param_types k v) saved_scope;
   Provenance.note_span def.fn_name.txt def.fn_name.span;
+  Provenance.attach_locals def.fn_name.txt locals;
   { fn_name = def.fn_name.txt; fn_params = params; fn_ret_ty = ret_ty; fn_body = body;
     fn_kind = Tir.FnNormal }  (* parsed user/stdlib/impl-method fn *)
 
@@ -542,7 +562,9 @@ let rec lower_stdlib_mod_decls ?(enclosing = []) (env : Lower_state.env) prefix 
            can be referenced by qualified name (e.g. Crypto.pw_dklen). *)
         (match b.bind_pat with
          | Ast.PatVar n ->
-           let rhs = Lower_match.lower_expr env b.bind_expr in
+           let rhs, locals =
+             Lower_state.with_fn_body (fun () -> Lower_match.lower_expr env b.bind_expr) in
+           Provenance.attach_locals (prefix ^ n.txt) locals;
            let fn : Tir.fn_def = {
              fn_name   = prefix ^ n.txt;
              fn_params = [];
@@ -569,6 +591,7 @@ let () = Lower_state._ensure_module_lowered := (fun env mod_name ->
     match March_modules.Module_registry.find_stdlib_file mod_name with
     | None -> ()
     | Some path ->
+      !Lower_state.lazy_module_load_hook mod_name;
       (try
          let ic = open_in_bin path in
          let n = in_channel_length ic in

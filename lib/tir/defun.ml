@@ -465,6 +465,10 @@ type lambda_info = {
                                               ordinal in its top-level host fn plus
                                               the host, so two local `fn go`s in
                                               different hosts stay distinct *)
+  lam_host         : string;               (* the top-level fn it was found in *)
+  lam_local_k      : int option;           (* a local NAMED fn (`fn go`): its
+                                              ordinal among the host's locals of
+                                              that source name ([Provenance.local_span]) *)
 }
 
 (** Collect all lambdas from all top-level fn bodies.
@@ -488,6 +492,20 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
   let fresh_lambda_uid () =
     let uid = Tir_names.lam_uid ~host:!host !host_k in
     incr host_k; uid in
+  (* A local named fn keeps its source name, which many hosts (and one host,
+     twice) can use: its provenance is looked up by host, source name and
+     ordinal.  Everything lowering mints starts with ['$'] and is unique. *)
+  (* A [go] and its TRMC helper [go$dps] are one declaration, so they are
+     counted apart: the k-th of each is the host's k-th [go]. *)
+  let local_counts : (string * bool, int) Hashtbl.t = Hashtbl.create 8 in
+  let local_ordinal (name : string) : int option =
+    if name <> "" && name.[0] = '$' then None
+    else begin
+      let key = (Provenance.source_name_of_local name, Provenance.is_dps_local name) in
+      let k = Option.value ~default:0 (Hashtbl.find_opt local_counts key) in
+      Hashtbl.replace local_counts key (k + 1);
+      Some k
+    end in
 
   let add_bound bound (vs : Tir.var list) =
     List.fold_left (fun s (v : Tir.var) -> StringSet.add v.Tir.v_name s) bound vs
@@ -524,7 +542,8 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
                        (self_var :: fn.Tir.fn_params)
                 else fvs_raw in
       lambdas := { lam_fn = fn; lam_fvs = fvs; lam_is_recursive = is_recursive;
-                   lam_uid = fresh_lambda_uid () } :: !lambdas;
+                   lam_uid = fresh_lambda_uid (); lam_host = !host;
+                   lam_local_k = local_ordinal fn.Tir.fn_name } :: !lambdas;
       (* Recurse into the lambda body too — its own name and params are in
          scope there, on top of everything the enclosing scope bound. *)
       collect_expr (add_bound (StringSet.add fn.Tir.fn_name bound) fn.Tir.fn_params)
@@ -548,7 +567,7 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
   in
 
   List.iter (fun fn ->
-    host := fn.Tir.fn_name; host_k := 0;
+    host := fn.Tir.fn_name; host_k := 0; Hashtbl.reset local_counts;
     collect_expr (add_bound StringSet.empty fn.Tir.fn_params) fn.Tir.fn_body)
     m.Tir.tm_fns;
   List.rev !lambdas
@@ -561,7 +580,7 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
     (typed TPtr TUnit).  The apply fn takes (ptr $clo, original_params) and
     loads its own free variables from $clo at entry.  This lets ECallPtr call
     uniformly through field 0 without knowing the specific lambda statically. *)
-let lift_lambda ?host (lam : lambda_info) : Tir.type_def * Tir.fn_def =
+let lift_lambda (lam : lambda_info) : Tir.type_def * Tir.fn_def =
   let fn = lam.lam_fn in
   let fvs = lam.lam_fvs in
   let clo_name = Tir_names.clo_struct_name ~fn_name:fn.Tir.fn_name ~lam_uid:lam.lam_uid in
@@ -603,7 +622,11 @@ let lift_lambda ?host (lam : lambda_info) : Tir.type_def * Tir.fn_def =
        perceus.ml + llvm_emit.ml name-sniffing copies were detecting. *)
     fn_kind   = Tir.FnApply;
   } in
-  Provenance.record apply_name ?host ~from:fn.Tir.fn_name
+  (* A local named fn's span is its own declaration's, found through its
+     host; never the span on record under its (shared) name. *)
+  let span = Option.map (fun k ->
+      Provenance.local_span ~host:lam.lam_host fn.Tir.fn_name k) lam.lam_local_k in
+  Provenance.record apply_name ~host:lam.lam_host ~from:fn.Tir.fn_name ?span
     ~derived:(Provenance.Defun_of fn.Tir.fn_name) ~pass:"defun" ();
   (td, apply_fn)
 
@@ -715,11 +738,7 @@ let defunctionalize (m : Tir.tir_module) : Tir.tir_module =
   let known_lambdas = List.map (fun lam -> (lam.lam_fn.Tir.fn_name, lam)) lambdas in
 
   (* Phase 2: generate closure structs and lifted fns *)
-  let hosts = Provenance.nested_fn_hosts m in
-  let (new_types, new_fns) =
-    List.split (List.map (fun lam ->
-        lift_lambda ?host:(Hashtbl.find_opt hosts lam.lam_fn.Tir.fn_name) lam)
-        lambdas) in
+  let (new_types, new_fns) = List.split (List.map lift_lambda lambdas) in
 
   (* Phase 3: rewrite all top-level fn bodies.  The initial bound set is the
      function's own parameters, so a call to a function-typed parameter whose

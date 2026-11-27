@@ -4,18 +4,18 @@ type Vec3 = Vec3(Float, Float, Float)
 ## dot
 fn dot(a : Vec3, b : Vec3) : Float =
   case a of
-  Vec3($f19, $f20, $f21) -> let az : Float = $f21 in
-let ay : Float = $f20 in
-let ax : Float = $f19 in
+  Vec3($f12, $f13, $f14) -> let az : Float = $f14 in
+let ay : Float = $f13 in
+let ax : Float = $f12 in
 case b of
-  Vec3($f8, $f9, $f10) -> let bz : Float = $f10 in
-let b2 : Float = $f9 in
-let bx : Float = $f8 in
-let $t6 : Float = let $t4 : Float = *.(ax, bx) in
-let $t5 : Float = *.(ay, b2) in
-+.($t4, $t5) in
-let $t7 : Float = *.(az, bz) in
-+.($t6, $t7)
+  Vec3($f5, $f6, $f7) -> let bz : Float = $f7 in
+let b2 : Float = $f6 in
+let bx : Float = $f5 in
+let $t3 : Float = let $t1 : Float = *.(ax, bx) in
+let $t2 : Float = *.(ay, b2) in
++.($t1, $t2) in
+let $t4 : Float = *.(az, bz) in
++.($t3, $t4)
   _ -> panic("non-exhaustive pattern match")
   _ -> panic("non-exhaustive pattern match")
 
@@ -30,7 +30,7 @@ alloc Vec3.Vec3($t2, pitch, $t3)
 ## main
 fn main() : () =
   let v : Vec3 = forward(0.5, 0.25) in
-let $t31 : String = let $t30 : Float = dot(v, v) in
-float_to_string($t30) in
-println($t31)
+let $t2 : String = let $t1 : Float = dot(v, v) in
+float_to_string($t1) in
+println($t2)
 

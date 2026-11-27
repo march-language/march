@@ -5,11 +5,11 @@ type Authority.Layer = Layer(CapLimit, String, List(CapEntry))
 -- fns (11) --
 ## drain
 fn drain(n : Int) : Int =
-  let $t1475 : Layer = drain$restrict0$auth_layer() in
-let $t1476 : CapAuthRef = Authority.enter_fn($t1475) in
-let $t1477 : Int = drain$restrict_body(n) in
-let $t1478 : Unit = cap_restore($t1476) in
-$t1477
+  let $t1 : Layer = drain$restrict0$auth_layer() in
+let $t2 : CapAuthRef = Authority.enter_fn($t1) in
+let $t3 : Int = drain$restrict_body(n) in
+let $t4 : Unit = cap_restore($t2) in
+$t3
 
 ## drain$restrict0$auth_layer
 fn drain$restrict0$auth_layer() : Layer =
@@ -17,21 +17,21 @@ fn drain$restrict0$auth_layer() : Layer =
 
 ## drain$restrict_body
 fn drain$restrict_body(n : Int) : Int =
-  let $t1479 : Bool = ==(n, 0) in
-case $t1479 of
+  let $t5 : Bool = ==(n, 0) in
+case $t5 of
   True() -> 0
-  _ -> let $t1480 : Int = -(n, 1) in
-drain$restrict_body($t1480)
+  _ -> let $t6 : Int = -(n, 1) in
+drain$restrict_body($t6)
 
 ## main
 fn main() : () =
-  let $t1481 : Result((), CapError) = probe() in
-case $t1481 of
-  Ok($f1485) -> let $t1484 : Int = let $t1482 : Int = ping(10) in
-let $t1483 : Int = drain(10) in
-+($t1482, $t1483) in
-println($t1484)
-  Err($f1486) -> println(0)
+  let $t1 : Result((), CapError) = probe() in
+case $t1 of
+  Ok($f5) -> let $t4 : Int = let $t2 : Int = ping(10) in
+let $t3 : Int = drain(10) in
++($t2, $t3) in
+println($t4)
+  Err($f6) -> println(0)
   _ -> panic("non-exhaustive pattern match")
 
 ## ping
@@ -68,15 +68,15 @@ $auth_result
 
 ## pong$auth
 fn pong$auth(n : Int) : Int =
-  let $t3 : Bool = ==(n, 0) in
-case $t3 of
+  let $t1 : Bool = ==(n, 0) in
+case $t1 of
   True() -> 1
-  _ -> let $t4 : Int = -(n, 1) in
+  _ -> let $t2 : Int = -(n, 1) in
 let $hop_l2 : Layer = ping$auth_layer() in
 let $hop_in2 : Bool = Authority.frame_in_force($hop_l2) in
 case $hop_in2 of
-  True() -> ping$auth($t4)
-  _ -> ping($t4)
+  True() -> ping$auth($t2)
+  _ -> ping($t2)
 
 ## pong$auth_layer
 fn pong$auth_layer() : Layer =

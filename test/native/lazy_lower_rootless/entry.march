@@ -1,0 +1,10 @@
+-- A program with no entry point and nothing of its own to root: only a type.
+-- The pre-mono prune then finds no root and fails open, keeping every
+-- function, so lazy lowering (lib/tir/lower.ml, `~lazy_bodies`) must lower
+-- every deferred stdlib body too. test/dune checks the IR is the same with
+-- `--disable-pass lazy-lower`. It sits in a directory of its own because its
+-- IR is the whole standard library (~10 s to emit), which the sweeps over
+-- test/native/*.march (IR validity gate, oracles) need not pay for.
+mod LazyLowerRootless do
+  type Shape = Circle(Float) | Square(Float)
+end

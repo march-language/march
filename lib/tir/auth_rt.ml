@@ -1170,6 +1170,8 @@ let captures (m : Tir.tir_module) ~(has_frames : bool) ~(repl : bool) : Tir.tir_
        without handing over a reference, so a capturing eta closure in their
        place was released once per message and underflowed. *)
     let actor_glue = actor_glue_of m in
+    (* Function-local names, numbered per top-level fn (reset in the loop at
+       the end): a fn's [$auth_cap1] must not depend on the fns before it. *)
     let counter = ref 0 in
     let fresh prefix ty =
       incr counter;
@@ -1422,6 +1424,7 @@ let captures (m : Tir.tir_module) ~(has_frames : bool) ~(repl : bool) : Tir.tir_
     let fns =
       List.map
         (fun (f : Tir.fn_def) ->
+           counter := 0;
            let init = Lower_state.is_module_init_fn f.Tir.fn_name in
            let bound = List.fold_right add f.Tir.fn_params SSet.empty in
            let body' = process_body ~init ~host:f.Tir.fn_name bound f.Tir.fn_body in
@@ -1430,3 +1433,27 @@ let captures (m : Tir.tir_module) ~(has_frames : bool) ~(repl : bool) : Tir.tir_
     in
     { m with Tir.tm_fns = fns }
   end
+
+(** The functions [restricts], [frames], [grants] and [captures] can add a
+    call of that the lowered TIR does not already call, given the tables they
+    run on ([fn_needs_tbl], [restrict_sites], [fn_grant_tbl]).  Lazy lowering
+    ([Lower.lower_module ~lazy_bodies]) lowers their bodies whatever the
+    program calls, because these passes run between lowering and the pre-mono
+    prune.  Builtins ([cap_save], [cap_enter], [cap_restore]) are not
+    functions and are not listed.  Keep in step with the passes above: a name
+    missing here is caught by [Dce_pre_mono.prune]'s tripwire. *)
+let minted_callees ~(needs : (string, Lower_state.fn_needs) Hashtbl.t)
+    ~(sites : (string, Lower_state.restrict_site) Hashtbl.t)
+    ~(grants : (string, Lower_state.fn_grant) Hashtbl.t) : string list =
+  (* [frames] turns a tail call between two framed functions into a test of
+     [Authority.frame_in_force]; a frame comes from a [needs] clause or a
+     [restrict]. *)
+  (if Hashtbl.length needs > 0
+   then [ Tir_names.enter_fn_name; Tir_names.frame_layer_fn_name;
+          Tir_names.frame_in_force_name ] else [])
+  @ (if Hashtbl.length sites > 0
+     then [ Tir_names.enter_fn_name; restrict_layer_fn_name;
+            Tir_names.frame_in_force_name ] else [])
+  @ (if Hashtbl.length grants > 0
+     then [ Tir_names.enter_grant_name; Tir_names.grant_layer_builtin_name;
+            Tir_names.foreign_guard_name ] else [])

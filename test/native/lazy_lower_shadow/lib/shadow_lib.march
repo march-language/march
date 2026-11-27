@@ -1,0 +1,5 @@
+-- A library module whose `reverse` shares the prelude's name and does not
+-- reverse (see ../entry.march).
+mod ShadowLib do
+  fn reverse(xs : List(Int)) : List(Int) do xs end
+end

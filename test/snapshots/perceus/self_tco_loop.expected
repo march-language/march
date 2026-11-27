@@ -2,8 +2,8 @@
 -- fns (2) --
 ## main
 fn main() : () =
-  let $t4 : Int = sum_to(5, 0) in
-println($t4)
+  let $t1 : Int = sum_to(5, 0) in
+println($t1)
 
 ## sum_to
 fn sum_to(n : Int, acc : Int) : Int =

@@ -3,11 +3,11 @@
 ## first_or_recheck
 fn first_or_recheck(xs : List(String), flag : Bool) : String =
   case xs of
-  Cons($f7, $f8) -> inc_rc $f7;
-inc_rc $f8;
-let t : List(String) = $f8 in
+  Cons($f5, $f6) -> inc_rc $f5;
+inc_rc $f6;
+let t : List(String) = $f6 in
 dec_rc t;
-let h : String = $f7 in
+let h : String = $f5 in
 case flag of
   True() -> dec_rc xs;
 h
@@ -28,10 +28,10 @@ panic("non-exhaustive pattern match")
 
 ## main
 fn main() : () =
-  let $t15 : String = let $t14 : List(String) = let $t13 : List(String) = alloc List.Nil(String)() in
-alloc List.Cons("a", $t13) in
-first_or_recheck($t14, true) in
-let $rc_1 : () = println($t15) in
-dec_rc $t15;
+  let $t3 : String = let $t2 : List(String) = let $t1 : List(String) = alloc List.Nil(String)() in
+alloc List.Cons("a", $t1) in
+first_or_recheck($t2, true) in
+let $rc_1 : () = println($t3) in
+dec_rc $t3;
 $rc_1
 
