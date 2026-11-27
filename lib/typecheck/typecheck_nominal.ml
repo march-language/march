@@ -401,7 +401,7 @@ let compute ~(is_stdlib : A.span -> bool) ?(base = fun (_ : string) -> false)
       | A.TyArrow (a, b) | A.TyNatOp (_, a, b) -> ty sc a; ty sc b
       | A.TyTuple ts -> List.iter (ty sc) ts
       | A.TyRecord fs -> List.iter (fun (_, t) -> ty sc t) fs
-      | A.TyLinear (_, t) -> ty sc t
+      | A.TyLinear (_, t) | A.TyScoped t -> ty sc t
       | A.TyRefine (t, _, e) -> ty sc t; expr sc e
     and tyo sc = function Some t -> ty sc t | None -> ()
     and param sc (p : A.param) = tyo sc p.A.param_ty

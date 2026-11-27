@@ -72,7 +72,7 @@ let rec base_key (t : A.ty) : string =
   | A.TyArrow (a, b) -> base_key a ^ "->" ^ base_key b
   | A.TyTuple ts -> "(" ^ String.concat "," (List.map base_key ts) ^ ")"
   | A.TyRecord _ -> "{record}"
-  | A.TyLinear (_, t) -> base_key t
+  | A.TyLinear (_, t) | A.TyScoped t -> base_key t
   | A.TyChan _ -> "{chan}"
   | A.TyNat n -> string_of_int n
   | A.TyNatOp _ -> "{natop}"
@@ -277,7 +277,7 @@ let rec walk_ty ~(role : role) ?(dom_binder : string option)
     walk_ty ~role:Definer ?dom_binder:db ~dom_base:(base_key dom) ~chain:chain' cod acc
   | A.TyTuple ts -> List.iter (fun t -> walk_ty ~role ?dom_binder ?dom_base t acc) ts
   | A.TyRecord fs -> List.iter (fun (_, t) -> walk_ty ~role ?dom_binder ?dom_base t acc) fs
-  | A.TyLinear (_, t) -> walk_ty ~role ?dom_binder ?dom_base ~chain t acc
+  | A.TyLinear (_, t) | A.TyScoped t -> walk_ty ~role ?dom_binder ?dom_base ~chain t acc
   | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> ()
 
 (* Every declared type of [fd]: each clause's parameter annotations, then the
@@ -627,7 +627,7 @@ let check ?(entry_shaped = fun ~name_of:_ _ _ -> Ok ()) (errctx : Err.ctx) ~(is_
         | A.TyArrow (a, b) -> go a; go b
         | A.TyTuple ts -> List.iter go ts
         | A.TyRecord fs -> List.iter (fun (_, t) -> go t) fs
-        | A.TyLinear (_, t) -> go t
+        | A.TyLinear (_, t) | A.TyScoped t -> go t
         | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> ()
       in
       go t
@@ -790,6 +790,7 @@ let expand_markers_fn (fd : A.fn_def) : A.fn_def =
       | A.TyTuple ts -> A.TyTuple (List.map ty ts)
       | A.TyRecord fs -> A.TyRecord (List.map (fun (n, t) -> (n, ty t)) fs)
       | A.TyLinear (l, t) -> A.TyLinear (l, ty t)
+      | A.TyScoped t -> A.TyScoped (ty t)
       | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> t
     in
     let param (p : A.param) = { p with A.param_ty = Option.map ty p.A.param_ty } in

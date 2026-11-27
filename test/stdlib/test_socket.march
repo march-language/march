@@ -133,20 +133,11 @@ mod TestSocket do
       end
     end
 
-    test "passes a Socket and closes it" do
-      let l = listen_ok()
-      let port = port_ok(l)
-      let r = Authority.must(Socket.with_connection("127.0.0.1", port, fn s ->
-        match Socket.write(s, "hi") do
-        Ok(_) -> Ok(s)
-        Err(e) -> Err(e)
-        end))
-      match r do
-      Ok(s) -> assert (Socket.write(s, "x") == Err(Socket.Closed))
-      Err(e) -> panic("with_connection failed: " ++ Socket.error_message(e))
-      end
-      let _ = Socket.close_listener(l)
-    end
+    -- "passes a Socket and closes it" returned the socket from the callback
+    -- to show it is closed afterwards.  The socket is scoped since ocap phase
+    -- 8b, so that program is a compile error: the check moved to
+    -- test/captures/escape/returned_socket.march, which the capture oracle
+    -- builds with the escape check off and runs.
 
   end
 

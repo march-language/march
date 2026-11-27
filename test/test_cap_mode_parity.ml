@@ -315,8 +315,34 @@ let unlowerable =
 end
 |}
 
+(* A scoped handle leaving its callback (ocap phase 8b): the reject returns
+   the handle, the accept twin returns what was read from it. *)
+let scoped_escape body =
+  Printf.sprintf
+    {|mod Main do
+  needs IO.Console, IO.FileRead
+  fn main() do
+    let _ = File.with_open("/nonexistent/cap_parity/a.txt", fn h -> %s)
+    println("done")
+  end
+end
+|}
+    body
+
+let scoped_escape_repl body =
+  Printf.sprintf
+    {|mod Q do
+  needs IO.FileRead
+  fn f() do File.with_open("/nonexistent/cap_parity/a.txt", fn h -> %s) end
+end
+|}
+    body
+
 let fixtures =
   [
+    fx "scoped_escape" [ "capture_escape" ] (scoped_escape "h") ~repl:(scoped_escape_repl "h");
+    fx "scoped_escape_ok" [] (scoped_escape "File.read_line(h)")
+      ~repl:(scoped_escape_repl "File.read_line(h)");
     fx "ceiling_stdlib" [ "cap_ceiling" ] (ceiling_stdlib "IO.Console")
       ~repl:(ceiling_stdlib_repl "IO.Console");
     fx "ceiling_stdlib_ok" [] (ceiling_stdlib "IO.Console, IO.FileRead")
@@ -421,8 +447,9 @@ let codes_of (out : string) : string list =
     in
     go 0
   in
-  scan (Str.regexp {|\[\(cap_[a-z_]+\)\]|});
-  scan (Str.regexp {|"code":"\(cap_[a-z_]+\)|});
+  (* `capture_escape` (ocap phase 8b) is a capability check too. *)
+  scan (Str.regexp {|\[\(cap_[a-z_]+\|capture_escape\)\]|});
+  scan (Str.regexp {|"code":"\(cap_[a-z_]+\|capture_escape\)|});
   List.sort_uniq compare !found
 
 (* The output file of the last [run_mode], quoted in a mismatch: a mode that

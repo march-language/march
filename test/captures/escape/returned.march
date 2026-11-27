@@ -1,0 +1,16 @@
+-- A scoped handle returned from its callback (ocap phase 8b).  The checker
+-- rejects this; with the check off, the run shows why: the handle is closed.
+mod EscapeReturned do
+  needs IO.FileRead, IO.Console
+
+  fn main() do
+    match File.with_open("data.txt", fn h -> h) do
+      Ok(Ok(h)) ->
+        match File.read_line(h) do
+          Err(File.Closed) -> println("used after close: Err(Closed)")
+          _ -> println("the handle still worked")
+        end
+      _ -> println("open failed")
+    end
+  end
+end

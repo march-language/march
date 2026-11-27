@@ -1292,6 +1292,10 @@
             "named": true
           },
           {
+            "type": "scoped_type",
+            "named": true
+          },
+          {
             "type": "tuple_type",
             "named": true
           },
@@ -1347,6 +1351,10 @@
           },
           {
             "type": "refinement_type",
+            "named": true
+          },
+          {
+            "type": "scoped_type",
             "named": true
           },
           {
@@ -4593,6 +4601,10 @@
             "named": true
           },
           {
+            "type": "scoped_type",
+            "named": true
+          },
+          {
             "type": "tuple_type",
             "named": true
           },
@@ -4692,6 +4704,10 @@
           },
           {
             "type": "refinement_type",
+            "named": true
+          },
+          {
+            "type": "scoped_type",
             "named": true
           },
           {
@@ -4800,6 +4816,10 @@
           },
           {
             "type": "refinement_type",
+            "named": true
+          },
+          {
+            "type": "scoped_type",
             "named": true
           },
           {
@@ -5159,6 +5179,10 @@
             "named": true
           },
           {
+            "type": "scoped_type",
+            "named": true
+          },
+          {
             "type": "tuple_type",
             "named": true
           },
@@ -5231,6 +5255,10 @@
         },
         {
           "type": "refinement_type",
+          "named": true
+        },
+        {
+          "type": "scoped_type",
           "named": true
         },
         {
@@ -5501,6 +5529,10 @@
             "named": true
           },
           {
+            "type": "scoped_type",
+            "named": true
+          },
+          {
             "type": "tuple_type",
             "named": true
           },
@@ -5570,6 +5602,10 @@
           },
           {
             "type": "refinement_type",
+            "named": true
+          },
+          {
+            "type": "scoped_type",
             "named": true
           },
           {
@@ -5696,6 +5732,10 @@
           },
           {
             "type": "refinement_type",
+            "named": true
+          },
+          {
+            "type": "scoped_type",
             "named": true
           },
           {
@@ -5862,6 +5902,10 @@
           },
           {
             "type": "refinement_type",
+            "named": true
+          },
+          {
+            "type": "scoped_type",
             "named": true
           },
           {
@@ -6176,6 +6220,10 @@
           },
           {
             "type": "refinement_type",
+            "named": true
+          },
+          {
+            "type": "scoped_type",
             "named": true
           },
           {
@@ -7086,6 +7134,10 @@
             "named": true
           },
           {
+            "type": "scoped_type",
+            "named": true
+          },
+          {
             "type": "tuple_type",
             "named": true
           },
@@ -7622,6 +7674,10 @@
           },
           {
             "type": "refinement_type",
+            "named": true
+          },
+          {
+            "type": "scoped_type",
             "named": true
           },
           {
@@ -8938,6 +8994,10 @@
             "named": true
           },
           {
+            "type": "scoped_type",
+            "named": true
+          },
+          {
             "type": "tuple_type",
             "named": true
           },
@@ -9674,6 +9734,10 @@
           "named": true
         },
         {
+          "type": "scoped_type",
+          "named": true
+        },
+        {
           "type": "tuple_type",
           "named": true
         },
@@ -10207,6 +10271,10 @@
             "named": true
           },
           {
+            "type": "scoped_type",
+            "named": true
+          },
+          {
             "type": "tuple_type",
             "named": true
           },
@@ -10695,6 +10763,10 @@
             "named": true
           },
           {
+            "type": "scoped_type",
+            "named": true
+          },
+          {
             "type": "tuple_type",
             "named": true
           },
@@ -10967,6 +11039,10 @@
           },
           {
             "type": "refinement_type",
+            "named": true
+          },
+          {
+            "type": "scoped_type",
             "named": true
           },
           {
@@ -11625,6 +11701,70 @@
     }
   },
   {
+    "type": "scoped_type",
+    "named": true,
+    "fields": {
+      "type": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "abstract_refinement_type",
+            "named": true
+          },
+          {
+            "type": "linear_type",
+            "named": true
+          },
+          {
+            "type": "parenthesized_type",
+            "named": true
+          },
+          {
+            "type": "qualified_type",
+            "named": true
+          },
+          {
+            "type": "record_type",
+            "named": true
+          },
+          {
+            "type": "refinement_type",
+            "named": true
+          },
+          {
+            "type": "scoped_type",
+            "named": true
+          },
+          {
+            "type": "tuple_type",
+            "named": true
+          },
+          {
+            "type": "type_application",
+            "named": true
+          },
+          {
+            "type": "type_constructor",
+            "named": true
+          },
+          {
+            "type": "type_nat",
+            "named": true
+          },
+          {
+            "type": "type_variable",
+            "named": true
+          },
+          {
+            "type": "unit_type",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "send_expression",
     "named": true,
     "fields": {},
@@ -12239,6 +12379,10 @@
         },
         {
           "type": "refinement_type",
+          "named": true
+        },
+        {
+          "type": "scoped_type",
           "named": true
         },
         {
@@ -12867,6 +13011,10 @@
           "named": true
         },
         {
+          "type": "scoped_type",
+          "named": true
+        },
+        {
           "type": "tuple_type",
           "named": true
         },
@@ -12931,6 +13079,10 @@
         },
         {
           "type": "refinement_type",
+          "named": true
+        },
+        {
+          "type": "scoped_type",
           "named": true
         },
         {
@@ -13013,6 +13165,10 @@
         },
         {
           "type": "refinement_type",
+          "named": true
+        },
+        {
+          "type": "scoped_type",
           "named": true
         },
         {
@@ -13109,6 +13265,10 @@
           "named": true
         },
         {
+          "type": "scoped_type",
+          "named": true
+        },
+        {
           "type": "tuple_type",
           "named": true
         },
@@ -13199,6 +13359,10 @@
             "named": true
           },
           {
+            "type": "scoped_type",
+            "named": true
+          },
+          {
             "type": "tuple_type",
             "named": true
           },
@@ -13258,6 +13422,10 @@
           },
           {
             "type": "refinement_type",
+            "named": true
+          },
+          {
+            "type": "scoped_type",
             "named": true
           },
           {
@@ -13607,6 +13775,10 @@
             "named": true
           },
           {
+            "type": "scoped_type",
+            "named": true
+          },
+          {
             "type": "tuple_type",
             "named": true
           },
@@ -13702,6 +13874,10 @@
         },
         {
           "type": "refinement_type",
+          "named": true
+        },
+        {
+          "type": "scoped_type",
           "named": true
         },
         {
@@ -14521,6 +14697,10 @@
   },
   {
     "type": "satisfy",
+    "named": false
+  },
+  {
+    "type": "scoped",
     "named": false
   },
   {

@@ -1,0 +1,5 @@
+14:35  lambda in `main`  captures nothing
+fn each_line : (String, File.Handle -> a needs c1) -> Result(Result(a, FileError), CapError) needs IO.FileRead, c1
+fn main : () -> () needs IO.FileRead
+fn scoped : (Bool) -> Bool
+1 function value, 0 not tracked

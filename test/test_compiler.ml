@@ -11988,7 +11988,7 @@ let rec ty_has_refine : March_ast.Ast.ty -> bool = function
     ty_has_refine a || ty_has_refine b
   | March_ast.Ast.TyTuple ts -> List.exists ty_has_refine ts
   | March_ast.Ast.TyRecord fs -> List.exists (fun (_, t) -> ty_has_refine t) fs
-  | March_ast.Ast.TyLinear (_, t) -> ty_has_refine t
+  | March_ast.Ast.TyLinear (_, t) | March_ast.Ast.TyScoped t -> ty_has_refine t
   | March_ast.Ast.TyVar _ | March_ast.Ast.TyNat _ | March_ast.Ast.TyChan _ -> false
 
 let rec decl_has_refined_param : March_ast.Ast.decl -> bool = function

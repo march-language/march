@@ -2237,7 +2237,7 @@ let rec relation_issues_deep (t : A.ty) : (A.span * string) list =
   here
   @
   match t with
-  | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> relation_issues_deep b
+  | A.TyRefine (b, _, _) | A.TyLinear (_, b) | A.TyScoped b -> relation_issues_deep b
   | A.TyCon (_, ts) | A.TyTuple ts -> List.concat_map relation_issues_deep ts
   | A.TyArrow (a, b) -> relation_issues_deep a @ relation_issues_deep b
   | A.TyRecord fs -> List.concat_map (fun (_, t) -> relation_issues_deep t) fs

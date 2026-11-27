@@ -1,0 +1,60 @@
+---
+layout: docs
+title: "scoped_misplaced"
+permalink: /docs/errors/scoped_misplaced/
+---
+
+# `scoped_misplaced`: `scoped` somewhere other than a callback's parameter
+
+`scoped` marks the handle a callback receives from a function that opens a
+resource, hands it over and closes it afterwards. It is written in one place:
+before the parameter type of a function type that is itself the type of a
+function's parameter.
+
+```text
+fn with_open(path : String, body : scoped File.Handle -> r) : Result(Result(r, File.FileError), CapError)
+```
+
+The compiler then stops the handle from leaving `body` (see
+[`capture_escape`](/docs/errors/capture_escape/)). Anywhere else, the marker
+has no callback to bind the handle to, and it is this error.
+
+## A program that triggers it
+
+```march
+mod Main do
+  needs IO.FileRead
+
+  fn first_line(h : scoped File.Handle) : Result(Option(String), File.FileError) do
+    File.read_line(h)
+  end
+
+  fn main() do
+    let _ = File.with_open("notes.txt", fn h -> first_line(h))
+    ()
+  end
+end
+```
+
+## The fix
+
+Take the handle as an ordinary parameter. A function that only uses a handle
+needs no marker: the function that *hands out* the handle carries it.
+
+```march
+mod Main do
+  needs IO.FileRead
+
+  fn first_line(h : File.Handle) : Result(Option(String), File.FileError) do
+    File.read_line(h)
+  end
+
+  fn main() do
+    let _ = File.with_open("notes.txt", fn h -> first_line(h))
+    ()
+  end
+end
+```
+
+`scoped` is an ordinary name everywhere outside a type, so a variable or a
+function called `scoped` is fine.

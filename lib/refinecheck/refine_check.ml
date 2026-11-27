@@ -6958,7 +6958,7 @@ let rec warn_predicate_ty ?(abstract_refs : string list = []) ?(in_scope : scope
        changes. *)
     let rec head (t : A.ty) =
       match t with
-      | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> head b
+      | A.TyRefine (b, _, _) | A.TyLinear (_, b) | A.TyScoped b -> head b
       | A.TyCon (n, _) -> Some (Refine_term.bare n.A.txt)
       | _ -> None
     in
@@ -6999,7 +6999,7 @@ let rec warn_predicate_ty ?(abstract_refs : string list = []) ?(in_scope : scope
   | A.TyArrow (a, b) -> go a; go b
   | A.TyTuple ts -> List.iter go ts
   | A.TyRecord fs -> List.iter (fun (_, t) -> go t) fs
-  | A.TyLinear (_, t) -> go t
+  | A.TyLinear (_, t) | A.TyScoped t -> go t
   | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> ()
 
 (* ── The single-element-type rule (strengthening design §2.4) ─────────────
@@ -7015,7 +7015,7 @@ let rec warn_predicate_ty ?(abstract_refs : string list = []) ?(in_scope : scope
    mentions a type variable or a shape this rule does not compare. *)
 let rec elem_ty_key (t : A.ty) : string option =
   match t with
-  | A.TyRefine (base, _, _) | A.TyLinear (_, base) -> elem_ty_key base
+  | A.TyRefine (base, _, _) | A.TyLinear (_, base) | A.TyScoped base -> elem_ty_key base
   | A.TyCon ({ A.txt; _ }, []) -> Some txt
   | A.TyCon ({ A.txt; _ }, args) ->
     let keys = List.map elem_ty_key args in
@@ -9132,7 +9132,7 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
    so `@[decrease(n)]` would look like a metric that found nothing.  These are
    every `fn` attribute some pass reads (the name before a `:` payload). *)
 let known_fn_attributes =
-  [ "abstraction"; "assume"; "decreases"; "deprecated"; "diverges"; "ghost"; "lemma"; "measure"; "net_dest"; "no_alloc"; "no_warn_race"; "no_warn_recursion"; "opaque"; "reflect"; "stdlib_internal"; "trusted";
+  [ "abstraction"; "assume"; "decreases"; "deprecated"; "diverges"; "ghost"; "lemma"; "measure"; "net_dest"; "no_alloc"; "no_warn_race"; "no_warn_recursion"; "opaque"; "reflect"; "scoped_param"; "stdlib_internal"; "trusted";
     "trusted_linear"; "vectorize" ]
 
 (* Levenshtein distance, for the did-you-mean. *)

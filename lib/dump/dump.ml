@@ -101,7 +101,7 @@ let rec ty_to_str = function
   | TyTuple ts      -> "(" ^ String.concat ", " (List.map ty_to_str ts) ^ ")"
   | TyRecord fields -> "{ " ^ String.concat ", " (List.map (fun (n, t) ->
       n.txt ^ ": " ^ ty_to_str t) fields) ^ " }"
-  | TyLinear (_, t) -> ty_to_str t
+  | TyLinear (_, t) | TyScoped t -> ty_to_str t
   | TyNat n         -> string_of_int n
   | TyNatOp (_, a, b) -> ty_to_str a ^ " op " ^ ty_to_str b
   | TyChan (r, p)   -> "Chan(" ^ r.txt ^ ", " ^ p.txt ^ ")"

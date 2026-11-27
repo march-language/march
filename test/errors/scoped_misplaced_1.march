@@ -1,0 +1,12 @@
+mod Main do
+  needs IO.FileRead
+
+  fn first_line(h : scoped File.Handle) : Result(Option(String), File.FileError) do
+    File.read_line(h)
+  end
+
+  fn main() do
+    let _ = File.with_open("notes.txt", fn h -> first_line(h))
+    ()
+  end
+end

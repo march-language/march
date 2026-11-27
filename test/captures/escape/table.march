@@ -1,0 +1,17 @@
+-- A scoped handle stored in a table from inside the callback.
+mod EscapeTable do
+  needs IO.FileRead, IO.Console, IO.Mut
+
+  fn main() do
+    let t : Vault(File.Handle) = Authority.must(Vault.new("escape_table_handles"))
+    let _ = File.with_open("data.txt", fn h -> Vault.put(t, "k", h))
+    match Vault.get(t, "k") do
+      Some(h) ->
+        match File.read_line(h) do
+          Err(File.Closed) -> println("used after close: Err(Closed)")
+          _ -> println("the handle still worked")
+        end
+      None -> println("nothing stored")
+    end
+  end
+end

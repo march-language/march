@@ -616,6 +616,8 @@ and ty_to_json (t : ty) : string =
       ("lin", linearity_to_json lin);
       ("ty", ty_to_json t);
     ]
+  | TyScoped t ->
+    Dump.json_obj [ ("kind", Dump.json_string "TyScoped"); ("ty", ty_to_json t) ]
   | TyNat n ->
     Dump.json_obj [ ("kind", Dump.json_string "TyNat"); ("value", json_int n) ]
   | TyNatOp (op, a, b) ->

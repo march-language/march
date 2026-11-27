@@ -48,6 +48,13 @@ let pure_builtins =
    (their type arguments carry their own sets either way). *)
 let closure_builtins = [ "Task" ]
 
+(* The builtin handle types (design §4.4), by the name the checker gives
+   them.  A handle holds no function value, but it carries a set: the tracked
+   name of a scoped handle (ocap phase 8b).  An ordinary handle's set is
+   empty.  Matched by full name: a declared type may share the bare one. *)
+let handle_builtins = [ "File.Handle"; "File.Dir"; "Socket"; "Listener"; "Process" ]
+let is_handle (name : string) : bool = List.mem name handle_builtins
+
 (* Types a value can be written to and read from: invariant in their
    arguments (design §6.3).  A builtin type not known to the checker is
    treated the same way. *)
@@ -66,7 +73,7 @@ let rec surface_holds_arrow (s : Ast.ty) : bool * string list =
   | Ast.TyRecord fs ->
     let rs = List.map (fun (_, t) -> surface_holds_arrow t) fs in
     (List.exists fst rs, List.concat_map snd rs)
-  | Ast.TyLinear (_, t) | Ast.TyRefine (t, _, _) -> surface_holds_arrow t
+  | Ast.TyLinear (_, t) | Ast.TyScoped t | Ast.TyRefine (t, _, _) -> surface_holds_arrow t
   | Ast.TyVar _ | Ast.TyNat _ | Ast.TyNatOp _ | Ast.TyChan _ -> (false, [])
 
 let bare (n : string) : string =
@@ -91,7 +98,10 @@ let decls_of (env : env) : decls =
 (* Whether a value of declared type [name] can hold a function value through
    its own fields (type arguments carry their own sets).  Two declared types
    with one bare name are merged, which can only answer [true] more often. *)
-let holds (d : decls) (name : string) : bool =
+let rec holds (d : decls) (name : string) : bool =
+  if is_handle name then true else holds_declared d name
+
+and holds_declared (d : decls) (name : string) : bool =
   let root = bare name in
   match Hashtbl.find_opt d.d_holds root with
   | Some b -> b
@@ -114,7 +124,7 @@ let holds (d : decls) (name : string) : bool =
           List.exists
             (fun s ->
                let arrow, names = surface_holds_arrow s in
-               arrow || List.exists (fun n -> Hashtbl.mem d.d_fields (bare n) && go (bare n)) names)
+               arrow || List.exists (fun n -> is_handle n || (Hashtbl.mem d.d_fields (bare n) && go (bare n))) names)
             tys)
     in
     let b = go root in

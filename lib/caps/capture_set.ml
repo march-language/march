@@ -3,15 +3,34 @@
 module A = March_ast.Ast
 
 type scope = { kind : string; arg : string option }
-type t = Unknown | Set of scope list  (* sorted, no element covered by another *)
+type name = { label : string; id : int }
+type part = Unknown | Set of scope list  (* sorted, no element covered by another *)
 
-let empty = Set []
-let full = Set [ { kind = "IO"; arg = None } ]
-let unknown = Unknown
+(* The scope part and the tracked names (sorted by id, no duplicates).  The
+   names are kept beside [Unknown] too: a value the pass does not follow can
+   still be known to hold a scoped handle. *)
+type t = { sc : part; nm : name list }
 
-let is_unknown = function Unknown -> true | Set _ -> false
-let is_empty = function Set [] -> true | _ -> false
-let scopes = function Unknown -> [] | Set l -> l
+let mk sc = { sc; nm = [] }
+let empty = mk (Set [])
+let full = mk (Set [ { kind = "IO"; arg = None } ])
+let unknown = mk Unknown
+let of_name (n : name) : t = { sc = Set []; nm = [ n ] }
+
+(* Not a handle: the mark of a value whose origin the pass does not know (a
+   function value read from a table opened by name).  It travels with the set
+   like a name, and is never printed or compared. *)
+let origin_mark : name = { label = ""; id = 0 }
+let unknown_origin : t = { sc = Unknown; nm = [ origin_mark ] }
+let has_unknown_origin (t : t) : bool = List.mem origin_mark t.nm
+let names (t : t) : name list = List.filter (fun n -> n <> origin_mark) t.nm
+let without_names (t : t) : t = { t with nm = [] }
+let merge_names (a : name list) (b : name list) : name list =
+  if b = [] then a else if a = [] then b else List.sort_uniq (fun x y -> compare (x.id, x.label) (y.id, y.label)) (a @ b)
+
+let is_unknown t = match t.sc with Unknown -> true | Set _ -> false
+let is_empty t = t.nm = [] && (match t.sc with Set [] -> true | _ -> false)
+let scopes t = match t.sc with Unknown -> [] | Set l -> l
 
 let host_covers (a : string) (b : string) : bool =
   match Host_scope.parse_decl (Some a), Host_scope.parse_decl (Some b) with
@@ -80,7 +99,7 @@ let normalise (l : scope list) : scope list =
   let l = List.sort_uniq compare l in
   List.filter (fun x -> not (List.exists (fun y -> y <> x && scope_covers y x) l)) l
 
-let of_scopes l = Set (normalise l)
+let of_scopes l = mk (Set (normalise l))
 
 let of_entries (es : Scope_expr.entry list) : t =
   of_scopes
@@ -92,12 +111,21 @@ let of_entries (es : Scope_expr.entry list) : t =
 let equal a b = a = b
 
 let union a b =
-  match a, b with
-  | Unknown, _ | _, Unknown -> Unknown
-  | Set x, Set y -> if y = [] then a else if x = [] then b else Set (normalise (x @ y))
+  if b.nm = [] && (match b.sc with Set [] -> true | _ -> false) then a
+  else if a.nm = [] && (match a.sc with Set [] -> true | _ -> false) then b
+  else
+    { sc =
+        (match a.sc, b.sc with
+         | Unknown, _ | _, Unknown -> Unknown
+         | Set x, Set y -> if y = [] then a.sc else if x = [] then b.sc else Set (normalise (x @ y)));
+      nm = merge_names a.nm b.nm }
 
+(* No scope part covers a tracked name, [full] and [unknown] included (design
+   §3): only a set that holds the name does. *)
 let covers ~sup s =
-  match sup, s with
+  List.for_all (fun n -> n = origin_mark || List.mem n sup.nm) s.nm
+  &&
+  match sup.sc, s.sc with
   | Unknown, _ -> true
   | Set _, Unknown -> false
   | Set big, Set small -> List.for_all (fun x -> List.exists (fun y -> scope_covers y x) big) small
@@ -106,11 +134,11 @@ let related (a : scope) (b : scope) =
   Cap_lattice.cap_subsumes a.kind b.kind || Cap_lattice.cap_subsumes b.kind a.kind
 
 let narrow e ~by =
-  match e, by with
-  | Unknown, _ -> Unknown
+  match e.sc, by.sc with
+  | Unknown, _ -> e
   | _, Unknown -> e
   | Set xs, Set bs ->
-    Set
+    { e with sc = Set
       (normalise
          (List.concat_map
             (fun x ->
@@ -126,7 +154,7 @@ let narrow e ~by =
                      rel
                  else if List.for_all (fun b -> scope_covers x b) rel then rel
                  else [ x ])
-            xs))
+            xs)) }
 
 let admits (t : t) ~(kind : string) ~(target : string) ~(cwd : string) : bool =
   let resolve p = if Cap_scope.is_absolute p then p else cwd ^ "/" ^ p in
@@ -146,7 +174,7 @@ let admits (t : t) ~(kind : string) ~(target : string) ~(cwd : string) : bool =
       let h = String.sub x 0 i and p = String.sub x (i + 1) (String.length x - i - 1) in
       match int_of_string_opt p with Some n when n >= 1 && n <= 65535 -> (h, n) | _ -> (h, 0))
   in
-  match t with
+  match t.sc with
   | Unknown -> true
   | Set l ->
     List.exists
@@ -178,6 +206,6 @@ let scope_to_string (s : scope) : string =
   in
   March_ast.Cap_request.scoped_text (path, s.arg)
 
-let to_string = function
-  | Unknown -> "?"
-  | Set l -> String.concat ", " (List.map scope_to_string l)
+let to_string (t : t) : string =
+  let sc = match t.sc with Unknown -> [ "?" ] | Set l -> List.map scope_to_string l in
+  String.concat ", " (sc @ List.map (fun n -> n.label) (names t))

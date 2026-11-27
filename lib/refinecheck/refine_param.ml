@@ -107,7 +107,7 @@ let rec ty_vars (acc : string list) (t : A.ty) : string list =
   | A.TyCon (_, ts) | A.TyTuple ts -> List.fold_left ty_vars acc ts
   | A.TyArrow (a, b) -> ty_vars (ty_vars acc a) b
   | A.TyRecord fs -> List.fold_left (fun acc (_, t) -> ty_vars acc t) acc fs
-  | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> ty_vars acc b
+  | A.TyRefine (b, _, _) | A.TyLinear (_, b) | A.TyScoped b -> ty_vars acc b
   | A.TyNatOp (_, a, b) -> ty_vars (ty_vars acc a) b
   | A.TyNat _ | A.TyChan _ -> acc
 

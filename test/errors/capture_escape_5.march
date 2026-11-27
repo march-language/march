@@ -1,0 +1,11 @@
+mod Main do
+  needs IO.FileRead, IO.Signal
+
+  fn main() do
+    let _ = File.with_open("notes.txt", fn h ->
+      Signal.watch(Signal.Term, fn () ->
+        let _ = File.read_line(h)
+        ()))
+    ()
+  end
+end

@@ -117,6 +117,16 @@ git log is authoritative for exact commits.
   in the interpreter, `--jit`, compiled code and JS; `with_cap` mocked only compiled test
   builds. New
   diagnostics `mock_outside_test`, `mock_scope_invalid` and `mock_handler_field`.
+- **Scoped handles cannot leave their callback (object capabilities, phase 8b).**
+  `File.with_open`, `File.with_open_write` and `Socket.with_connection` hand their callback a
+  handle and close it when the callback returns. A callback that lets that handle out is now a
+  build error, `capture_escape`, in every mode: returning it, or a function, record or task
+  that holds it; storing it in a `Vault`; sending it to an actor; handing a function that
+  captured it to a signal watcher; passing it to code the compiler cannot follow. Before, such
+  a program built and failed later with `Err(Closed)`. Your own functions get the same check by
+  writing `scoped` before a callback's parameter type (`body : scoped File.Handle -> r`);
+  `scoped` stays an ordinary name everywhere else. See "Scoped handles" in the capabilities
+  chapter, and `march --explain capture_escape`.
 - **Capture sets (object capabilities, phase 8a).** The compiler now infers, for every
   function value and every value that holds one, what it can reach when called, and shows it:
   hover and `march-lsp query type` print `say : String -> () needs IO.Console` and

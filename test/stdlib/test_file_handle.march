@@ -110,33 +110,17 @@ describe "File.Handle" do
     cleanup("closed")
   end
 
-  test "with_open closes" do
-    let p = scratch("with_open")
-    write_ab(p)
-    match Authority.must(File.with_open(p, fn h -> h)) do
-    Err(e) -> panic("File.with_open failed: " ++ to_string(e))
-    Ok(kept) -> assert (File.read_line(kept) == Err(File.Closed))
-    end
-    cleanup("with_open")
-  end
+  -- "with_open closes" and "with_open_write closes" returned the handle from
+  -- the callback to show it is closed afterwards.  The handle is scoped since
+  -- ocap phase 8b, so that program is a compile error: both checks moved to
+  -- test/captures/escape/returned.march and returned_write.march, which the
+  -- capture oracle builds with the escape check off and runs.
 
   test "with_open passes the callback's result" do
     let p = scratch("with_open_r")
     write_ab(p)
     assert (Authority.must(File.with_open(p, fn h -> File.read_line(h))) == Ok(Ok(Some("a"))))
     cleanup("with_open_r")
-  end
-
-  test "with_open_write closes" do
-    let p = scratch("with_open_w")
-    match Authority.must(File.with_open_write(p, File.Truncate, fn h ->
-      let _ = File.write_to(h, "z\n")
-      h)) do
-    Err(e) -> panic("File.with_open_write failed: " ++ to_string(e))
-    Ok(kept) -> assert (File.write_to(kept, "y") == Err(File.Closed))
-    end
-    assert (Authority.must(File.read(p)) == Ok("z\n"))
-    cleanup("with_open_w")
   end
 
   test "open on a missing path" do

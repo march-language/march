@@ -175,7 +175,7 @@ module.exports = grammar({
       optional('ghost'),
       // `pfn` is the private form; it never combines with `pub`.
       choice(seq(optional('pub'), 'fn'), 'pfn'),
-      field('name', choice($.identifier, alias(choice('send', 'ghost'), $.identifier))),
+      field('name', choice($.identifier, alias(choice('send', 'ghost', 'scoped'), $.identifier))),
       optional(seq('[', commaSep1(seq($.identifier, ':', $._type)), ']')),
       '(', optional(commaSep($.fn_param)), ')',
       optional(seq(':', field('return_type', $._type))),
@@ -205,7 +205,7 @@ module.exports = grammar({
     named_param: $ => choice(
       seq(
         optional(choice('linear', 'affine', 'ghost')),
-        field('name', $.identifier),
+        field('name', choice($.identifier, alias('scoped', $.identifier))),
         ':', field('type', $._type),
         optional(seq('\\\\', field('default', $._expr))),
       ),
@@ -282,7 +282,7 @@ module.exports = grammar({
     // alias() — not a new regex — to avoid duplicate-terminal conflict with identifier
     variable_pattern: $ => choice(
       alias($.identifier, $.variable_pattern),
-      alias(choice('forall', 'exists', 'ghost'), $.variable_pattern)),
+      alias(choice('forall', 'exists', 'ghost', 'scoped'), $.variable_pattern)),
 
     constructor_pattern: $ => seq(
       field('name', choice($.type_identifier, $.qualified_constructor)),
@@ -337,6 +337,7 @@ module.exports = grammar({
       $.type_constructor,
       $.type_variable,
       $.linear_type,
+      $.scoped_type,
       $.tuple_type,
       $.refinement_type,
       $.abstract_refinement_type,
@@ -394,6 +395,13 @@ module.exports = grammar({
 
     linear_type: $ => seq(
       choice('linear', 'affine'),
+      field('type', $._type_atom),
+    ),
+
+    // `scoped File.Handle -> r`: the handle a callback is handed and may not
+    // keep (ocap phase 8b).  A soft keyword: only before a type name.
+    scoped_type: $ => seq(
+      'scoped',
       field('type', $._type_atom),
     ),
 
@@ -707,7 +715,7 @@ module.exports = grammar({
       // `calc`, `reveal`, `forall`, `exists` and `ghost` are soft keywords
       // (the compiler's token filter promotes them only in their proof,
       // quantifier and ghost-code positions): elsewhere they are names.
-      alias(choice('calc', 'reveal', 'forall', 'exists', 'ghost'), $.identifier),
+      alias(choice('calc', 'reveal', 'forall', 'exists', 'ghost', 'scoped'), $.identifier),
     ),
 
     pipe_expression: $ => prec.left(1, seq(

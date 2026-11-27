@@ -1,0 +1,150 @@
+# Object capabilities, phase 8b: scoped handles and escape checking
+
+Plan: `specs/plans/2026-11-25-ocap-p8b-scoped-escape-plan.md` (approved by the owner
+2026-11-25 with the recommended answers to Q1 to Q5). Design:
+`specs/2026-11-11-ocap-capture-checking-design.md` §3, §4.4, §7, §8.1 rule 1, §16 row 8b.
+Phase 8c (the public-signature rules, the stdlib migration, `forge fix`) is open in
+`specs/todos/2026-11-12-ocap-capture-checking.md`.
+
+## What it does
+
+A handle that a function hands to a callback and closes afterwards cannot leave the callback.
+`File.with_open`, `File.with_open_write` and `Socket.with_connection` mark their callback's
+parameter `scoped`; a callback that lets the handle out is the build error `capture_escape`, in
+`--check`, the interpreter, the REPL, `--compile` and `--target js`. Nothing else is newly
+rejected.
+
+## How it is built
+
+- **Syntax.** `scoped` before the parameter type of a callback: `body : scoped File.Handle ->
+  r`. It is a soft keyword: the token filter promotes the identifier `scoped` only when an
+  upper-case name follows on the same line (`lib/parser/token_filter.ml`), so `scoped` stays an
+  ordinary name (the stdlib has a parameter called it). The parser builds `Ast.TyScoped`.
+- **Desugar removes it.** `desugar_fn_def_tys` takes the marker off a function parameter's
+  arrow and records the attribute `scoped_param:<index>` on the function, so no later pass sees
+  `TyScoped` in a well-formed program. One written anywhere else reaches the typechecker's
+  surface-type conversion, which reports `scoped_misplaced`. The typechecker copies the
+  attribute into `env.scoped_params` (function key to parameter indices), which travels with
+  the stdlib's cached environment.
+- **Tracked names.** `Capture_set.t` is now a scope part plus a list of names. No scope part
+  covers a name, `IO` and `?` included; narrowing never removes one; a name prints after the
+  scopes by its source label.
+- **Handles carry a set.** The builtin handle types (`File.Handle`, `File.Dir`, `Socket`,
+  `Listener`, `Process`) get a set variable in `Capture_ty`, as does any declared type that
+  holds one. An ordinary handle's set is empty, so nothing printed in 8a changed.
+- **Where a name starts.** Each use of a function in `scoped_params`, as a call or as a value,
+  makes one fresh name and puts it in the set of the handle parameter of that use's callback
+  type (`mark_scoped`, `lib/typecheck/capture.ml`). The existing constraint solver carries it:
+  into the lambda's parameter, into a closure that captures the handle, into a record built
+  around it, through a function it is passed to and back out of that function's result.
+- **Names are not effects.** The variables that stand for what running a function does (`own`,
+  `valv`, a scheme's `sc_val`) never receive a name, and neither does the "creates" edge from an
+  inner function value to the one that creates it: calling or creating a function that holds a
+  handle does not make the caller hold it.
+- **Escape positions.** The callback's result type; the arguments of a builtin that keeps what
+  it is given (`vault_*`, `send`, the watcher and logger registries); the arguments of
+  `spawn(Actor(...))` and of `send`; an atom; the arguments of a call through a value the pass
+  could not type; and the arguments of a call through a function value *of unknown origin*.
+  The last is decided after solving: `Capture_set.unknown_origin` marks a function value a
+  builtin returned from nowhere the pass can see, the mark travels with the set like a name,
+  and a call through a marked function is an escape for a handle passed to it.
+- **Finding them.** `find_escapes` reads the grounded solution (the one that also follows
+  each call into the callee's own body), so a store two calls away, inside the stdlib's
+  `Vault.put`, is found from the callback. A finding inside a library is reported at the
+  nearest step in the program being checked. Two names for one handle (a function with a
+  `scoped` parameter that passes its callback to another one) are reported once, through the
+  outer use.
+- **When the pass runs.** At the end of `check_module_core` and `check_module_with_env`, when
+  the program typechecked and one of its own bodies (functions, module-level lets, tests,
+  actor handlers, impl methods, interface defaults) names a function with a `scoped`
+  parameter. A program that names none does not run the pass. On the compile path a crash in the pass is an internal compiler error through the
+  driver's handler; on the editor and REPL path it is an `internal_error` diagnostic.
+- **The editor path.** `check_module_with_env` records no reach bodies, so the pass also reads
+  impl methods and interface default bodies from the declarations there.
+
+## Decisions taken while building (the plan's rulings)
+
+- `TyScoped` is removed in desugar and carried as a function attribute, instead of being
+  threaded through the typechecker's types: about 130 passes match on `Ast.ty`, and none after
+  desugar needs to know.
+- The escape tests assert on the rendered diagnostic, not on an internal list: it is the same
+  information and needs no test-only API.
+- A detached-task route does not exist: the task API returns a `Task` that holds the function,
+  so a task that is returned or stored is caught as a value. One that is dropped without being
+  awaited is not caught (see the review section below). The plan's `Detached`
+  route became nothing; `Registry` covers the builtins that keep a function to run later.
+- A handle that reaches the result through a function used as a value (`let w =
+  File.with_open`) has no source name at that point; the message says "The handle".
+- Tasks 1 and 2 were implemented before their tests were run red; both were then shown red by
+  switching the rule off (name covering ignored: 2 of 5 name tests fail).
+
+## What the whole-branch review found, and what was done
+
+A fresh reviewer wrote about 150 probe programs against the finished branch. Fixed, each with a
+test in `test/test_captures.ml` (group `review`) that was red on the reviewed build:
+
+- **`alias`, `use` and `import` hid the opening function** (`alias File as F` then
+  `F.with_open(...)` was accepted, and `alias Vault as V` hid a table store). The pass resolved
+  a name only by its spelling in its own module. It now resolves through the module's aliases
+  and imports and those of the modules around it.
+- **A store inside a function of several clauses, or one with a pattern parameter, was
+  missed**, which is every interface method written `fn m(_, h)`. Desugar rewrites such a
+  function to match on a tuple of its parameters, the tuple carries the function's span, and
+  the type recorded there is the match's result: a function returning plain data made the
+  tuple, and the handle in it, plain. A tuple is now what its parts are. The same bug made
+  8a's capture sets too small through such a function.
+- **A builtin handed a function kept it unseen** unless it was on a hand list
+  (`logger_register_appender`, `register_resource`). The rule is now the other way round: a
+  builtin handed a function keeps it unless it is listed as running it before returning. `own`
+  and `register_resource` are listed for a bare handle.
+- **`scoped` on an impl method's parameter was dropped without a word, and so was `scoped` in
+  a record field or a constructor argument.** All three are `scoped_misplaced` now.
+- **A run with the test-only `MARCH_CAPTURE_ESCAPE=off` stored a "clean" check result** that
+  answered the next normal check of the same source. Such a run now skips the source-level
+  cache (`source_cache_bypass`, `bin/main.ml`); the escape-pair test checks it.
+- An impl method showed as `Iface$Type.method` in "How it gets there"; it shows as written.
+
+Not fixed, recorded in `specs/todos/2026-11-24-ocap-capture-inference-precision-gaps.md`: a
+task that is never awaited, a connection built from a socket's descriptor, `Seq` on the handle
+rejected, and three message and syntax-error roughnesses.
+
+## Checks run on the final branch (2026-11-26)
+
+- `scripts/run-tests.sh`, every suite: passed (captures 111, compiler 1772, codegen 804,
+  stdlib 923, errors 498 among them).
+- `scripts/oracle-base.sh all` against main at d7d12d8f4:
+  - IR: 8 of 530 programs changed, all users of `File` or `Socket`. Built again with the two
+    `scoped` markers taken out of the stdlib (doc edits kept), their IR differs from the
+    branch's only in the stdlib path strings, so the marker emits nothing; the 8 differ from
+    main because the doc edits moved stdlib line numbers that the IR embeds.
+  - refine and types: the only differences are in `stdlib/file.march` and
+    `stdlib/socket.march` (line numbers in existing diagnostics; the core AST of the two edited
+    files).
+- Cost (`scripts/capture-cost.sh -n 5`, load average about 7). The escape pass is the capture
+  pass, and it runs only for a program that names a function with a `scoped` parameter. Its own
+  time from `--timings`: 4 to 10 ms on the bench programs and `http_requests`, 141 ms on
+  `lab_app`. Wall-time ratios of `--check` with it forced on: 0.97 to 1.11, inside the noise at
+  that load.
+
+## Tests moved by the check (CI, 2026-11-27)
+
+Three stdlib tests returned a scoped handle from its callback to show it was closed
+afterwards (`test_file_handle.march`: "with_open closes", "with_open_write closes";
+`test_socket.march`: "passes a Socket and closes it"). Those programs are now compile errors,
+which CI found (`scripts/run-tests.sh` does not run the dune-rule `march test` runs). The checks
+moved to escape pairs, `test/captures/escape/returned.march` (already there),
+`returned_write.march` and `returned_socket.march`: the checker rejects each, and built with
+the check off each prints that the handle is closed. Shown red: with the close taken out of
+`with_open_write`, `returned_write` prints "the handle still worked". A sweep of `test/stdlib`,
+`test/native`, `examples` and `bench` found no other program the check rejects.
+
+## What is not covered
+
+- `HttpClient.with_connection` hands its callback a function, not a handle:
+  `specs/todos/2026-11-25-ocap-scoped-function-valued-callback-params.md`.
+- The definition-site rule for a public function's handle parameters and the written form
+  `(T needs h)`: `specs/todos/2026-11-25-ocap-p8c-handle-borrow-rule.md`.
+- A table opened twice by name is two unrelated values to the pass, so a function value put
+  through one and read through the other is not marked as of unknown origin (an 8a limit,
+  `specs/todos/2026-11-24-ocap-capture-inference-precision-gaps.md`). A handle put in a table
+  is rejected at the store either way.

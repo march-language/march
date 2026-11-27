@@ -87,10 +87,50 @@ let test_narrow_is_upper_bound () =
       pool
   done
 
+(* ── tracked names (ocap phase 8b, plan Task 2) ─────────────────────────── *)
+
+let h1 = { S.label = "h"; id = 1 }
+let h2 = { S.label = "h"; id = 2 }
+
+let test_full_does_not_cover_a_name () =
+  no "IO does not cover h" (S.covers ~sup:S.full (S.of_name h1));
+  no "unknown does not cover h" (S.covers ~sup:S.unknown (S.of_name h1));
+  yes "a set holding h covers it" (S.covers ~sup:(S.union S.full (S.of_name h1)) (S.of_name h1));
+  yes "unknown still covers scopes" (S.covers ~sup:S.unknown S.full);
+  no "a name is not empty" (S.is_empty (S.of_name h1))
+
+let test_narrow_keeps_names () =
+  let x = S.union (set [ sc "IO.FileRead" ]) (S.of_name h1) in
+  let n = S.narrow x ~by:(set [ read_data ]) in
+  str "scope narrowed, name kept" "IO.FileRead(\"./data/\"), h" (S.to_string n);
+  let dropped = S.narrow x ~by:(set [ sc "IO.Console" ]) in
+  str "scope dropped, name kept" "h" (S.to_string dropped)
+
+let test_union_merges_names () =
+  let u = S.union (S.of_name h2) (S.union (S.of_name h1) (S.of_name h2)) in
+  Alcotest.(check (list int)) "sorted, no duplicate" [ 1; 2 ] (List.map (fun (n : S.name) -> n.id) (S.names u));
+  let k = S.union S.unknown (S.of_name h1) in
+  yes "unknown keeps its names" (S.is_unknown k && S.names k = [ h1 ]);
+  str "prints both" "?, h" (S.to_string k);
+  yes "without_names" (S.equal S.unknown (S.without_names k))
+
+let test_prints_scopes_then_names () =
+  str "scopes first" "IO.FileRead, h" (S.to_string (S.union (S.of_name h1) (set [ sc "IO.FileRead" ])))
+
+let test_two_uses_same_label () =
+  no "1 does not cover 2" (S.covers ~sup:(S.of_name h1) (S.of_name h2));
+  no "2 does not cover 1" (S.covers ~sup:(S.of_name h2) (S.of_name h1))
+
 let tests =
   [ ( "capture_set",
       [ Alcotest.test_case "union drops covered" `Quick test_union_drops_covered;
         Alcotest.test_case "union keeps unrelated scopes" `Quick test_union_keeps_unrelated;
         Alcotest.test_case "covers" `Quick test_covers;
         Alcotest.test_case "narrow" `Quick test_narrow;
-        Alcotest.test_case "narrow is an upper bound" `Quick test_narrow_is_upper_bound ] ) ]
+        Alcotest.test_case "narrow is an upper bound" `Quick test_narrow_is_upper_bound ] );
+    ( "tracked names (8b)",
+      [ Alcotest.test_case "no scope covers a name" `Quick test_full_does_not_cover_a_name;
+        Alcotest.test_case "narrow keeps names" `Quick test_narrow_keeps_names;
+        Alcotest.test_case "union merges names" `Quick test_union_merges_names;
+        Alcotest.test_case "scopes print, then names" `Quick test_prints_scopes_then_names;
+        Alcotest.test_case "two uses with one label are distinct" `Quick test_two_uses_same_label ] ) ]

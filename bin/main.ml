@@ -3822,6 +3822,11 @@ let source_cache_bypass () : string option =
     "MARCH_DEBUG_PERCEUS"; "MARCH_DEBUG_BORROW"; "MARCH_DEBUG_HANDLER_OWNER";
     "MARCH_DEBUG_TC"; "MARCH_DEBUG_ORDER";
     "MARCH_REFINE_Z3_LOG"; "MARCH_REFINE_Z3_ERRORS";
+    (* Test-only (lib/typecheck/typecheck.ml): with it "off" a program the
+       scoped-handle check rejects goes through.  A result stored from such
+       a run would answer the next normal check of the same source with
+       "clean", so the run neither reads nor writes the source-level cache. *)
+    "MARCH_CAPTURE_ESCAPE";
   ] in
   match List.find_opt snd flags with
   | Some (name, _) -> Some name
@@ -4611,9 +4616,18 @@ let compile filename =
      stdlib function, reached or not. *)
   (match Sys.getenv_opt "MARCH_CAPTURES" with
    | Some ("1" | "all" as mode) ->
-     ignore
-       (March_typecheck.Typecheck.capture_analyse ~all:(mode = "all") typecheck_env
-          desugared.March_ast.Ast.mod_decls);
+     let r =
+       March_typecheck.Typecheck.capture_analyse ~all:(mode = "all") typecheck_env
+         desugared.March_ast.Ast.mod_decls
+     in
+     (* A scoped handle that leaves its callback inside the stdlib is not a
+        diagnostic of this program (the escape check reports the program's
+        own); the sweep test reads these lines. *)
+     List.iter
+       (fun (e : March_typecheck.Capture.escape) ->
+          Printf.eprintf "[capture-escape] %s:%d: the `%s` handle\n" e.e_at.March_ast.Ast.file
+            e.e_at.March_ast.Ast.start_line e.e_open)
+       r.March_typecheck.Capture.escapes;
      stamp "captures"
    | _ -> ());
   (* Lemma erasure (§4.5): after the refinement checker, before anything

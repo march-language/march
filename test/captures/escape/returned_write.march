@@ -1,0 +1,20 @@
+-- A scoped handle returned from a write callback (ocap phase 8b).  The checker
+-- rejects this; with the check off, the run shows why: the handle is closed.
+-- (Moved here from test/stdlib/test_file_handle.march, "with_open_write
+-- closes", which can no longer be written as an ordinary test.)
+mod EscapeReturnedWrite do
+  needs IO.FileWrite, IO.Console
+
+  fn main() do
+    match File.with_open_write("out.txt", File.Truncate, fn h ->
+      let _ = File.write_to(h, "z\n")
+      h) do
+      Ok(Ok(h)) ->
+        match File.write_to(h, "y") do
+          Err(File.Closed) -> println("used after close: Err(Closed)")
+          _ -> println("the handle still worked")
+        end
+      _ -> println("open failed")
+    end
+  end
+end

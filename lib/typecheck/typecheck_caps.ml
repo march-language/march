@@ -1619,6 +1619,9 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       let ret_tys = Option.to_list def.fn_ret_ty in
       let sig_caps = List.concat_map cap_paths_in_surface_ty (param_tys @ ret_tys) in
       let qname = cap_qname def.fn_name.txt in
+      (match Ast.scoped_params_of_attrs def.fn_attrs with
+       | [] -> ()
+       | is -> Hashtbl.replace env.scoped_params qname is);
       record_fn_caps qname sig_caps;
       (* Record which functions carry a concrete [Cap(P)] PARAMETER.  R1 stage
          C once made this a discharge point, checked once at the end of
@@ -2901,7 +2904,7 @@ let handle_in_message (env : env) (msg_ty : ty) : string option =
        | _ -> (match first (in_ast seen) args with Some h -> Some h | None -> in_decl seen c.txt))
     | Ast.TyTuple ts -> first (in_ast seen) ts
     | Ast.TyRecord fs -> first (fun (_, t) -> in_ast seen t) fs
-    | Ast.TyLinear (_, t) -> in_ast seen t
+    | Ast.TyLinear (_, t) | Ast.TyScoped t -> in_ast seen t
     | Ast.TyRefine (t, _, _) -> in_ast seen t
     | Ast.TyArrow _ | Ast.TyVar _ | Ast.TyNat _ | Ast.TyNatOp _ | Ast.TyChan _ -> None
   and in_decl seen n =

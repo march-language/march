@@ -38,6 +38,22 @@ let dump ?(needs = "IO") ?(flags = "") (body : string) : string * string list =
   if rc <> 0 then Alcotest.failf "the program was rejected (exit %d):\n%s\n-- source --\n%s" rc text src;
   (src, String.split_on_char '\n' text)
 
+(* Run the compiler with [flags] on [body] (a module body); exit code and output. *)
+let march ?(needs = "IO") ?(flags = "--check") ?(env = "") (body : string) : int * string =
+  let d = Lazy.force work_dir in
+  incr counter;
+  let src = Printf.sprintf "mod T%d do\n  needs %s\n%s\nend\n" !counter needs body in
+  let file = Filename.concat d (Printf.sprintf "t%d.march" !counter) in
+  Out_channel.with_open_bin file (fun oc -> output_string oc src);
+  let out = file ^ ".out" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "cd %s && HOME=%s %s %s %s %s > %s 2>&1" (Filename.quote d)
+         (Filename.quote (Filename.concat d "home")) env (Filename.quote compiler_exe) flags (Filename.quote file)
+         (Filename.quote out))
+  in
+  (rc, In_channel.with_open_bin out In_channel.input_all)
+
 (* "L:C" of the first occurrence of [needle] in [src], as the report prints
    it (1-based line, 0-based column). *)
 let pos_of (src : string) (needle : string) : string =
@@ -381,6 +397,304 @@ let test_mock_not_tracked () =
   in
   str "created inside the mock" "?" (set_at r "fn x ->")
 
+(* ── ocap phase 8b (specs/plans/2026-11-25-ocap-p8b-scoped-escape-plan.md) ── *)
+
+let test_scoped_parses () =
+  let rc, out =
+    march
+      "  fn w(p : String, f : scoped File.Handle -> a) : Result(Result(a, File.FileError), CapError) do\n\
+      \    File.with_open(p, f)\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    let _ = w(\"x\", fn h -> File.read_line(h))\n\
+      \    ()\n\
+      \  end"
+  in
+  Alcotest.(check int) ("checks clean:\n" ^ out) 0 rc;
+  Alcotest.(check bool) "no warning about the marker" false (contains out "scoped")
+
+let test_scoped_is_still_a_name () =
+  let rc, out =
+    march ~flags:""
+      "  fn scoped(scoped : Bool) : Bool do scoped end\n\
+      \  fn main() do\n\
+      \    let scoped = scoped(true)\n\
+      \    println(to_string(scoped))\n\
+      \  end"
+  in
+  Alcotest.(check int) ("runs:\n" ^ out) 0 rc;
+  Alcotest.(check string) "prints" "true\n" out
+
+let test_scoped_misplaced () =
+  let rc, out = march "  fn bad(x : scoped Int) : Int do x end\n  fn main() do println(to_string(bad(1))) end" in
+  Alcotest.(check int) "rejected" 1 rc;
+  Alcotest.(check bool) ("names the slug:\n" ^ out) true (contains out "[scoped_misplaced]")
+
+(* A function with a `scoped` callback parameter of the test's own, so these
+   cases do not depend on which stdlib functions carry the marker. *)
+let opener =
+  "  fn opening(p : String, body : scoped File.Handle -> a) : Result(Result(a, File.FileError), CapError) do\n\
+  \    File.with_open(p, body)\n\
+  \  end\n"
+
+(* [body] is rejected with `capture_escape`, and the message has each of [has]. *)
+let escapes ?(flags = "--check") (body : string) (has : string list) () =
+  let rc, out = march ~flags (opener ^ body) in
+  Alcotest.(check int) ("rejected:\n" ^ out) 1 rc;
+  List.iter
+    (fun frag -> Alcotest.(check bool) (Printf.sprintf "the message has %S:\n%s" frag out) true (contains out frag))
+    ("[capture_escape]" :: "`h` cannot leave the `opening` callback" :: has)
+
+let accepted (body : string) () =
+  let rc, out = march (opener ^ body) in
+  Alcotest.(check int) ("accepted:\n" ^ out) 0 rc
+
+let main_of (stmts : string) : string = "  fn main() do\n" ^ stmts ^ "\n    ()\n  end"
+
+let escape_cases =
+  [ ( "the handle is returned",
+      escapes (main_of "    let _ = opening(\"x\", fn h -> h)") [ "but it is returned" ] );
+    ( "a closure that captures it is returned",
+      escapes
+        (main_of "    let _ = opening(\"x\", fn h -> fn () -> File.read_line(h))")
+        [ "this function captures it and is returned"; "captures `h`" ] );
+    ( "a record that holds it is returned",
+      escapes (main_of "    let _ = opening(\"x\", fn h -> { handle: h, n: 1 })") [ "is returned" ] );
+    ( "a tuple inside a Result is returned",
+      escapes (main_of "    let _ = opening(\"x\", fn h -> Ok((1, h)))") [ "is returned" ] );
+    ( "it is stored in a table",
+      escapes
+        (main_of
+           "    let t : Vault(File.Handle) = Authority.must(Vault.new(\"handles\"))\n\
+           \    let _ = opening(\"x\", fn h -> Vault.put(t, \"k\", h))")
+        [ "is stored in a table" ] );
+    ( "it is sent to an actor",
+      escapes
+        ("  actor Keeper do\n\
+         \    state { n : Int }\n\
+         \    init { n: 0 }\n\
+         \    on Keep(h : File.Handle) do\n\
+         \      state\n\
+         \    end\n\
+         \  end\n"
+         ^ main_of "    let k = spawn(Keeper)\n    let _ = opening(\"x\", fn h -> send(k, Keep(h)))")
+        [ "is sent to an actor" ] );
+    ( "a task that holds it is returned",
+      escapes
+        (main_of "    let _ = opening(\"x\", fn h -> Task.async(fn () -> File.read_line(h)))")
+        [ "is returned" ] );
+    ( "it is kept by a registry builtin",
+      escapes
+        (main_of
+           "    let _ = opening(\"x\", fn h ->\n\
+           \      Signal.watch(Signal.Term, fn () ->\n\
+           \        let _ = File.read_line(h)\n\
+           \        ()))")
+        [ "it is kept by `signal_watch`"; "calls `Signal.watch`" ] );
+    ( "a helper two calls away stores it",
+      escapes
+        ("  type Wrapped = Wrapped(File.Handle)\n\
+         \  pfn wrap(h : File.Handle) : Wrapped do Wrapped(h) end\n\
+         \  pfn keep(t : Vault(Wrapped), w : Wrapped) do Vault.put(t, \"k\", w) end\n"
+         ^ main_of
+             "    let t : Vault(Wrapped) = Authority.must(Vault.new(\"wrapped\"))\n\
+             \    let _ = opening(\"x\", fn h -> keep(t, wrap(h)))")
+        [ "is stored in a table" ] );
+    ( "it is passed to a function value the compiler cannot follow",
+      escapes
+        (main_of
+           "    let found : Option(Vault(File.Handle -> Int)) = Authority.must(Vault.whereis(\"fns\"))\n\
+           \    let _ = opening(\"x\", fn h ->\n\
+           \      match found do\n\
+           \        Some(t) ->\n\
+           \          match Vault.get(t, \"k\") do\n\
+           \            Some(f) -> f(h)\n\
+           \            None -> 0\n\
+           \          end\n\
+           \        None -> 0\n\
+           \      end)")
+        [ "is passed to code the compiler cannot follow" ] );
+    ( "the scoped function is used as a value first",
+      fun () ->
+        let rc, out = march (opener ^ main_of "    let w = opening\n    let _ = w(\"x\", fn h -> h)") in
+        Alcotest.(check int) ("rejected:\n" ^ out) 1 rc;
+        Alcotest.(check bool) ("the message:\n" ^ out) true
+          (contains out "The handle cannot leave the `opening` callback" && contains out "is returned") );
+    ( "the callback is a named function",
+      fun () ->
+        let rc, out =
+          march
+            (opener ^ "  pfn leak(file : File.Handle) : File.Handle do file end\n"
+             ^ main_of "    let _ = opening(\"x\", leak)")
+        in
+        Alcotest.(check int) ("rejected:\n" ^ out) 1 rc;
+        Alcotest.(check bool) ("names the parameter:\n" ^ out) true
+          (contains out "`file` cannot leave the `opening` callback") );
+    ( "nested: only the inner handle is reported",
+      fun () ->
+        let rc, out =
+          march
+            (opener
+             ^ main_of
+                 "    let _ = opening(\"x\", fn outer ->\n\
+                 \      let got = opening(\"y\", fn inner -> inner)\n\
+                 \      File.read_line(outer))")
+        in
+        Alcotest.(check int) ("rejected:\n" ^ out) 1 rc;
+        Alcotest.(check bool) ("inner:\n" ^ out) true (contains out "`inner` cannot leave");
+        Alcotest.(check bool) ("not outer:\n" ^ out) false (contains out "`outer` cannot leave") ) ]
+
+let accepted_cases =
+  [ ("reading inside", accepted (main_of "    let _ = opening(\"x\", fn h -> File.read_line(h))"));
+    ( "returning data read from it, in a tuple",
+      accepted (main_of "    let _ = opening(\"x\", fn h -> (File.read_line(h), 1))") );
+    ( "a local closure over it, called inside",
+      accepted
+        (main_of
+           "    let _ = opening(\"x\", fn h ->\n\
+           \      let next = fn () -> File.read_line(h)\n\
+           \      let a = next()\n\
+           \      next())") );
+    ( "a local record around it, used inside",
+      accepted
+        (main_of
+           "    let _ = opening(\"x\", fn h ->\n\
+           \      let r = { handle: h, n: 1 }\n\
+           \      File.read_line(r.handle))") );
+    ( "a task over it, awaited inside",
+      accepted
+        (main_of
+           "    let _ = opening(\"x\", fn h ->\n\
+           \      let t = Authority.must(Task.async(fn () -> File.read_line(h)))\n\
+           \      Task.await(t))") );
+    ( "a helper that only reads",
+      accepted
+        ("  pfn first(file : File.Handle) : Result(Option(String), File.FileError) do File.read_line(file) end\n"
+         ^ main_of "    let _ = opening(\"x\", fn h -> first(h))") );
+    ( "a list of handles used inside",
+      accepted
+        (main_of "    let _ = opening(\"x\", fn h -> List.length(List.map([h, h], fn x -> File.read_line(x))))") );
+    ( "an ordinary handle goes anywhere",
+      accepted
+        (main_of
+           "    let t : Vault(File.Handle) = Authority.must(Vault.new(\"handles\"))\n\
+           \    let _ = match File.open(\"x\") do\n\
+           \      Ok(Ok(h)) -> Vault.put(t, \"k\", h)\n\
+           \      _ -> ()\n\
+           \    end") ) ]
+
+(* The pass does not run for a program that names no function with a
+   `scoped` parameter, and a crash in it is never a silent accept. *)
+let test_pass_skipped () =
+  let rc, out = march ~flags:"--check --timings" ~env:"MARCH_CAPTURE_FAULT=1" "  fn main() do println(\"hi\") end" in
+  Alcotest.(check int) ("checks clean, the pass never started:\n" ^ out) 0 rc
+
+let test_pass_crash_is_an_ice () =
+  let rc, out =
+    march ~env:"MARCH_CAPTURE_FAULT=1" (main_of "    let _ = File.with_open(\"x\", fn h -> File.read_line(h))")
+  in
+  Alcotest.(check bool) ("not a clean check:\n" ^ out) true (rc <> 0);
+  Alcotest.(check bool) ("an internal compiler error:\n" ^ out) true (contains out "internal compiler error")
+
+(* An impl method is a body like any other. *)
+let test_escape_in_impl_method () =
+  let rc, out =
+    march
+      "  type Doc = Doc(String)\n\
+      \  interface Opens(a) do\n\
+      \    fn grab : a -> Result(Result(File.Handle, File.FileError), CapError)\n\
+      \  end\n\
+      \  impl Opens(Doc) do\n\
+      \    fn grab(d) do\n\
+      \      match d do\n\
+      \        Doc(p) -> File.with_open(p, fn h -> h)\n\
+      \      end\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    let _ = grab(Doc(\"x\"))\n\
+      \    ()\n\
+      \  end"
+  in
+  Alcotest.(check int) ("rejected:\n" ^ out) 1 rc;
+  Alcotest.(check bool) ("with capture_escape:\n" ^ out) true (contains out "[capture_escape]")
+
+(* Whole-branch review findings: each of these was accepted. *)
+let rejects (body : string) (has : string list) () =
+  let rc, out = march body in
+  Alcotest.(check int) ("rejected:\n" ^ out) 1 rc;
+  List.iter
+    (fun frag -> Alcotest.(check bool) (Printf.sprintf "the message has %S:\n%s" frag out) true (contains out frag))
+    has
+
+let stash =
+  "    let t : Vault(File.Handle) = Authority.must(Vault.new(\"hs\"))\n\
+  \    let _ = Vault.put(t, \"k\", h)\n\
+  \    2\n"
+
+let review_cases =
+  [ ( "the opening function named through an alias",
+      rejects
+        ("  alias File as F\n" ^ main_of "    let _ = F.with_open(\"x\", fn h -> h)")
+        [ "[capture_escape]"; "`h` cannot leave the `F.with_open` callback" ] );
+    ( "the opening function imported",
+      rejects
+        ("  import File\n" ^ main_of "    let _ = with_open(\"x\", fn h -> h)")
+        [ "[capture_escape]"; "`h` cannot leave the `with_open` callback" ] );
+    ( "the opening function brought in by `use`",
+      rejects
+        ("  use File.*\n" ^ main_of "    let _ = with_open(\"x\", fn h -> h)")
+        [ "[capture_escape]" ] );
+    ( "a table named through an alias",
+      rejects
+        ("  alias Vault as V\n"
+         ^ main_of
+             "    let t : Vault(File.Handle) = Authority.must(V.new(\"hs\"))\n\
+             \    let _ = File.with_open(\"x\", fn h -> V.put(t, \"k\", h))")
+        [ "[capture_escape]"; "is stored in a table" ] );
+    ( "a function of several clauses stores it",
+      rejects
+        ("  fn keep(0, h) do 1 end\n  fn keep(n, h) do\n" ^ stash ^ "  end\n"
+         ^ main_of "    let _ = File.with_open(\"x\", fn h -> keep(1, h))")
+        [ "[capture_escape]"; "is stored in a table" ] );
+    ( "an interface method stores it",
+      rejects
+        ("  type B = B(Int)\n\
+         \  interface Peek(a) do\n\
+         \    fn peek : a -> File.Handle -> Int\n\
+         \  end\n\
+         \  impl Peek(B) do\n\
+         \    fn peek(_, h) do\n" ^ stash ^ "    end\n  end\n"
+         ^ main_of "    let _ = File.with_open(\"x\", fn h -> peek(B(1), h))")
+        [ "[capture_escape]"; "is stored in a table"; "calls `peek`" ] );
+    ( "a builtin nobody listed is handed a function that captures it",
+      rejects
+        (main_of
+           "    let _ = File.with_open_write(\"x\", File.Append, fn h ->\n\
+           \      Logger.add_appender(Logger.appender_callback(\"file\", fn e ->\n\
+           \        let _ = File.write_to(h, \"line\")\n\
+           \        ())))")
+        [ "[capture_escape]"; "is kept by `logger_register_appender`" ] );
+    ( "`scoped` on an impl method's parameter is an error",
+      rejects
+        "  type D = D(Int)\n\
+        \  interface Opens(a) do\n\
+        \    fn using : a -> (File.Handle -> Int) -> Int\n\
+        \  end\n\
+        \  impl Opens(D) do\n\
+        \    fn using(d, f : scoped File.Handle -> Int) do 1 end\n\
+        \  end\n\
+        \  fn main() do () end"
+        [ "[scoped_misplaced]" ] );
+    ( "`scoped` in a record field is an error",
+      rejects "  type R = { cb : scoped File.Handle -> Int }\n  fn main() do () end" [ "[scoped_misplaced]" ] );
+    ( "`scoped` in a constructor argument is an error",
+      rejects "  type V = V(scoped File.Handle -> Int)\n  fn main() do () end" [ "[scoped_misplaced]" ] );
+    ( "reading through an alias is allowed",
+      fun () ->
+        let rc, out = march ("  alias File as F\n" ^ main_of "    let _ = F.with_open(\"x\", fn h -> File.read_line(h))") in
+        Alcotest.(check int) ("accepted:\n" ^ out) 0 rc ) ]
+
 let tests =
   [ ( "captures",
       [ Alcotest.test_case "a pure lambda" `Quick test_lam_pure;
@@ -417,4 +731,15 @@ let tests =
         Alcotest.test_case "a clause narrows a lambda" `Quick test_clause_narrows_lambda;
         Alcotest.test_case "a named value inside a restrict" `Quick test_restrict_named_value;
         Alcotest.test_case "spawns are charged" `Quick test_spawn_charged;
-        Alcotest.test_case "a function value created inside a mock is not tracked" `Quick test_mock_not_tracked ] ) ]
+        Alcotest.test_case "a function value created inside a mock is not tracked" `Quick test_mock_not_tracked ] );
+    ( "scoped",
+      [ Alcotest.test_case "the marker parses in a callback type" `Quick test_scoped_parses;
+        Alcotest.test_case "scoped is still an ordinary name" `Quick test_scoped_is_still_a_name;
+        Alcotest.test_case "the marker anywhere else is an error" `Quick test_scoped_misplaced ] );
+    ("escape", List.map (fun (n, f) -> Alcotest.test_case n `Quick f) escape_cases);
+    ("no escape", List.map (fun (n, f) -> Alcotest.test_case n `Quick f) accepted_cases);
+    ( "the escape check",
+      [ Alcotest.test_case "does not run when no scoped function is named" `Quick test_pass_skipped;
+        Alcotest.test_case "a crash in the pass is an internal compiler error" `Quick test_pass_crash_is_an_ice;
+        Alcotest.test_case "an impl method is checked" `Quick test_escape_in_impl_method ] );
+    ("review", List.map (fun (n, f) -> Alcotest.test_case n `Quick f) review_cases) ]

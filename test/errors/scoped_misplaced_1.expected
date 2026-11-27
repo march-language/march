@@ -1,0 +1,11 @@
+exit: 1
+-- CAPABILITY ----------- errors/scoped_misplaced_1.march
+
+`scoped` marks the handle a callback receives, so it is written only before the parameter type of a function type that is itself a function's parameter, as in `fn with_open(path : String, body : scoped File.Handle -> r)`. [scoped_misplaced]
+
+4 |   fn first_line(h : scoped File.Handle) : Result(Option(String), File.FileError) do
+                               ^^^^^^^^^^^
+
+    run `march --explain scoped_misplaced`
+
+

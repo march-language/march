@@ -29,7 +29,7 @@ let rec caps_in_ty (ty : Ast.ty) : string list =
      | Ast.TyCon (name, []) -> [ name.txt ]
      | Ast.TyCon (_, _ :: _)
      | Ast.TyVar _ | Ast.TyArrow _ | Ast.TyTuple _ | Ast.TyRecord _
-     | Ast.TyLinear _ | Ast.TyNat _ | Ast.TyNatOp _ | Ast.TyChan _
+     | Ast.TyLinear _ | Ast.TyScoped _ | Ast.TyNat _ | Ast.TyNatOp _ | Ast.TyChan _
      | Ast.TyRefine _ -> [])
   | Ast.TyCon (_, args) ->
     (* [Tagged(Marker, T)] deliberately recurses like any other constructor.
@@ -42,7 +42,7 @@ let rec caps_in_ty (ty : Ast.ty) : string list =
   | Ast.TyArrow (a, b) -> caps_in_ty a @ caps_in_ty b
   | Ast.TyTuple ts -> List.concat_map caps_in_ty ts
   | Ast.TyRecord fields -> List.concat_map (fun (_, t) -> caps_in_ty t) fields
-  | Ast.TyLinear (_, t) -> caps_in_ty t
+  | Ast.TyLinear (_, t) | Ast.TyScoped t -> caps_in_ty t
   | Ast.TyNatOp (_, a, b) -> caps_in_ty a @ caps_in_ty b
   | Ast.TyRefine (base, _, _) ->
     (* The refinement predicate is an expression, not a type; a capability
@@ -84,7 +84,7 @@ let rec mentions_tycon (name : string) (ty : Ast.ty) : bool =
   | Ast.TyArrow (a, b) -> mentions_tycon name a || mentions_tycon name b
   | Ast.TyTuple ts -> List.exists (mentions_tycon name) ts
   | Ast.TyRecord fields -> List.exists (fun (_, t) -> mentions_tycon name t) fields
-  | Ast.TyLinear (_, t) -> mentions_tycon name t
+  | Ast.TyLinear (_, t) | Ast.TyScoped t -> mentions_tycon name t
   | Ast.TyNatOp (_, a, b) -> mentions_tycon name a || mentions_tycon name b
   | Ast.TyRefine (base, _, _) -> mentions_tycon name base
   | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> false
@@ -149,7 +149,7 @@ let rec handle_in_ty ?(shadowed = []) (ty : Ast.ty) : (string * Ast.name) option
   | Ast.TyArrow (a, b) -> (match go a with Some h -> Some h | None -> go b)
   | Ast.TyTuple ts -> List.find_map go ts
   | Ast.TyRecord fields -> List.find_map (fun (_, t) -> go t) fields
-  | Ast.TyLinear (_, t) -> go t
+  | Ast.TyLinear (_, t) | Ast.TyScoped t -> go t
   | Ast.TyNatOp (_, a, b) -> (match go a with Some h -> Some h | None -> go b)
   | Ast.TyRefine (base, _, _) -> go base
   | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> None

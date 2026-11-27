@@ -1,0 +1,17 @@
+mod Main do
+  needs IO.FileRead, IO.Spawn
+
+  actor Keeper do
+    state { n : Int }
+    init { n: 0 }
+    on Keep(h : File.Handle) do
+      state
+    end
+  end
+
+  fn main() do
+    let keeper = spawn(Keeper)
+    let _ = File.with_open("notes.txt", fn h -> send(keeper, Keep(h)))
+    ()
+  end
+end

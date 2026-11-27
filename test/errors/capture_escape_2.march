@@ -1,0 +1,8 @@
+mod Main do
+  needs IO.FileRead
+
+  fn main() do
+    let kept = File.with_open("notes.txt", fn h -> h)
+    ()
+  end
+end

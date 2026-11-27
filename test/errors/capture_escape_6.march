@@ -1,0 +1,17 @@
+mod Main do
+  needs IO.FileRead, IO.Mut
+
+  fn main() do
+    let found : Option(Vault(File.Handle -> Int)) = Authority.must(Vault.whereis("line_counters"))
+    let _ = File.with_open("notes.txt", fn h ->
+      match found do
+        Some(table) ->
+          match Vault.get(table, "count") do
+            Some(count) -> count(h)
+            None -> 0
+          end
+        None -> 0
+      end)
+    ()
+  end
+end

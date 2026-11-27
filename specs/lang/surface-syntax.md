@@ -960,6 +960,15 @@ expression (`IO.Console`, `IO.FileRead("/srv/")`) with only literal arguments ha
 one with a computed string argument has type `Result(Scope, ScopeError)`. See
 [Capabilities]({{ site.baseurl }}/docs/capabilities/#restrict).
 
+```march
+fn with_open(path : String, body : scoped File.Handle -> r) : Result(Result(r, FileError), CapError)
+```
+
+`scoped` before the parameter type of a callback says the function hands the callback a
+handle and closes it when the callback returns, so the handle may not leave the callback.
+It is written only there, on a function type that is a function's own parameter, and only
+before a type name; everywhere else `scoped` is an ordinary name.
+
 ---
 
 ## Actors

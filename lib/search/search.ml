@@ -149,7 +149,7 @@ let make_ast_ty_printer () : Ast.ty -> string =
       String.concat ", "
         (List.map (fun ({Ast.txt; _}, t) -> txt ^ ": " ^ go t) fields)
       ^ " }"
-    | Ast.TyLinear (_, t) -> go t
+    | Ast.TyLinear (_, t) | Ast.TyScoped t -> go t
     | Ast.TyNat n -> string_of_int n
     | Ast.TyNatOp _ -> "_"
     | Ast.TyChan _ -> "Chan"
