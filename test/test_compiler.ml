@@ -4009,14 +4009,19 @@ let test_complex_type_mismatch_hint () =
 (* ── H9: Actor handler capability checking ───────────────────────────────── *)
 
 let test_actor_handler_cap_needs_ok () =
-  (* An actor handler with a Cap parameter is OK if the module declares the need. *)
-  let ctx = typecheck {|mod Test do
-    needs IO
-    actor Counter do
-      state { count: Int }
-      init { count: 0 }
-      on Inc(cap: Cap(IO)) do
-        state
+  (* An actor handler with a Cap parameter is OK if the module declares the
+     need.  A proof capability: a `Cap(IO)` parameter is retired since ocap
+     phase 7b (its own error). *)
+  let ctx = typecheck {|mod Top do
+    mod Db do proof cap P end
+    mod Test do
+      needs Db.P
+      actor Counter do
+        state { count: Int }
+        init { count: 0 }
+        on Inc(cap: Cap(Db.P)) do
+          state
+        end
       end
     end
   end|} in
@@ -4149,9 +4154,12 @@ let test_missing_needs_dedup_no_orphan_hint_main_cap_param () =
   else begin
     let src = Filename.temp_file "cap_dedup_main" ".march" in
     let oc = open_out src in
+    (* The deprecated `main(cap : Cap(IO))` form (still accepted, with a
+       warning, until the release that removes it) is this regression's
+       shape: Check 1 reads the `Cap(IO)` in the signature. *)
     output_string oc
       "mod ManyCaps do\n\
-      \  fn main() : () needs IO do\n\
+      \  fn main(cap : Cap(IO)) : () do\n\
       \    println(\"a\")\n\
       \    let _ = file_write(\"/tmp/mc\", \"d\")\n\
       \    ()\n\
