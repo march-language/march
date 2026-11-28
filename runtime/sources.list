@@ -64,3 +64,4 @@ march_gc.c                   unit-test-only  jit
 march_heap.c                 unit-test-only  jit
 march_message.c              unit-test-only  jit
 march_runtime_wasm.c         wasm            -
+march_wasm_heap.c            wasm            -

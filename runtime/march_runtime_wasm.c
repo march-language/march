@@ -2,7 +2,7 @@
  * march_runtime_wasm.c — Minimal March runtime for wasm32-unknown-unknown.
  *
  * This is a stripped-down runtime for browser WASM targets.  It provides:
- *   - Bump allocator by default (linear memory, no free)
+ *   - Bump allocator by default, with an opt-in host-driven tracing heap
  *   - Reference counting (no-ops in single-threaded WASM)
  *   - String operations (lit, concat, eq, conversion, etc.)
  *   - Math builtins (delegates to libm or wasm intrinsics)
@@ -44,7 +44,9 @@ void *memmove(void *dst, const void *src, size_t n) {
 
 /* ── Memory management ──────────────────────────────────────────────── */
 
-#ifdef MARCH_WASM_EXTERNAL_ALLOC
+#if defined(MARCH_WASM_TRACING_HEAP)
+#include "march_wasm_heap.h"
+#elif defined(MARCH_WASM_EXTERNAL_ALLOC)
 /* The embedder provides zeroed, 8-byte-aligned storage in this module's
    linear memory and is responsible for keeping live objects allocated. */
 extern void *march_alloc(int64_t sz);
@@ -104,7 +106,7 @@ void  march_clo_param_own(void *p) { (void)p; }
 void  march_clo_release(void *p) { (void)p; }
 void  march_clo_register_drops(void **pairs, int64_t n) { (void)pairs; (void)n; }
 void *march_clo_float_arg(void *p) { (void)p; return 0; }
-void  march_free(void *p) { (void)p; /* no-op bump alloc */ }
+void  march_free(void *p) { (void)p; }
 /* A TCO loop's pending-drop list (see march_runtime.h): every release it could
    record is a no-op here, so nothing is recorded and the drain does nothing. */
 void *march_tco_defer_push(void *buf, void (*release)(void *), void *v) {
@@ -141,10 +143,13 @@ void *march_string_lit(const char *s, int64_t len) {
  * form codegen emits for `ALit (LitString _)`.  See march_runtime.h for why
  * literals must not allocate per evaluation. No atomics or immortal RC are
  * needed here because this runtime never releases the cached header.
- * Embedders that reclaim storage must keep cached headers live. */
+ * Custom allocators that reclaim storage must keep cached headers live. */
 void *march_string_lit_static(const char *s, int64_t len, void **cell) {
     if (*cell) return *cell;
     *cell = march_string_lit(s, len);
+#ifdef MARCH_WASM_TRACING_HEAP
+    march_wasm_heap_pin_literal(*cell);
+#endif
     return *cell;
 }
 

@@ -49,6 +49,41 @@ counting and free operations are still no-ops. An embedder that reclaims
 storage must track live allocations, including pointers retained by cached
 string literals.
 
+### Host-driven tracing heap in freestanding wasm32
+
+To use March's bounded, non-moving heap, compile `runtime/march_runtime_wasm.c`
+with `-DMARCH_WASM_TRACING_HEAP` and link `runtime/march_wasm_heap.c` into the
+same freestanding module. Include `runtime/march_wasm_heap.h` in the embedder
+bridge. For example, with a bridge exporting one or more entry points:
+
+```sh
+clang --target=wasm32-unknown-unknown -ffreestanding -nostdlib -O2 \
+  -DMARCH_WASM_TRACING_HEAP -Iruntime -Wl,--no-entry -Wl,--export-memory \
+  program.ll bridge.c runtime/march_runtime_wasm.c runtime/march_wasm_heap.c \
+  -o program.wasm
+```
+
+At a safepoint after March returns, call
+`march_wasm_heap_collect(roots, count)`. Supply every allocation start kept
+across that boundary in embedder state, JS handles, or unmanaged storage.
+There must be no suspended March frames. The collector scans the aligned
+32-bit words in each reachable allocation for more allocation starts. A
+pointer into the middle of an allocation does not keep it alive. Keep the
+owner rooted if the host retains an interior pointer. Other word values that
+happen to equal an allocation start can keep the allocation alive.
+Runtime-managed cached string literals are kept automatically.
+
+Collection reuses and coalesces free space without moving live allocations.
+The heap owns linear-memory growth after its first allocation. It traps if
+an allocation needs more than the cap, which defaults to 256 MiB of total
+linear memory and can be set with `-DMARCH_WASM_HEAP_MAX_BYTES=<bytes>` when
+compiling `runtime/march_wasm_heap.c`. Set a positive multiple of 64 KiB
+below 4 GiB, with room for the module's stack, static data, and heap.
+The allocation-start bitmap reserves one byte per 64 bytes of the cap.
+A stricter linker or engine limit still applies. WebAssembly pages remain
+reserved for reuse after collection. `march_wasm_heap_live_bytes()` reports
+aligned payload bytes retained by the last collection.
+
 ## Implementation tiers
 
 ### Tier 1 — Pure compute ✅ (code complete; end-to-end pending toolchain install)
