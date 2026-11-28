@@ -36,6 +36,19 @@ The C runtime (`runtime/march_runtime.c` ~2,000 lines, `runtime/march_http.c` ~1
 | Capabilities & supervision | march_runtime.c | Depends on actor system | High |
 | dlopen/dlsym (JIT/REPL) | jit_stubs.c | Not applicable; JIT doesn't make sense in WASM | N/A |
 
+### Custom allocators in freestanding wasm32
+
+The freestanding browser runtime uses a bump allocator by default. To link
+your own allocator, compile `runtime/march_runtime_wasm.c` with
+`-DMARCH_WASM_EXTERNAL_ALLOC` and supply `void *march_alloc(int64_t size)`
+in the same module. Return a non-null, eight-byte-aligned pointer to at least
+`size` zeroed bytes in that module's linear memory, or trap on failure.
+
+This option changes where allocations come from. The runtime's reference
+counting and free operations are still no-ops. An embedder that reclaims
+storage must track live allocations, including pointers retained by cached
+string literals.
+
 ## Implementation tiers
 
 ### Tier 1 — Pure compute ✅ (code complete; end-to-end pending toolchain install)

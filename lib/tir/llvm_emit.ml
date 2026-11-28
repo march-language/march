@@ -176,6 +176,7 @@ type ctx = Llvm_ctx.ctx = {
   mutable mutual_tco_fn_tags    : (string * int) list;
   mutable mutual_tco_stack_save : string;
   repl : bool;
+  wasm32 : bool;
   mutable shape_meta : bool;
   rec_shape_globals : (string, string * string) Hashtbl.t;
   mutable ctor_desc_globals : (string * string) option;
@@ -535,7 +536,7 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
         (match wrap_kind with
          | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
          | `Define  ->
-           clo_wrap_define ~drop_clo:(ctx.repl || closure_epoch_needed ctx v.Tir.v_name)
+           clo_wrap_define ~wasm32:ctx.wasm32 ~drop_clo:(ctx.repl || closure_epoch_needed ctx v.Tir.v_name)
              ~frame_epoch:(closure_epoch_needed ctx v.Tir.v_name)
              ~borrowed:(clo_wrap_borrowed v.Tir.v_name (List.length param_tys))
              ~own_float:(not (clo_wrap_runtime_owned v.Tir.v_name))
@@ -680,7 +681,7 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
         (match wrap_kind with
          | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_ltys
          | `Define  ->
-           clo_wrap_define ~drop_clo:(ctx.repl || closure_epoch_needed ctx v.Tir.v_name)
+           clo_wrap_define ~wasm32:ctx.wasm32 ~drop_clo:(ctx.repl || closure_epoch_needed ctx v.Tir.v_name)
              ~frame_epoch:(closure_epoch_needed ctx v.Tir.v_name)
              ~borrowed:(clo_wrap_borrowed v.Tir.v_name (List.length param_ltys))
              ~own_float:(not (clo_wrap_runtime_owned v.Tir.v_name))
@@ -750,7 +751,7 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
             (match wrap_kind with
              | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
              | `Define  ->
-               clo_wrap_define ~drop_clo:(ctx.repl || closure_epoch_needed ctx resolved)
+               clo_wrap_define ~wasm32:ctx.wasm32 ~drop_clo:(ctx.repl || closure_epoch_needed ctx resolved)
                  ~frame_epoch:(closure_epoch_needed ctx resolved)
                  ~borrowed:(clo_wrap_borrowed resolved (List.length param_tys))
                  ~own_float:(not (clo_wrap_runtime_owned resolved))

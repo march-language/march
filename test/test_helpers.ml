@@ -544,14 +544,14 @@ let rec has_heap_alloc = function
   | _ -> false
 
 
-let emit_actor_ir src =
+let emit_actor_ir ?(target = March_tir.Llvm_emit.Native) src =
   let m = parse_and_desugar src in
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
   let tir = March_tir.Lower.lower_module ~type_map m in
   let tir = March_tir.Mono.monomorphize tir in
   let tir = March_tir.Defun.defunctionalize tir in
   let tir = March_tir.Perceus.perceus tir in
-  March_tir.Llvm_emit.emit_module tir
+  March_tir.Llvm_emit.emit_module ~target tir
 
 (** Emit LLVM IR for [src] with the string + iolist stdlib modules prepended.
     Used by the ~H sigil codegen regression tests, which need IOList.from_strings

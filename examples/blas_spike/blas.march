@@ -1,0 +1,16 @@
+mod Blas do
+  needs Ffi
+  needs IO.Foreign
+  needs IO.Foreign.Blocking
+
+  extern "blas" : Cap(Ffi) do
+    -- The C shim constructs Result so this call uses the blocking FFI pool.
+    blocking fn matmul_f32_native(a: NativeF32Arr, b: NativeF32Arr, m: Int, k: Int, n: Int)
+      : Result(NativeF32Arr, String) = "march_blas_matmul_f32"
+  end
+
+  fn matmul_f32(a: NativeF32Arr, b: NativeF32Arr, m: Int, k: Int, n: Int)
+      : Result(NativeF32Arr, String) do
+    matmul_f32_native(a, b, m, k, n)
+  end
+end

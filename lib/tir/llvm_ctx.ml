@@ -292,6 +292,7 @@ type ctx = {
      ORC JIT on macOS cannot resolve TLS variables via emutls; the REPL is
      always single-threaded so the check is unnecessary there anyway. *)
   repl : bool;
+  wasm32 : bool;
   (* Native record shape metadata: when true (non-WASM targets), record
      allocations call march_record_set_shape to stamp the interned shape id
      into the header pad word so the record introspection builtins
@@ -376,7 +377,7 @@ let is_repl_prior_fn (name : string) : bool =
   | Some tbl -> Hashtbl.mem tbl name
   | None -> false
 
-let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
+let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false) ?(wasm32=false)
     ?(hot_reload=None) ?(hr_names=Hot_reload.Name_table.build [])
     ?(type_defs=[]) ?(k_table : Kind.table option) () =
   let collision_set = Collision_set.compute type_defs in
@@ -457,6 +458,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   mutual_tco_fn_tags    = [];
   mutual_tco_stack_save = "";
   repl;
+  wasm32;
   shape_meta = true;
   rec_shape_globals = Hashtbl.create 16;
   ctor_desc_globals = None;
@@ -756,6 +758,18 @@ let emit_wrap_int63 ctx (i64v : string) : string =
   emit ctx (Printf.sprintf "%s = ashr exact i64 %s, 1" r s);
   r
 
+(** Decode a signed immediate from a pointer bit pattern already widened to
+    i64. LLVM zero-extends ptrtoint on wasm32, so shift at pointer width
+    before sign-extending the resulting scalar. *)
+let emit_untag_shift ~wasm32 ~emit ~dst value =
+  if wasm32 then begin
+    let narrow = dst ^ ".narrow" and signed = dst ^ ".signed" in
+    emit (Printf.sprintf "%s = trunc i64 %s to i32" narrow value);
+    emit (Printf.sprintf "%s = ashr i32 %s, 1" signed narrow);
+    emit (Printf.sprintf "%s = sext i32 %s to i64" dst signed)
+  end else
+    emit (Printf.sprintf "%s = ashr i64 %s, 1" dst value)
+
 (** Emit a CONDITIONAL untag of an i64 value that may be either a tagged
     scalar ([(n << 1) | 1], always odd) or a heap pointer flowing through a
     scalar-typed view (always even — e.g. dynamically-typed record/alist
@@ -776,15 +790,16 @@ let emit_wrap_int63 ctx (i64v : string) : string =
     call site must pass its historical prefixes to reproduce byte-identical
     IR. Takes the ALREADY-i64 value (a caller converting from [ptr] must
     [ptrtoint] first — see [coerce]'s ("ptr","i64") case, which does exactly
-    that). Returns the final i64 register. *)
-let emit_untag_scalar ctx ~and_pfx ~ashr_pfx ~icmp_pfx ~sel_pfx (i64v : string) : string =
+    that). Pass [wasm32] when the input came from a wasm32 pointer. Returns
+    the final i64 register. *)
+let emit_untag_scalar ?(wasm32=false) ctx ~and_pfx ~ashr_pfx ~icmp_pfx ~sel_pfx (i64v : string) : string =
   let b = fresh ctx and_pfx in
   let s = fresh ctx ashr_pfx in
   let o = fresh ctx icmp_pfx in
   let r = fresh ctx sel_pfx in
   emit ctx (Printf.sprintf "%s = and i64 %s, 1" b i64v);
   emit ctx (Printf.sprintf "%s = icmp ne i64 %s, 0" o b);
-  emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" s i64v);
+  emit_untag_shift ~wasm32 ~emit:(emit ctx) ~dst:s i64v;
   emit ctx (Printf.sprintf "%s = select i1 %s, i64 %s, i64 %s" r o s i64v);
   r
 
@@ -806,7 +821,7 @@ let emit_untag_known_scalar ctx ~raw ~unt (ptr_v : string) : string =
   let r = fresh ctx raw in
   emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" r ptr_v);
   let u = fresh ctx unt in
-  emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" u r);
+  emit_untag_shift ~wasm32:ctx.wasm32 ~emit:(emit ctx) ~dst:u r;
   u
 
 (** The 5 SIMD vector LLVM type strings and their runtime `kind` tags (must
@@ -964,7 +979,7 @@ let coerce ctx from_ty v to_ty =
        values survive scalar-typed transit unscathed. *)
     let i = fresh ctx "cv" in
     emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" i v);
-    emit_untag_scalar ctx ~and_pfx:"cv" ~ashr_pfx:"cv" ~icmp_pfx:"cv" ~sel_pfx:"cv" i
+    emit_untag_scalar ~wasm32:ctx.wasm32 ctx ~and_pfx:"cv" ~ashr_pfx:"cv" ~icmp_pfx:"cv" ~sel_pfx:"cv" i
   | ("i64", "ptr") ->
     (* Tag an integer for polymorphic storage: (n << 1) | 1.
        Low bit 1 marks this as an immediate; heap pointers are always even. *)

@@ -19,6 +19,11 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- WASM extern declarations use the same scalar and pointer types as their
+  call sites, so freestanding builds can link C functions with numeric arguments.
+
 ### Changed
 
 - **`Cap(IO.*)` values are retired** (object capabilities, phase 7b). A function no longer
@@ -140,6 +145,12 @@ git log is authoritative for exact commits.
   parameters are unchanged. Programs behave the same.
 
 ### Added
+
+- **Freestanding wasm32 embedders can supply their own allocator.** Compile the
+  runtime with `-DMARCH_WASM_EXTERNAL_ALLOC` and link an implementation of
+  `march_alloc`. The default remains the bump allocator.
+- **Zero-copy `NativeF32Arr` access in compiled C bindings.** Native kernels
+  can borrow FP32 inputs and write directly into fresh March arrays.
 
 - **A warning when a `Listener`'s last use is `Socket.local_port`.** A compiled program
   closes a handle right after the last line that mentions it, so a later connect to the
@@ -1437,6 +1448,10 @@ git log is authoritative for exact commits.
 
 - Programs with unscoped capability requests can call statically linked
   host functions in freestanding WebAssembly without an environment-grant runtime.
+- **Wasm32 preserves the sign of tagged integers.** Negative integers that fit in a
+  tagged pointer keep their sign when read from erased storage or passed through a closure.
+- Compiled string interpolation now links against the freestanding WebAssembly
+  runtime when it combines three or more parts.
 
 - Compiled calls now use the module alias in their own scope when a library
   and its caller reuse the same alias name for different modules.

@@ -1,0 +1,21 @@
+mod Test do
+  needs Ffi
+  needs IO.Foreign
+  needs IO.Foreign.Blocking
+  needs IO.Console
+
+  extern "native_f32" : Cap(Ffi) do
+    blocking fn scale(xs: NativeF32Arr): NativeF32Arr = "ffi_test_f32_scale"
+  end
+
+  fn main() : Unit needs IO.Console, IO.Foreign do
+    let xs = NativeArray.set_f32(NativeArray.make_f32(3, 1.5), 1, -2.25)
+    let ys = scale(xs)
+    println(NativeArray.get_f32(xs, 1))
+    println(NativeArray.get_f32(ys, 0))
+    println(NativeArray.get_f32(ys, 1))
+    println(NativeArray.get_f32(ys, 2))
+    println(NativeArray.length_f32(scale(NativeArray.make_f32(0, 0.0))))
+    ()
+  end
+end
