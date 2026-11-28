@@ -141,6 +141,9 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Freestanding wasm32 embedders can supply their own allocator.** Compile the
+  runtime with `-DMARCH_WASM_EXTERNAL_ALLOC` and link an implementation of
+  `march_alloc`. The default remains the bump allocator.
 - **Zero-copy `NativeF32Arr` access in compiled C bindings.** Native kernels
   can borrow FP32 inputs and write directly into fresh March arrays.
 
