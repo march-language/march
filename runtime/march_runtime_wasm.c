@@ -261,25 +261,45 @@ void *march_string_to_int(void *s) {
     return box;
 }
 
+/* Boxed List has a tag at byte 8 and fields at bytes 16 and 24. */
+typedef struct wasm_string_list {
+    int64_t rc;
+    int32_t tag, pad;
+    march_string *head;
+#if UINTPTR_MAX == UINT32_MAX
+    int32_t head_pad;
+#endif
+    struct wasm_string_list *tail;
+} wasm_string_list;
+
+_Static_assert(offsetof(wasm_string_list, head) == 16 &&
+               offsetof(wasm_string_list, tail) == 24, "March List layout");
+
 void *march_string_join(void *list, void *sep) {
-    /* Simplified: walk Cons list, concat with separator */
-    march_string *sep_s = (march_string *)sep;
-    void *result = march_string_lit("", 0);
-    int first = 1;
-    void *cur = list;
-    while (1) {
-        int32_t tag = *(int32_t *)((char *)cur + 8);
-        if (tag == 0) break;  /* Nil */
-        void *head = *(void **)((char *)cur + 16);
-        void *tail = *(void **)((char *)cur + 24);
-        if (!first && sep_s->length > 0) {
-            result = march_string_concat(result, sep);
-        }
-        result = march_string_concat(result, head);
-        first = 0;
-        cur = tail;
+    const wasm_string_list *first = list;
+    if (!first->tag) return march_string_lit("", 0);
+    const march_string *separator = sep;
+
+    /* The bump allocator keeps every allocation. Size the result before
+     * copying so no intermediate string retains a copy of an earlier prefix. */
+    uint64_t length = first->head->length;
+    for (const wasm_string_list *node = first->tail; node->tag; node = node->tail) {
+        uint64_t added = (uint64_t)separator->length + (uint64_t)node->head->length;
+        if (__builtin_add_overflow(length, added, &length)) __builtin_trap();
     }
-    return result;
+    if (length > SIZE_MAX - 8 || length >= INT64_MAX) __builtin_trap();
+    char *buffer = march_alloc(length + 1);
+    char *out = buffer;
+    for (const wasm_string_list *node = first; node->tag; node = node->tail) {
+        if (node != first) {
+            memcpy(out, separator->data, separator->length);
+            out += separator->length;
+        }
+        memcpy(out, node->head->data, node->head->length);
+        out += node->head->length;
+    }
+    *out = '\0';
+    return march_string_lit(buffer, length);
 }
 
 /* Extended string builtins — minimal implementations */
