@@ -462,7 +462,10 @@ let contains_substring (hay : string) (needle : string) =
   (let rec go i = i + nn <= nh && (String.sub hay i nn = needle || go (i + 1)) in
    go 0)
 
-(* A CAS-key fragment digesting the FFI shim sources + link flags, so editing a
+let is_linker_file_flag flag =
+  flag <> "" && flag.[0] <> '-' && Sys.file_exists flag && not (Sys.is_directory flag)
+
+(* A CAS-key fragment digesting the FFI shim sources and native linker inputs, so editing a
    shim (a .c file, not the .march source) invalidates the cached binary. Empty
    when no FFI shims are in play. *)
 let ffi_cas_tag () : string list =
@@ -473,7 +476,11 @@ let ffi_cas_tag () : string list =
       Buffer.add_string buf f;
       (try Buffer.add_string buf (Digest.to_hex (Digest.file f)) with _ -> ()))
       (List.rev !ffi_c_files);
-    List.iter (Buffer.add_string buf) (List.rev !ffi_link_flags);
+    List.iter (fun flag ->
+      Buffer.add_string buf flag;
+      if is_linker_file_flag flag then
+        (try Buffer.add_string buf (Digest.to_hex (Digest.file flag)) with _ -> ()))
+      (List.rev !ffi_link_flags);
     ["ffi:" ^ Digest.to_hex (Digest.string (Buffer.contents buf))]
   end
 
@@ -482,8 +489,10 @@ let ffi_cas_tag () : string list =
    (`cargo build --release` produces a staticlib), and how a user links any
    prebuilt static library. *)
 let is_static_archive_flag (flag : string) : bool =
-  Filename.check_suffix flag ".a" && Sys.file_exists flag
-  && not (Sys.is_directory flag)
+  Filename.check_suffix flag ".a" && is_linker_file_flag flag
+
+let shell_linker_flag flag =
+  if is_linker_file_flag flag then Filename.quote flag else flag
 
 (* Linker arguments that put EVERY member of [archive] into the interpreter's
    shim .so.  A plain `archive.a` on a `cc -shared` line pulls in only members
@@ -567,7 +576,7 @@ let setup_interpreter_ffi () =
          RTLD_GLOBAL) are undefined and the whole shim fails to dlopen. *)
       let link_flags = String.concat " "
         (List.map (fun f ->
-             if is_static_archive_flag f then force_load_args f else f)
+             if is_static_archive_flag f then force_load_args f else shell_linker_flag f)
             (List.rev !ffi_link_flags)) in
       let tmp = Printf.sprintf "%s.%d.tmp" so_path (Unix.getpid ()) in
       (* On macOS, shim symbols reference runtime functions (e.g. march_str_borrow)
@@ -6584,7 +6593,7 @@ let compile filename =
             let dbg_flag = if !debug_mode || !debug_tui_mode || !debug_info then " -g" else "" in
             let san_flag = sanitize_clang_flag () in
             (* User FFI linker flags from forge.toml [[ffi]] (--ffi-link), e.g. -lz. *)
-            let ffi_link = String.concat "" (List.rev_map (fun f -> " " ^ f) !ffi_link_flags) in
+            let ffi_link = String.concat "" (List.rev_map (fun f -> " " ^ shell_linker_flag f) !ffi_link_flags) in
             (* When compiling user FFI shims, put the runtime dir on the include
                path so their `#include "march_ffi.h"` resolves with no config. *)
             let ffi_inc = if !ffi_c_files = [] then ""
@@ -7127,7 +7136,9 @@ let compile filename =
                fine.  Measured 2026-09-28, Ubuntu 24.04 arm64. *)
             let cmd = Printf.sprintf
               "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s%s %s%s%s %s%s%s -o %s%s%s%s%s"
-              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define hcr_identity_flags runtime_inputs pre_ll_libs blake3_flags2 ll_tmp post_ll_libs ffi_link out_bin math_flag ucontext_flag reload_ldl strip_flag in
+              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define hcr_identity_flags runtime_inputs pre_ll_libs blake3_flags2
+              (Filename.quote ll_tmp) post_ll_libs ffi_link (Filename.quote out_bin)
+              math_flag ucontext_flag reload_ldl strip_flag in
             (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
             let rc = Sys.command cmd in

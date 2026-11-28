@@ -52,39 +52,18 @@ let run source =
           (Filename.concat ".march" (Filename.concat "build" "release"))
       in
       Project.mkdir_p build_dir;
-      let lib_dir = Filename.concat abs_dir "lib" in
       match Project.entry proj with
       | Error e -> Error e
       | Ok entry -> begin
         let output = Filename.concat build_dir proj.Project.name in
-        (* Collect dep lib paths *)
-        let dep_lib_paths = List.filter_map (fun (_, dep) ->
-            match dep with
-            | Project.PathDep rel_path ->
-              let p = if Filename.is_relative rel_path
-                then Filename.concat abs_dir rel_path
-                else rel_path
-              in
-              let d = Filename.concat p "lib" in
-              if Sys.file_exists d then Some d else None
-            | _ -> None
-          ) proj.Project.deps in
-        let config_dir = Filename.concat abs_dir "config" in
-        let all_lib_paths =
-          dep_lib_paths @ [lib_dir]
-          @ (if Sys.file_exists config_dir then [config_dir] else [])
-        in
-        (* The project's dependency grants (ocap phase 6), for the deps on
-           this path. *)
-        let grants_env =
-          Cmd_build.dep_grants_env ~scope:proj.Project.deps ~lib_paths:all_lib_paths proj in
-        let lib_path_env = Printf.sprintf "%sMARCH_LIB_PATH=%s"
-            grants_env (String.concat ":" all_lib_paths) in
-        (* [package] pin_main: an installed binary is exactly the
-           launched-without-MARCH_PIN_MAIN case the key exists for. *)
-        let pin_flag = if proj.Project.pin_main then " --pin-main" else "" in
-        let cmd = Printf.sprintf "%s march --compile -o %s --opt 2%s %s"
-            lib_path_env (Filename.quote output) pin_flag (Filename.quote entry) in
+        match Cmd_build.deps_preflight ~scope:(Cmd_build.build_scope ~release:true proj) proj with
+        | Error _ as error -> error
+        | Ok () ->
+        match Cmd_build.ffi_flags_full ~release:true proj with
+        | Error _ as error -> error
+        | Ok ffi_flags ->
+        let cmd = Cmd_build.compile_command ~lib_path_env:(Cmd_build.lib_path_env ~release:true proj)
+            ~ffi_flags ~output ~release:true ~dump_phases:false ~pin_main:proj.Project.pin_main entry in
         let rc = Sys.command cmd in
         if rc <> 0 then
           Error (Printf.sprintf "build failed (exit %d)" rc)

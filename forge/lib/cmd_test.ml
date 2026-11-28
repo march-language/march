@@ -344,9 +344,8 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
     let lib_dir_pp = Filename.concat proj.Project.root "lib" in
     let _pp = Cmd_build.run_preprocessors ~proj ~src_dir ~gen_dir in
     let _pp2 = Cmd_build.run_preprocessors ~proj ~src_dir:lib_dir_pp ~gen_dir in
-    match Cmd_build.deps_preflight
-            ~scope:(proj.Project.deps @ proj.Project.dev_deps @ proj.Project.test_deps)
-            proj with
+    let scope = proj.Project.deps @ proj.Project.dev_deps @ proj.Project.test_deps in
+    match Cmd_build.deps_preflight ~scope proj with
     | Error e -> Error e
     | Ok () ->
     let (lib_path_env, output, all_lib_paths, env_pfx) = project_env proj in
@@ -366,7 +365,7 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
       (* Link the same FFI shims as the compiled path below (and `forge build`)
          so interpreter-mode tests that call into [[ffi]] code don't fail with
          "runtime not loaded" — see invoke_march_interp's doc comment. *)
-      (match Cmd_build.ffi_flags_full proj with
+      (match Cmd_build.ffi_flags_full ~scope proj with
       | Error msg -> Error msg
       | Ok ffi_flags ->
         invoke_march_interp ~verbose ~filter ~coverage ~seed ~skip_properties ~ffi_flags ~lib_path_env test_files)
@@ -406,7 +405,7 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
       let entry = match staged with Some e -> e | None -> List.hd test_files in
       (* Link the same FFI shims as `forge build` so native tests that call
          into [[ffi]] code (e.g. the sqlite shim) don't fail at link time. *)
-      match Cmd_build.ffi_flags_full proj with
+      match Cmd_build.ffi_flags_full ~scope proj with
       | Error msg -> Error msg
       | Ok ffi_flags ->
         invoke_compiled ~verbose ~filter ~seed ~skip_properties ~release ~ffi_flags ~lib_path_env:lib_path_with_test ~output entry

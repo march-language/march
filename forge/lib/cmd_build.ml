@@ -179,6 +179,11 @@ let dep_to_lib_paths ?coords ~root (dep_name, dep) =
      | Some p -> collect_lib_dirs p
      | None  -> [])
 
+let installed_dep_root ?coords ~root ((name, dep) as entry) =
+  match dep with
+  | Project.PathDep _ -> Project.dep_root_dir ?coords ~project_root:root entry
+  | _ -> Project.dep_cache_dir ?coords ~strict_locked:true name
+
 (** Walk a project's dependency graph transitively: for every direct dep,
     also pull in ITS OWN prod [deps] (recursively), so e.g. a project
     depending on `bastion`, which itself depends on `depot`, gets `depot`
@@ -230,7 +235,7 @@ let collect_transitive_deps ?coords visited (root, deps) =
              it the locator only has its fallbacks, which refuse a container
              holding several versions (and, offline, find nothing at all), so
              a dep's own deps were silently missed. *)
-          match Project.dep_root_dir ?coords ~project_root:root (dep_name, dep) with
+          match installed_dep_root ?coords ~root (dep_name, dep) with
           | Some dep_dir when Sys.file_exists (Filename.concat dep_dir "forge.toml") ->
             (match Project.load_from_dir dep_dir with
              | Ok dep_proj -> Some (dep_dir, dep_proj.Project.deps)
@@ -831,49 +836,127 @@ let native_ffi_os = lazy (
   | Ok "Linux" -> Some Project.Linux
   | _ -> None)
 
-(** Shared and target-specific C shim flags, in declaration order. *)
-let ffi_flags_of ?target ~root (proj : Project.project) =
+let active_ffi_bindings ?target (proj : Project.project) =
   let target_os = lazy (
     if is_linux_cross_target target then Some Project.Linux
     else match Option.map String.lowercase_ascii target with
       | None | Some "native" -> Lazy.force native_ffi_os
       | Some _ -> None)
   in
-  let bindings = List.filter (fun (binding : Project.ffi_binding) ->
+  List.filter (fun (binding : Project.ffi_binding) ->
       match binding.ffi_os with
       | None -> true
       | Some os -> Some os = Lazy.force target_os) proj.Project.ffi_bindings
-  in
-  let srcs = List.concat_map (fun (binding : Project.ffi_binding) ->
+
+exception Ffi_dependency_error of string
+
+(** Load metadata from the packages this build explicitly opts into, using
+    the same dependency resolution as the March source search path. *)
+let ffi_dependencies ?target ?scope ?(release=false) ~verify proj =
+  match List.concat_map (fun b -> b.Project.ffi_dependencies)
+          (active_ffi_bindings ?target proj) with
+  | [] -> []
+  | names ->
+    let root = proj.Project.root in
+    let scope = Option.value ~default:(build_scope ~release proj) scope in
+    if verify then
+      (match deps_preflight ~scope proj with
+       | Ok () -> ()
+       | Error error -> raise (Ffi_dependency_error error));
+    let coords = Project.dep_coords ~project_root:root in
+    let closure = collect_transitive_deps ~coords (Hashtbl.create 16) (root, scope) in
+    let seen = Hashtbl.create 8 in
+    List.filter_map (fun name ->
+        if Hashtbl.mem seen name then None
+        else begin
+          Hashtbl.add seen name ();
+          let fail error =
+            raise (Ffi_dependency_error (Printf.sprintf "%s: [ffi] dependency '%s' %s"
+              (Filename.concat root "forge.toml") name error)) in
+          let dir = List.find_map (fun (declaring_root, dep_name, dep) ->
+              if dep_name = name then
+                installed_dep_root ~coords ~root:declaring_root (dep_name, dep)
+              else None) closure in
+          match dir with
+          | None -> fail "is outside the resolved dependency graph"
+          | Some dir ->
+            match Project.load_from_dir (real (abs_path dir)) with
+            | Ok dep -> Some dep
+            | Error error -> fail ("could not be loaded: " ^ error)
+        end) names
+
+(** Shared and target-specific C shim flags, in declaration order. *)
+let c_ffi_flags ?target ?(archives="") ~root proj dependencies =
+  let bindings =
+    List.concat_map (fun (owner_root, project, imported) ->
+      List.map (fun b -> (owner_root, imported, b)) (active_ffi_bindings ?target project))
+      ((root, proj, false) :: List.map (fun dep -> (dep.Project.root, dep, true)) dependencies) in
+  let srcs = List.concat_map (fun (root, _, (binding : Project.ffi_binding)) ->
     List.map (fun s ->
       let p = if Filename.is_relative s then Filename.concat root s else s in
       " --ffi-c " ^ Filename.quote p) binding.ffi_sources) bindings in
-  let links = List.concat_map (fun (binding : Project.ffi_binding) ->
-    List.map (fun l -> " --ffi-link " ^ Filename.quote l) binding.ffi_link) bindings in
-  String.concat "" (srcs @ links)
+  let links = List.concat_map (fun (root, imported, (binding : Project.ffi_binding)) ->
+    List.map (fun flag ->
+      let flag =
+        if not imported || flag = "" then flag
+        else if String.starts_with ~prefix:"-L" flag && String.length flag > 2 then
+          let dir = String.trim (String.sub flag 2 (String.length flag - 2)) in
+          if Filename.is_relative dir then "-L" ^ Filename.quote (Filename.concat root dir)
+          else flag
+        else if flag.[0] <> '-' && Filename.is_relative flag then Filename.concat root flag
+        else flag
+      in
+      " --ffi-link " ^ Filename.quote flag) binding.ffi_link) bindings in
+  String.concat "" srcs ^ archives ^ String.concat "" links
+
+let ffi_flags_of ?target ~root proj =
+  c_ffi_flags ?target ~root proj (ffi_dependencies ?target ~verify:true proj)
+
+let ffi_rust_crates proj dependencies =
+  List.concat_map (fun (dependency, owner) ->
+    List.map (fun crate -> (dependency, owner, crate)) owner.Project.ffi_rust)
+    ((false, proj) :: List.map (fun owner -> (true, owner)) dependencies)
+
+let rust_ffi_paths ~consumer ~dependency (owner : Project.project) (crate : Project.ffi_rust_crate) =
+  let crate_dir =
+    if Filename.is_relative crate.frc_path then Filename.concat owner.root crate.frc_path
+    else crate.frc_path in
+  let target_dir =
+    if dependency then
+      let digest = Digest.to_hex (Digest.string crate_dir) in
+      Filename.concat (abs_path consumer.Project.root) (Filename.concat ".march/build/ffi-rust" digest)
+    else Filename.concat crate_dir "target" in
+  let archive = Filename.concat target_dir (Filename.concat "release" ("lib" ^ crate.frc_lib ^ ".a")) in
+  (crate_dir, target_dir, archive)
+
+let archive_ffi_flag archive = " --ffi-link " ^ Filename.quote archive
+
+let ffi_query_flags ?target ~release proj =
+  let dependencies = ffi_dependencies ?target ~release ~verify:false proj in
+  let archives =
+    if is_linux_cross_target target then ""
+    else
+      ffi_rust_crates proj dependencies
+      |> List.filter_map (fun (dependency, owner, crate) ->
+        let _, _, archive = rust_ffi_paths ~consumer:proj ~dependency owner crate in
+        if Sys.file_exists archive then Some (archive_ffi_flag archive) else None)
+      |> String.concat "" in
+  c_ffi_flags ?target ~archives ~root:proj.Project.root proj dependencies
 
 (** Full FFI flags for [proj]: the [[ffi]] C sources/links from [ffi_flags_of]
     plus, for each declared [[ffi.rust]] crate, a `cargo build --release` of the
     crate and a --ffi-link to its staticlib archive.  Shared by [forge build] and
     [forge test] so both link the same native shims.  Returns [Error] if the
     Rust build fails or its archive is missing. *)
-let ffi_flags_full ?target (proj : Project.project) : (string, string) result =
-  let build_crate (frc : Project.ffi_rust_crate) =
-    let crate_dir =
-      if Filename.is_relative frc.Project.frc_path then
-        Filename.concat proj.Project.root frc.Project.frc_path
-      else frc.Project.frc_path
-    in
-    let archive =
-      Filename.concat crate_dir
-        (Filename.concat "target"
-           (Filename.concat "release"
-              ("lib" ^ frc.Project.frc_lib ^ ".a")))
-    in
+let ffi_flags_full ?target ?scope ?release (proj : Project.project) : (string, string) result =
+  let build_crate ~dependency owner crate =
+    let crate_dir, target_dir, archive = rust_ffi_paths ~consumer:proj ~dependency owner crate in
+    let build_flags = if dependency then " --locked --target-dir " ^ Filename.quote target_dir else "" in
+    let offline_flag = if Net_gate.is_offline () then " --offline" else "" in
     Printf.printf "  [ffi.rust] cargo build --release in %s\n%!" crate_dir;
     let rc = Sys.command
-      (Printf.sprintf "cd %s && cargo build --release 2>&1"
-         (Filename.quote crate_dir))
+      (Printf.sprintf "cd %s && cargo build --release%s%s 2>&1"
+         (Filename.quote crate_dir) offline_flag build_flags)
     in
     if rc <> 0 then
       Error (Printf.sprintf "ffi.rust: cargo build failed (exit %d)" rc)
@@ -881,31 +964,30 @@ let ffi_flags_full ?target (proj : Project.project) : (string, string) result =
       Error (Printf.sprintf "ffi.rust: expected archive not found: %s" archive)
     else begin
       Printf.printf "  [ffi.rust] linked %s\n%!" archive;
-      Ok (" --ffi-link " ^ Filename.quote archive)
+      Ok (archive_ffi_flag archive)
     end
   in
-  let rust_link_flags_result =
-    match proj.Project.ffi_rust with
-    | [] -> Ok ""
-    | _ :: _ when is_linux_cross_target target ->
-      (* P1: the Rust crate is built for the host via `cargo build` (no --target),
-         so it cannot link into a cross Linux binary. Fail loudly rather than
-         silently producing a broken artifact. Cross Rust FFI (cargo-zigbuild)
-         is a follow-up. *)
-      Error "this project uses [ffi.rust]; cross-compilation of Rust bindings is \
-             not yet supported. Build on Linux, or use `forge deploy hot --so`."
-    | crates ->
-      (* Each crate in declaration order; the first failure stops the build. *)
-      List.fold_left (fun acc frc ->
-          match acc with
-          | Error _ as e -> e
-          | Ok flags -> Result.map (fun f -> flags ^ f) (build_crate frc))
-        (Ok "") crates
-  in
-  match rust_link_flags_result with
-  | Error _ as e -> e
-  | Ok rust_link_flags ->
-    Ok (ffi_flags_of ?target ~root:proj.Project.root proj ^ rust_link_flags)
+  try
+    let dependencies = ffi_dependencies ?target ?scope ?release ~verify:false proj in
+    let crates = ffi_rust_crates proj dependencies in
+    let rust_link_flags_result =
+      match crates with
+      | [] -> Ok ""
+      | _ :: _ when is_linux_cross_target target ->
+        (* Cargo emits a host archive here. Cross Rust FFI needs its own build. *)
+        Error "this project uses [ffi.rust]; cross-compilation of Rust bindings is \
+               not yet supported. Build on Linux, or use `forge deploy hot --so`."
+      | crates ->
+        List.fold_left (fun acc (dependency, owner, crate) ->
+            match acc with
+            | Error _ as e -> e
+            | Ok flags -> Result.map (fun f -> flags ^ f) (build_crate ~dependency owner crate))
+          (Ok "") crates
+    in
+    Result.map (fun archives ->
+      c_ffi_flags ?target ~archives ~root:proj.Project.root proj dependencies)
+      rust_link_flags_result
+  with Ffi_dependency_error error -> Error error
 
 (** Filename extension for a build's output, by target.  Shared by the project
     build and by the single-file [forge run FILE --compiled] path, which names
@@ -1290,7 +1372,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
             Filename.concat build_dir (proj.Project.name ^ output_suffix ^ output_ext target) in
           (* FFI shim flags: [[ffi]] C sources/links plus, if declared, a built
              [[ffi.rust]] staticlib archive (shared with [forge test]). *)
-          match ffi_flags_full ?target proj with
+          match ffi_flags_full ?target ~release proj with
           | Error msg -> Error msg
           | Ok ffi_flags ->
           (* Install npm packages declared in [js_deps] before JS compilation. *)

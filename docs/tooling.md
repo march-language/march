@@ -469,7 +469,7 @@ Two things to know when reading an answer:
 - **A name the optimiser inlined is not in the final IR.** `fn` and `origin` then report the last stage that had it. Add `-- --no-opt` to keep it.
 - **`why-miss` needs one successful build first.** It compares against the record of the last build of that file, so run `forge build` once and ask again.
 
-A query never builds a `[ffi.rust]` crate, runs a preprocessor, writes a protocol baseline, or downloads a toolchain. A library project has no entry file, so name one: `forge query verify lib/parser.march`. Outside a project, `forge query verify FILE` works on a single file. `march query` is the same interface without the project: `march query fn NAME FILE`.
+A query uses existing `[ffi.rust]` archives to calculate its cache keys. Build once to include a missing or changed archive. Querying leaves Cargo builds, preprocessors, protocol baseline writes, and toolchain downloads to the build commands. A library project has no entry file, so name one: `forge query verify lib/parser.march`. Outside a project, `forge query verify FILE` works on a single file. `march query` is the same interface without the project: `march query fn NAME FILE`.
 
 ### Auto-fixing Diagnostics
 
