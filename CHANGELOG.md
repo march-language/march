@@ -141,6 +141,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Freestanding wasm32 embedders can supply their own allocator.** Compile the
+  runtime with `-DMARCH_WASM_EXTERNAL_ALLOC` and link an implementation of
+  `march_alloc`. The default remains the bump allocator.
+
 - **A warning when a `Listener`'s last use is `Socket.local_port`.** A compiled program
   closes a handle right after the last line that mentions it, so a later connect to the
   listener's port is refused, while the interpreter keeps it open. The new

@@ -2,7 +2,7 @@
  * march_runtime_wasm.c — Minimal March runtime for wasm32-unknown-unknown.
  *
  * This is a stripped-down runtime for browser WASM targets.  It provides:
- *   - Bump allocator (linear memory, no free)
+ *   - Bump allocator by default (linear memory, no free)
  *   - Reference counting (no-ops in single-threaded WASM)
  *   - String operations (lit, concat, eq, conversion, etc.)
  *   - Math builtins (delegates to libm or wasm intrinsics)
@@ -44,6 +44,11 @@ void *memmove(void *dst, const void *src, size_t n) {
 
 /* ── Memory management ──────────────────────────────────────────────── */
 
+#ifdef MARCH_WASM_EXTERNAL_ALLOC
+/* The embedder provides zeroed, 8-byte-aligned storage in this module's
+   linear memory and is responsible for keeping live objects allocated. */
+extern void *march_alloc(int64_t sz);
+#else
 /* Simple bump allocator over WASM linear memory.
    WASM pages are 64KB.  We grow as needed via __builtin_wasm_memory_grow. */
 
@@ -85,6 +90,7 @@ void *march_alloc(int64_t sz) {
     for (size_t i = 0; i < align_sz; i++) p[i] = 0;
     return p;
 }
+#endif
 
 /* RC ops are no-ops in single-threaded WASM */
 void  march_incrc(void *p) { (void)p; }
@@ -133,11 +139,9 @@ void *march_string_lit(const char *s, int64_t len) {
 
 /* Get-or-create the single shared march_string for one literal site — the
  * form codegen emits for `ALit (LitString _)`.  See march_runtime.h for why
- * literals must not allocate per evaluation.  No atomics and no immortal rc
- * are needed here: WASM runs single-threaded and this runtime's allocator is
- * a bump arena whose RC ops and march_free are already no-ops.  Caching
- * still matters — without it every evaluation bumped the arena forward by
- * another header, so a literal in a loop grew the heap without bound. */
+ * literals must not allocate per evaluation. No atomics or immortal RC are
+ * needed here because this runtime never releases the cached header.
+ * Embedders that reclaim storage must keep cached headers live. */
 void *march_string_lit_static(const char *s, int64_t len, void **cell) {
     if (*cell) return *cell;
     *cell = march_string_lit(s, len);
