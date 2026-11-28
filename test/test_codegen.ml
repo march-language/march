@@ -10547,6 +10547,19 @@ let test_ffi_extern_default_symbol_ir () =
   Alcotest.(check bool) "falls back to <lib>_<fn> when no symbol given" true
     (ir_contains ir "@crc_crc32")
 
+let test_ffi_extern_wasm_ir () =
+  let ir = emit_actor_ir ~target:March_tir.Llvm_emit.Wasm32Unknown {|mod Test do
+    needs IO.Foreign
+    extern "ffi" : Cap(IO.Foreign) do
+      fn weighted(n : Int, scale : Float, name : String) : Int = "weighted"
+    end
+    fn main() : Unit do
+      if weighted(9, 2.5, "a") == 11 do () else panic("foreign result") end
+    end
+  end|} in
+  Alcotest.(check bool) "WebAssembly extern declares the scalar calling convention" true
+    (ir_contains ir "declare i64 @weighted(i64 %0, double %1, ptr %2)")
+
 (* ── Capability enforcement path tests ─────────────────────────────────── *)
 
 (* Verify capability errors surface via check_capabilities (the effects-module
@@ -22403,6 +22416,7 @@ let codegen_suites =
           Alcotest.test_case "extern missing needs error" `Quick test_cap_extern_missing_needs_error;
           Alcotest.test_case "ffi: extern explicit symbol in IR" `Quick test_ffi_extern_explicit_symbol_ir;
           Alcotest.test_case "ffi: extern default symbol in IR"  `Quick test_ffi_extern_default_symbol_ir;
+          Alcotest.test_case "ffi: typed extern in WASM IR" `Quick test_ffi_extern_wasm_ir;
           Alcotest.test_case "effects entry point clean"  `Quick test_cap_effects_clean;
           Alcotest.test_case "effects entry point violation" `Quick test_cap_effects_violation;
           Alcotest.test_case "eval path blocked by cap error" `Quick test_cap_eval_path_blocked;

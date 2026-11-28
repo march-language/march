@@ -15588,7 +15588,8 @@ void *march_typed_array_fold(void *arr, void *acc, void *f) {
 static void *native_arr_alloc(int64_t len, int64_t elem_size, uint8_t kind) {
     if (len < 0) { fputs("march: native array: negative length\n", stderr); exit(1); }
     int64_t body;
-    if (__builtin_mul_overflow(len, elem_size, &body)) {
+    if (__builtin_mul_overflow(len, elem_size, &body) ||
+        body > INT64_MAX - NATIVE_ARR_HDR) {
         fputs("march: native array: array too large\n", stderr); exit(1);
     }
     void *arr = march_alloc(NATIVE_ARR_HDR + body);

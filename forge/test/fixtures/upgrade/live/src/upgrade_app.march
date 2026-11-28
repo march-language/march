@@ -43,7 +43,7 @@ mod UpgradeApp do
 
   fn start(node : Cap(ClusterNode.Live)) : Env do
     let t = spawn(Tally)
-    let _ = Task.async(fn () -> feed(t, 0))
+    let _ = Task.async(fn () -> feed(t))
     -- Named state the OLD version creates: a later version's code must find
     -- it (a hot patch used to carry its own vault registry and could not).
     let st = Authority.must(Vault.new("upgrade_state"))
@@ -51,11 +51,12 @@ mod UpgradeApp do
     { node: node }
   end
 
-  fn feed(t : Pid(TallyState), i : Int) : Int do
-    if i >= 300 do i else
-      let _ = send(t, Legacy(1))
-      sleep_ms(20)
-      feed(t, i + 1)
+  fn feed(t : Pid(TallyState)) : Unit do
+    match send(t, Legacy(1)) do
+      None -> ()
+      Some(_) ->
+        sleep_ms(20)
+        feed(t)
     end
   end
 

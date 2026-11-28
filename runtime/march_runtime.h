@@ -745,6 +745,8 @@ _Static_assert(NATIVE_ARR_HDR == 32,
  * march_extras.c can build one directly instead of duplicating
  * native_arr_alloc (which stays static/private to this file). */
 void *native_u8_arr_alloc_raw(int64_t len);
+/* Allocate a fresh, uninitialised NativeF32Arr for the FFI. */
+void *native_f32_arr_alloc_raw(int64_t len);
 /* An "immortal" refcount: a starting rc so far above any reachable reference
  * count that no sequence of decrements can drive the cell to zero, so it is
  * never freed and never mistaken for uniquely-owned.  Used for cells that

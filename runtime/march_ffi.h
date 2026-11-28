@@ -68,6 +68,20 @@ int march_utf8_valid(const uint8_t *p, size_t len);
 march_value march_str_new(const uint8_t *utf8, size_t len);
 march_value march_bytes_new(const uint8_t *data, size_t len);
 
+/* ── NativeF32Arr (compiled native bindings) ────────────────────────────────
+ * Borrow the actual FP32 elements for the duration of this call. The pointer
+ * is read-only and remains valid while the argument is live. Never retain it.
+ * Pass only values declared as NativeF32Arr in the extern signature. */
+typedef struct { const float *ptr; int64_t len; } march_f32_slice;
+march_f32_slice march_f32_arr_borrow(march_value v);
+
+/* Allocate a fresh owned NativeF32Arr and expose its uninitialised elements
+ * through a non-null data out parameter. Initialise every element before
+ * returning or publishing the array, and stop using *data when doing so.
+ * On failure to initialise, drop the value. Accepts zero elements. For a
+ * negative or overflowing length, returns 0 and sets *data to NULL. */
+march_value march_f32_arr_alloc(int64_t len, float **data);
+
 /* ── Variants (ADTs) & records ───────────────────────────────────────────────
  * These move a field SLOT verbatim; a slot holds March's NATIVE per-field
  * representation, which you must match by the field's STATIC type:
