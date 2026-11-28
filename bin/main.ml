@@ -4971,9 +4971,10 @@ let compile filename =
     in
     let launch =
       (* The freestanding browser has no process environment supplying
-         MARCH_GRANT. An empty request needs no launch authority setup. *)
+         MARCH_GRANT. Authority.launch_init is a no-op for unscoped requests
+         when that grant is empty. *)
       parse_target !target_str <> March_tir.Llvm_emit.Wasm32Unknown
-      || !do_test || March_typecheck.Typecheck.launch_request desugared <> ("", false)
+      || !do_test || snd (March_typecheck.Typecheck.launch_request desugared)
     in
     let tir =
       try March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) ~launch ?lazy_bodies desugared
