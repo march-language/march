@@ -22,31 +22,10 @@ let run () =
     if rc = 0 then Ok ()
     else Error (Printf.sprintf "march REPL exited with code %d" rc)
   | Ok (Some proj) ->
-    let lib_dir    = Filename.concat proj.Project.root "lib" in
-    let config_dir = Filename.concat proj.Project.root "config" in
-    let dep_lib_paths = List.filter_map (fun (_, dep) ->
-        match dep with
-        | Project.PathDep rel_path ->
-          let abs_path = if Filename.is_relative rel_path
-            then Filename.concat proj.Project.root rel_path
-            else rel_path
-          in
-          let d = Filename.concat abs_path "lib" in
-          if Sys.file_exists d then Some d else None
-        | _ -> None
-      ) proj.Project.deps in
-    let all_lib_paths =
-      dep_lib_paths @ [lib_dir]
-      @ (if Sys.file_exists config_dir then [config_dir] else [])
-    in
-    (* The project's dependency grants (ocap phase 6), as forge build
-       passes them. *)
-    let grants_env =
-      Cmd_build.dep_grants_env ~scope:proj.Project.deps ~lib_paths:all_lib_paths proj in
-    let lib_path_env =
-      Printf.sprintf "%sMARCH_LIB_PATH=%s MARCH_REPL_INTERP=1"
-        grants_env (String.concat ":" all_lib_paths)
-    in
+    match Cmd_build.deps_preflight ~scope:(Cmd_build.build_scope ~release:false proj) proj with
+    | Error _ as error -> error
+    | Ok () ->
+    let lib_path_env = Cmd_build.lib_path_env proj ^ "MARCH_REPL_INTERP=1" in
     let entry = Result.to_option (Project.entry proj) in
     (* Link the same FFI shims as `forge run` / `forge build` (see
        Cmd_run.run).  The REPL preloads the project entry through the

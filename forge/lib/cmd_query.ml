@@ -105,7 +105,7 @@ let run ?(release = false) ?target ?at ?(json = false) (args : string list)
            | _ -> None)
         | _ -> None in
       let ffi_flags =
-        Cmd_build.ffi_flags_of ?target ~root proj
+        Cmd_build.ffi_query_flags ?target ~release proj
         ^ topology_flags ~root
         ^ Cmd_build.protocol_flags ~emit:false ~root sources in
       let flags =

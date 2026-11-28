@@ -349,6 +349,28 @@ link = ["-lopenblas"]
 
 Linux builds require the OpenBLAS headers and libraries for the target.
 
+To link native bindings owned by another Forge package, opt in by dependency
+name. The package must be in the resolved dependency graph, including
+transitive dependencies.
+
+```toml
+[deps]
+vector_math = { path = "../vector_math" }
+
+[ffi]
+dependencies = ["vector_math"]
+```
+
+Forge reads the selected dependency's C sources and linker flags relative to
+its own manifest and applies its OS selectors. Relative linker file paths
+and `-L` directories also resolve from that package. Commands that build Rust
+bindings also build the selected package's Rust crates using its Cargo
+lockfile and place their artifacts in the consumer's build directory. List
+each package whose native bindings the build should include. The consumer's
+manifest controls the opt-in. Select providers whose native code and Cargo
+build scripts you trust to run with the build user's permissions. Configure
+March runtime capability grants separately.
+
 ---
 
 ## Interpreter mode

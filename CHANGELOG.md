@@ -148,6 +148,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Forge can link native bindings from dependencies.** A consumer can list
+  direct or transitive package names under `[ffi] dependencies` to use their
+  native sources and linker flags, including OS-specific selections.
+
 - **Forge supports OS-specific C FFI tables.** Set `os = "macos"` or
   `os = "linux"` to select sources and linker flags for the build target.
 - **Freestanding wasm32 embedders can use a March tracing heap.** Compile

@@ -48,6 +48,7 @@ type ffi_os = Macos | Linux
 (** One [ffi] table. Sources are relative to the project root. *)
 type ffi_binding = {
   ffi_os : ffi_os option;
+  ffi_dependencies : string list;
   ffi_sources : string list;
   ffi_link : string list;
 }
@@ -380,7 +381,7 @@ let known_keys_of_section (name : string) : string list option =
   in
   match name with
   | "package" | "project" -> Some package_keys
-  | "ffi" -> Some [ "os"; "sources"; "link" ]
+  | "ffi" -> Some [ "os"; "dependencies"; "sources"; "link" ]
   | "ffi.rust" -> Some [ "crate"; "lib" ]
   | "hot-reload" ->
     Some [ "socket"; "ssh_host"; "public_key"; "health_check_url"; "strategy";
@@ -514,7 +515,17 @@ let load_from root =
         | Some (values, _) -> values
         | None -> []
       in
-      { ffi_os; ffi_sources = strings "sources"; ffi_link = strings "link" })
+      let ffi_dependencies =
+        match Toml.find_at table "dependencies" with
+        | None -> []
+        | Some (Toml.Array items, _)
+            when List.for_all (function Toml.Str name -> name <> "" | _ -> false) items ->
+          strings "dependencies"
+        | Some (_, line) ->
+          failwith (Printf.sprintf
+            "forge.toml:%d: [ffi] dependencies must be an array of package names" line)
+      in
+      { ffi_os; ffi_dependencies; ffi_sources = strings "sources"; ffi_link = strings "link" })
   in
   (* [ffi.rust] / [[ffi.rust]]: Rust staticlib crates auto-built by forge
      build. Each archive is at <crate>/target/release/lib<lib>.a.
@@ -686,7 +697,7 @@ let dep_coords ~project_root : (string, string) Hashtbl.t =
     one cached version of a dep the lockfile does not name is choosing a
     version, which offline mode never does even when the choice looks
     unambiguous. *)
-let dep_cache_dir ?coords dep_name =
+let dep_cache_dir ?coords ?(strict_locked=false) dep_name =
   match Sys.getenv_opt "HOME" with
   | None -> None
   | Some home ->
@@ -695,19 +706,14 @@ let dep_cache_dir ?coords dep_name =
         (Filename.concat ".march"
            (Filename.concat "cas" (Filename.concat "deps" dep_name)))
     in
-    let coord_dir =
-      match coords with
-      | Some tbl ->
-        (match Hashtbl.find_opt tbl dep_name with
-         | Some c ->
-           let d = Filename.concat base c in
-           if Sys.file_exists d then Some d else None
-         | None -> None)
-      | None -> None
+    let locked_coord = Option.bind coords (fun locked -> Hashtbl.find_opt locked dep_name) in
+    let coord_dir = Option.bind locked_coord (fun coord ->
+      let dir = Filename.concat base coord in
+      if Sys.file_exists dir then Some dir else None)
     in
     (match coord_dir with
      | Some d -> Some d
-     | None when Net_gate.is_offline () -> None
+     | None when Net_gate.is_offline () || (strict_locked && Option.is_some locked_coord) -> None
      | None ->
        if not (Sys.file_exists base) then None
        else if Sys.file_exists (Filename.concat base "lib")

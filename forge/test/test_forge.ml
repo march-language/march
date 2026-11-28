@@ -827,6 +827,58 @@ link = ["-lm"]
       in
       check "cross build flags" expected flags
 
+let test_project_dependency_ffi () =
+  let root = fresh_dir () in
+  let app = Filename.concat root "app" in
+  let tensor = Filename.concat root "tensor" in
+  let native = Filename.concat tensor "native-lib" in
+  let unrelated = Filename.concat root "unrelated" in
+  List.iter Project.mkdir_p [app; tensor; native; unrelated];
+  let manifest dir contents =
+    write_file (Filename.concat dir "forge.toml") contents in
+  manifest tensor {|[package]
+name = "tensor"
+[deps]
+native = { path = "native-lib" }
+|};
+  manifest native {|[package]
+name = "native"
+[[ffi]]
+sources = ["shim.c"]
+[[ffi]]
+os = "linux"
+link = ["-lopenblas"]
+[[ffi]]
+os = "macos"
+link = ["-framework Accelerate"]
+|};
+  manifest unrelated {|[package]
+name = "unrelated"
+[ffi]
+sources = ["unapproved.c"]
+[ffi.rust]
+crate = "do-not-build"
+|};
+  manifest app {|[package]
+name = "app"
+[deps]
+tensor = { path = "../tensor" }
+unrelated = { path = "../unrelated" }
+[ffi]
+dependencies = ["native", "native"]
+sources = ["main.c"]
+|};
+  match Project.load_from_dir app with
+  | Error e -> Alcotest.failf "load failed: %s" e
+  | Ok proj ->
+    match Cmd_build.ffi_flags_full ~target:"linux/arm64" proj with
+    | Error e -> Alcotest.failf "FFI flags failed: %s" e
+    | Ok flags ->
+      let expected = Printf.sprintf " --ffi-c %s --ffi-c %s --ffi-link '-lopenblas'"
+          (Filename.quote (Filename.concat app "main.c"))
+          (Filename.quote (Filename.concat (Unix.realpath native) "shim.c")) in
+      Alcotest.(check string) "only the opted-in transitive FFI, once" expected flags
+
 let test_project_invalid_ffi_os () =
   let dir = fresh_dir () in
   let expected = "forge.toml:5: [ffi] os must be \"macos\" or \"linux\"" in
@@ -2820,6 +2872,54 @@ let test_rust_only_project_runs_interpreted_and_compiled () =
 let test_rust_plus_c_project_runs_interpreted_and_compiled () =
   rust_ffi_parity ~with_c_source:true ()
 
+let test_dependency_rust_ffi_relinks () =
+  if not (rust_toolchain_available ()) then Alcotest.skip ();
+  with_dev_march_on_path (fun () ->
+    let dir = Filename.temp_dir "forge ffi dependency " "" in
+    let old_cwd = Sys.getcwd () in
+    Fun.protect ~finally:(fun () ->
+      Unix.chdir old_cwd;
+      ignore (Sys.command ("rm -rf " ^ Filename.quote dir))) (fun () ->
+      let provider = Filename.concat dir "provider" in
+      let consumer = Filename.concat dir "consumer" in
+      write_rust_ffi_project provider;
+      let crate = Filename.concat provider "native/rusty_ffi" in
+      Alcotest.(check int) "generate the provider's Cargo lockfile" 0
+        (Sys.command ("cd " ^ Filename.quote crate ^ " && cargo generate-lockfile --offline"));
+      Project.mkdir_p (Filename.concat consumer "lib");
+      write_file (Filename.concat consumer "forge.toml") {|[package]
+name = "consumer"
+type = "app"
+[deps]
+rusty = { path = "../provider", grant = ["IO.Console", "IO.Foreign"] }
+[ffi]
+dependencies = ["rusty"]
+|};
+      write_file (Filename.concat consumer "lib/consumer.march") {|mod Consumer do
+  needs IO.Console
+  needs IO.Foreign
+  import Rusty
+  fn main() needs IO.Console, IO.Foreign do
+    Rusty.main()
+  end
+end
+|};
+      Unix.chdir consumer;
+      let expect answer =
+        let result, lines, out = run_capturing_program_lines
+            (fun () -> Cmd_run.run ~compiled:true ~args:[] ()) in
+        (match result with Ok () -> () | Error message -> Alcotest.failf "%s\n%s" message out);
+        Alcotest.(check (list string)) "consumer uses the current archive"
+          ["add=" ^ answer; "roundtrip=-7"] lines in
+      expect "42";
+      let source = Filename.concat crate "src/lib.rs" in
+      let contents = Project.read_file source in
+      let changed = Str.global_replace (Str.regexp_string "a + b") "a + b + 1" contents in
+      write_file source changed;
+      expect "43";
+      Alcotest.(check bool) "no build artifacts in the provider" false
+        (Sys.file_exists (Filename.concat crate "target"))))
+
 let test_compiled_run_end_to_end () =
  with_dev_march_on_path (fun () ->
   (* Run from a directory with no forge.toml in scope, so resolve_entry takes
@@ -3714,6 +3814,7 @@ let () =
       Alcotest.test_case "[[ffi]]: every table is used"      `Quick test_project_multi_ffi_tables;
       Alcotest.test_case "[ffi]: single table unchanged"     `Quick test_project_single_ffi_table;
       Alcotest.test_case "[[ffi]]: native and cross OS selection" `Quick test_project_os_ffi_tables;
+      Alcotest.test_case "[ffi]: opted-in transitive dependencies" `Quick test_project_dependency_ffi;
       Alcotest.test_case "[ffi]: invalid OS selector" `Quick test_project_invalid_ffi_os;
     ];
     "hcr-cap-gate", [
@@ -3822,6 +3923,8 @@ let () =
         test_rust_only_project_runs_interpreted_and_compiled;
       Alcotest.test_case "[ffi.rust] + [ffi] C sources: interpreted output = compiled" `Slow
         test_rust_plus_c_project_runs_interpreted_and_compiled;
+      Alcotest.test_case "dependency Rust archive changes relink compiled consumers" `Slow
+        test_dependency_rust_ffi_relinks;
       Alcotest.test_case "output extension follows the target" `Quick
         test_output_ext_by_target;
       Alcotest.test_case "compiled single-file run: real compile, real run" `Slow
