@@ -2354,6 +2354,26 @@ let emit_module ~emit_expr
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
   Llvm_ctor_desc.flush ctx out;
 
+  (* An embedder can link C implementations beyond the small WASM runtime
+     preamble. LLVM still needs a declaration for each referenced symbol,
+     even when the linker will later discard the calling function. *)
+  if is_wasm_target target then begin
+    let declared = Hashtbl.copy preamble_declared in
+    List.iter (fun (ed : Tir.extern_decl) ->
+        Hashtbl.replace declared ed.ed_c_name ()) m.Tir.tm_externs;
+    List.iter (fun (fn : Tir.fn_def) ->
+        Hashtbl.replace declared
+          (Llvm_builtins.c_symbol_of_march_name fn.Tir.fn_name) ()) m.Tir.tm_fns;
+    Llvm_builtins.called_c_symbols ()
+    |> List.sort String.compare
+    |> List.iter (fun symbol ->
+        if not (Hashtbl.mem declared symbol) then
+          Option.iter (fun signature ->
+              Buffer.add_string out signature;
+              Buffer.add_char out '\n')
+            (Llvm_builtins.c_declare_signature symbol))
+  end;
+
   (* Capability markers (specs/2026-08-03-forge-cap-audit-design.md §4.3, C).
      Derived from the C symbols the emitted code actually resolved through
      [Llvm_builtins.mangle_extern] — NOT from the declare preamble, which

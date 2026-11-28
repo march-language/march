@@ -77,6 +77,9 @@ val builtin_owned_boxed_return : string -> bool
 val builtin_param_llvm_tys : string -> string list option
 val reset_called_syms : unit -> unit
 val called_c_symbols : unit -> string list
+
+(** Declaration from the runtime signature table, keyed by C symbol. *)
+val c_declare_signature : string -> string option
 val mangle_extern : string -> string
 val user_symbol_of : string -> string
 val has_c_mapping : string -> bool
