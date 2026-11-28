@@ -122,6 +122,7 @@ tag, so each side accesses a value by the type the signature declares.
 | `Int` / `Bool` | passed by value (`int64_t`) |
 | `Float` | passed by value (`double`) |
 | `String` / `Bytes` | `march_str_borrow(v)` → `march_slice {ptr, len}`; build with `march_str_new(p, len)` |
+| `NativeF32Arr` (compiled native) | `march_f32_arr_borrow(v)` → `march_f32_slice {ptr, len}`; allocate with `march_f32_arr_alloc(len, &data)` |
 | `Option(T)` | `march_none()` / `march_some(v)` (niche); `march_some_boxed`/`march_none_boxed` for `Float`/`Unit` payloads |
 | `Result(T, E)` | `march_ok(v)` / `march_err(e)`, or the `raises` protocol below |
 | record / variant | the generated codecs (`march_decode_T` / `march_encode_T`, see below) |
@@ -129,6 +130,13 @@ tag, so each side accesses a value by the type the signature declares.
 
 Strings and bytes are **borrowed** for the duration of the call; copy them with
 `march_str_new` if you need to keep them.
+
+Native FP32 arrays expose their contiguous elements directly through a
+read-only, call-scoped view. To return a native FP32 array from C, allocate a
+fresh array, write all its elements through `data`, then return the owned value
+and stop using the pointer. This keeps access to existing March arrays
+compatible with copy-on-write. Both operations are available in compiled
+native bindings.
 
 **Small scalar aggregates keep their heap representation across the FFI.** A
 one-constructor variant of two to four `Int`/`Float`/`Bool` fields (`Vec3(Float,

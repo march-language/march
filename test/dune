@@ -8485,6 +8485,21 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/ffi_resource.expected native_ffi_resource.out)))
 
+; A blocking extern borrows FP32 input and returns a fresh March array.
+(rule
+ (targets native_ffi_native_f32 native_ffi_native_f32.out)
+ (deps (source_tree ../runtime) (source_tree ../stdlib)
+       native/ffi_native_f32.march native/ffi_native_f32.c)
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_ffi_native_f32
+        --ffi-c native/ffi_native_f32.c native/ffi_native_f32.march)
+   (with-stdout-to native_ffi_native_f32.out (system "./native_ffi_native_f32")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ffi_native_f32.expected native_ffi_native_f32.out)))
+
 ; ── Regression: an extern called from / passed as a closure (compiled + interp)
 ; Defun captured the extern into the closure, so the IR called the March name
 ; (`@acc_push`) and clang failed; an extern passed as a value built its

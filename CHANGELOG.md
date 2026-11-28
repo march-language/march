@@ -141,6 +141,9 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Zero-copy `NativeF32Arr` access in compiled C bindings.** Native kernels
+  can borrow FP32 inputs and write directly into fresh March arrays.
+
 - **A warning when a `Listener`'s last use is `Socket.local_port`.** A compiled program
   closes a handle right after the last line that mentions it, so a later connect to the
   listener's port is refused, while the interpreter keeps it open. The new
