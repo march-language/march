@@ -1448,6 +1448,8 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Programs with unscoped capability requests can call statically linked
+  host functions in freestanding WebAssembly without an environment-grant runtime.
 - **Wasm32 preserves the sign of tagged integers.** Negative integers that fit in a
   tagged pointer keep their sign when read from erased storage or passed through a closure.
 - Compiled string interpolation now links against the freestanding WebAssembly
