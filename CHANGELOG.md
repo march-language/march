@@ -141,6 +141,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Freestanding wasm32 embedders can use a March tracing heap.** Compile
+  the runtime with `-DMARCH_WASM_TRACING_HEAP` and link `march_wasm_heap.c`.
+  Pass retained roots at host safepoints to reclaim and reuse linear memory.
+
 - **Freestanding wasm32 embedders can supply their own allocator.** Compile the
   runtime with `-DMARCH_WASM_EXTERNAL_ALLOC` and link an implementation of
   `march_alloc`. The default remains the bump allocator.
