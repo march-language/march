@@ -1435,6 +1435,9 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Large string joins use linear memory in freestanding WebAssembly.** String joins
+  now allocate a single result buffer, avoiding an out-of-memory trap from retaining
+  copies of every intermediate prefix when serializing arrays.
 - **An overflow panic inside a local function names that function's own file and line.** A
   local function (`fn go(...)` inside another function) was reported at the declaration of
   whichever local function of the same name the compiler had processed last, so an Int
