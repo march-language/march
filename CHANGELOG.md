@@ -21,6 +21,8 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- WASM modules declare the runtime calls they reach, including native array
+  access fallbacks supplied by an embedder.
 - WASM extern declarations use the same scalar and pointer types as their
   call sites, so freestanding builds can link C functions with numeric arguments.
 

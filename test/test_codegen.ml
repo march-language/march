@@ -10560,6 +10560,20 @@ let test_ffi_extern_wasm_ir () =
   Alcotest.(check bool) "WebAssembly extern declares the scalar calling convention" true
     (ir_contains ir "declare i64 @weighted(i64 %0, double %1, ptr %2)")
 
+let test_wasm_reached_runtime_declarations () =
+  let ir = emit_actor_ir ~target:March_tir.Llvm_emit.Wasm32Unknown {|mod Test do
+    fn main() : Unit do
+      let arr = native_int_arr_make(2, 41)
+      if native_int_arr_get(arr, 1) == 41 do () else panic("array value") end
+    end
+  end|} in
+  Alcotest.(check bool) "declare the reached native-array constructor" true
+    (ir_contains ir "declare ptr    @native_int_arr_make(i64 %len, i64 %def)");
+  Alcotest.(check bool) "declare the reached native-array read" true
+    (ir_contains ir "declare i64    @native_int_arr_get(ptr %arr, i64 %i)");
+  Alcotest.(check bool) "omit the unused native-array sort" false
+    (ir_contains ir "declare ptr    @native_int_arr_sort(")
+
 (* ── Capability enforcement path tests ─────────────────────────────────── *)
 
 (* Verify capability errors surface via check_capabilities (the effects-module
@@ -22417,6 +22431,7 @@ let codegen_suites =
           Alcotest.test_case "ffi: extern explicit symbol in IR" `Quick test_ffi_extern_explicit_symbol_ir;
           Alcotest.test_case "ffi: extern default symbol in IR"  `Quick test_ffi_extern_default_symbol_ir;
           Alcotest.test_case "ffi: typed extern in WASM IR" `Quick test_ffi_extern_wasm_ir;
+          Alcotest.test_case "wasm: declarations for reached runtime calls" `Quick test_wasm_reached_runtime_declarations;
           Alcotest.test_case "effects entry point clean"  `Quick test_cap_effects_clean;
           Alcotest.test_case "effects entry point violation" `Quick test_cap_effects_violation;
           Alcotest.test_case "eval path blocked by cap error" `Quick test_cap_eval_path_blocked;

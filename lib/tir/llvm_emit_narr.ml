@@ -122,6 +122,7 @@ let emit_call
     (ctx : Llvm_ctx.ctx) (f : Tir.var) (args : Tir.atom list)
   : string * string =
   let (w, op) = Option.get (decode f.Tir.v_name) in
+  let fallback = Llvm_builtins.mangle_extern f.Tir.v_name in
   let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
   let arg i to_ty = let (ty, v) = List.nth arg_pairs i in coerce ctx ty v to_ty in
   let arr = arg 0 "ptr" in
@@ -136,8 +137,8 @@ let emit_call
     emit_label ctx oob_lbl;
     (* The runtime helper re-checks, prints its message and exits. *)
     let dead = fresh ctx "naoob" in
-    emit ctx (Printf.sprintf "%s = call %s @%s_get(ptr %s, i64 %s)"
-                dead w.w_reg w.w_prefix arr iv);
+    emit ctx (Printf.sprintf "%s = call %s @%s(ptr %s, i64 %s)"
+                dead w.w_reg fallback arr iv);
     emit_term ctx "unreachable";
     emit_label ctx ok_lbl;
     let p = emit_elem_ptr ctx w arr iv in
@@ -187,8 +188,8 @@ let emit_call
     (* Out of bounds (the helper panics) or shared (it copies, writes and
        releases our reference). *)
     let slow = fresh ctx "naslow" in
-    emit ctx (Printf.sprintf "%s = call ptr @%s_set(ptr %s, i64 %s, %s %s)"
-                slow w.w_prefix arr iv w.w_reg vv);
+    emit ctx (Printf.sprintf "%s = call ptr @%s(ptr %s, i64 %s, %s %s)"
+                slow fallback arr iv w.w_reg vv);
     emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
     emit_label ctx merge_lbl;
     let r = fresh ctx "naset" in

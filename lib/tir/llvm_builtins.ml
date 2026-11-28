@@ -1544,20 +1544,22 @@ let runtime_only_declares : (string * string) list = [
     renames them, so the March name IS the declared symbol — see
     [builtin.declare_sig]'s doc for why alias rows are not deduplicated
     away) — and falling back to [runtime_only_declares]. *)
+let c_declare_signatures : (string, string) Hashtbl.t =
+  let table = Hashtbl.create 512 in
+  List.iter (fun (symbol, signature) -> Hashtbl.replace table symbol signature)
+    (List.rev runtime_only_declares);
+  List.iter (fun b ->
+      let symbol = Option.value ~default:b.march_name b.c_name in
+      Option.iter (Hashtbl.replace table symbol) b.declare_sig)
+    (List.rev builtins);
+  table
+
+let c_declare_signature symbol = Hashtbl.find_opt c_declare_signatures symbol
+
 let declare_text (c_name : string) : string =
-  let from_builtins =
-    List.find_map
-      (fun b ->
-         let sym = match b.c_name with Some c -> c | None -> b.march_name in
-         if sym = c_name then b.declare_sig else None)
-      builtins
-  in
-  match from_builtins with
+  match c_declare_signature c_name with
   | Some s -> s
-  | None ->
-    (match List.assoc_opt c_name runtime_only_declares with
-     | Some s -> s
-     | None -> failwith ("Llvm_builtins.declare_text: no declare text for " ^ c_name))
+  | None -> failwith ("Llvm_builtins.declare_text: no declare text for " ^ c_name)
 
 let render_item (buf : Buffer.t) (item : preamble_item) : unit =
   match item with
