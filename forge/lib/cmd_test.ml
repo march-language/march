@@ -84,12 +84,13 @@ let stage_selected_tests ~test_dir ~stage_dir (requested : string list) : string
 
 let find_test_dir () =
   let test_dir_of_root root = Filename.concat root "test" in
-  match Project.load () with
-  | Ok proj -> Some (test_dir_of_root proj.Project.root)
-  | Error _ ->
-    let cwd_test = Filename.concat (Sys.getcwd ()) "test" in
-    if Sys.file_exists cwd_test && Sys.is_directory cwd_test then Some cwd_test
-    else None
+  match Project.load_optional () with
+  | Error _ as e -> e
+  | Ok (Some proj) -> Ok (Some (test_dir_of_root proj.Project.root))
+  | Ok None ->
+    let cwd_test = test_dir_of_root (Sys.getcwd ()) in
+    if Sys.file_exists cwd_test && Sys.is_directory cwd_test then Ok (Some cwd_test)
+    else Ok None
 
 (** Compile and run test files using the compile pipeline (march --compile --test).
     [entry] is the single test entrypoint file (the one with test blocks).
@@ -331,11 +332,12 @@ let run_lemma_tests ~lib_path_env (files : string list) : (unit, string) result 
 let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) ?(release=false) ?(reflection_parity=false) test_files =
   (* coverage is only supported on the interpreter path *)
   let use_interp = coverage || Sys.getenv_opt "MARCH_TEST_INTERPRETER" = Some "1" in
-  match Project.load () with
-  | Error _ ->
+  match Project.load_optional () with
+  | Error _ as e -> e
+  | Ok None ->
     (* No project: fall back to interpreter for ad-hoc files. *)
     invoke_march_interp ~verbose ~filter ~coverage ~seed ~skip_properties ~lib_path_env:"" test_files
-  | Ok proj ->
+  | Ok (Some proj) ->
     (* Run preprocessors before test compilation *)
     let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
     let src_dir = Filename.concat proj.Project.root "src" in
@@ -420,9 +422,10 @@ let run ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_proper
       run_files ~verbose ~filter ~coverage ~seed ~skip_properties ~release ~reflection_parity expanded
   end else
     match find_test_dir () with
-    | None ->
+    | Error _ as e -> e
+    | Ok None ->
       Error "no test/ directory found (no forge.toml and no ./test/ directory)"
-    | Some test_dir ->
+    | Ok (Some test_dir) ->
       if not (Sys.file_exists test_dir) then
         Error (Printf.sprintf "no test/ directory found at %s" test_dir)
       else begin

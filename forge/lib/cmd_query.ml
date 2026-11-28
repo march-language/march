@@ -73,9 +73,12 @@ let run ?(release = false) ?target ?at ?(json = false) (args : string list)
         ~pin_main:false () in
     Ok (command ~lib_path_env:"" ~flags ~entry:None ~at ~json args) in
   let cmd =
-    match Project.load () with
-    | Error e -> if names_a_file args then plain () else Error e
-    | Ok proj ->
+    match Project.load_optional () with
+    | Error _ as e -> e
+    | Ok None ->
+      if names_a_file args then plain ()
+      else Error "no forge.toml found in current directory or any parent"
+    | Ok (Some proj) ->
       let root = proj.Project.root in
       let entry =
         if names_a_file args then Ok None
@@ -102,7 +105,7 @@ let run ?(release = false) ?target ?at ?(json = false) (args : string list)
            | _ -> None)
         | _ -> None in
       let ffi_flags =
-        Cmd_build.ffi_flags_of ~root proj
+        Cmd_build.ffi_flags_of ?target ~root proj
         ^ topology_flags ~root
         ^ Cmd_build.protocol_flags ~emit:false ~root sources in
       let flags =

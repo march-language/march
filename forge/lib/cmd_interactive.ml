@@ -14,13 +14,14 @@ let repl_command ~lib_path_env ~ffi_flags ~entry =
   | None -> Printf.sprintf "%s march%s" lib_path_env ffi_flags
 
 let run () =
-  match Project.load () with
-  | Error _msg ->
+  match Project.load_optional () with
+  | Error _ as e -> e
+  | Ok None ->
     (* Outside a project: just launch the REPL bare *)
     let rc = Sys.command "march" in
     if rc = 0 then Ok ()
     else Error (Printf.sprintf "march REPL exited with code %d" rc)
-  | Ok proj ->
+  | Ok (Some proj) ->
     let lib_dir    = Filename.concat proj.Project.root "lib" in
     let config_dir = Filename.concat proj.Project.root "config" in
     let dep_lib_paths = List.filter_map (fun (_, dep) ->

@@ -21,7 +21,7 @@ let empty_context = { lib_path_env = ""; ffi_flags = ""; pin_main = false }
     `--ffi-link <lib>.a` in both modes: compiled runs link it, and the
     interpreter force-loads it into its FFI shim (bin/main.ml,
     [setup_interpreter_ffi]). *)
-let context_of_project proj =
+let context_of_project ?target proj =
   match Toolchain.ensure_installed () with
   | Error e -> Error e
   | Ok () ->
@@ -29,7 +29,7 @@ let context_of_project proj =
             ~scope:(Cmd_build.build_scope ~release:false proj) proj with
     | Error e -> Error e
     | Ok () ->
-    match Cmd_build.ffi_flags_full proj with
+    match Cmd_build.ffi_flags_full ?target proj with
     | Error msg -> Error msg
     | Ok ffi_flags ->
       Ok { lib_path_env = Cmd_build.lib_path_env proj; ffi_flags;
@@ -43,7 +43,7 @@ let context_of_project proj =
     fallback [Cmd_test.run_files] uses for ad-hoc test files.
 
     Without [file], the project's entry is used and a project is required. *)
-let resolve_entry ?file () =
+let resolve_entry ?target ?file () =
   match file with
   | Some f ->
     if not (Sys.file_exists f) then
@@ -51,16 +51,17 @@ let resolve_entry ?file () =
     else if Sys.is_directory f then
       Error (Printf.sprintf "not a file: %s" f)
     else
-      (match Project.load () with
-       | Error _   -> Ok (f, empty_context)
-       | Ok proj   -> Result.map (fun ctx -> (f, ctx)) (context_of_project proj))
+      (match Project.load_optional () with
+       | Error _ as e -> e
+       | Ok None -> Ok (f, empty_context)
+       | Ok (Some proj) -> Result.map (fun ctx -> (f, ctx)) (context_of_project ?target proj))
   | None ->
     match Project.load () with
     | Error msg -> Error msg
     | Ok proj ->
       match Project.entry proj with
       | Error e -> Error e
-      | Ok entry -> Result.map (fun ctx -> (entry, ctx)) (context_of_project proj)
+      | Ok entry -> Result.map (fun ctx -> (entry, ctx)) (context_of_project ?target proj)
 
 (** The shell command for an interpreted run.
 
@@ -195,7 +196,7 @@ let run ?(dump_phases = false) ?(compiled = false) ?target ?file ?(args = [])
        else Error (Printf.sprintf "program exited with code %d" rc))
   | true, Some _ ->
     gated @@ fun () ->
-    (match resolve_entry ?file () with
+    (match resolve_entry ?target ?file () with
      | Error msg -> Error msg
      | Ok (entry, ctx) ->
        (* Single file: compile straight to a temp output.  The CAS caches the

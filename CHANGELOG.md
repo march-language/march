@@ -148,6 +148,9 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Forge supports OS-specific C FFI tables.** Set `os = "macos"` or
+  `os = "linux"` to select sources and linker flags for the build target.
+
 - **Freestanding wasm32 embedders can supply their own allocator.** Compile the
   runtime with `-DMARCH_WASM_EXTERNAL_ALLOC` and link an implementation of
   `march_alloc`. The default remains the bump allocator.

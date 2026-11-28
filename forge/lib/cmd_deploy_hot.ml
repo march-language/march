@@ -2536,18 +2536,20 @@ let build_so_for ~(drop : string list) ~(accept_unproved : string list) ~(target
   let so_path = output ^ ".so" in
   let manifest_path = output ^ ".so.hcr_manifest" in
   let lib_env = Cmd_build.lib_path_env proj in
-  let ffi_flags = Cmd_build.ffi_flags_of ~root:proj.Project.root proj in
-  let target_flag, hcr_flags =
+  let target =
+    Option.bind proj.Project.hot_reload (fun hr ->
+      match target with Some _ -> target | None -> hr.Project.hr_target)
+  in
+  let ffi_flags = Cmd_build.ffi_flags_of ?target ~root:proj.Project.root proj in
+  let target_flag = match target with
+    | Some t -> " --target " ^ Filename.quote t
+    | None -> ""
+  in
+  let hcr_flags =
     match proj.Project.hot_reload with
-    | Some hr ->
-      let target = match (match target with Some _ as t -> t | None -> hr.Project.hr_target) with
-        | Some t -> " --target " ^ Filename.quote t | None -> "" in
-      let hcr = match hr.Project.hr_module_prefix, hr.Project.hr_public_key with
-        | Some p, Some k -> " --hot-reload " ^ Filename.quote p ^
-                            " --signing-pubkey " ^ Filename.quote k
-        | _ -> "" in
-      target, hcr
-    | None -> "", ""
+    | Some { Project.hr_module_prefix = Some p; hr_public_key = Some k; _ } ->
+      " --hot-reload " ^ Filename.quote p ^ " --signing-pubkey " ^ Filename.quote k
+    | _ -> ""
   in
   match Project.entry proj with
   | Error e -> Error e

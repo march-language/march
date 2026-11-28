@@ -812,13 +812,44 @@ let check_all ~lib_path_env ~cache_dir files =
     end
   end
 
-(** FFI shim flags from forge.toml [[ffi]]: --ffi-c per source (resolved to an
-    absolute path under [root]) and --ffi-link per linker flag. *)
-let ffi_flags_of ~root (proj : Project.project) =
-  let srcs = List.map (fun s ->
+(** Cross-target aliases in the compiler's canonical form. *)
+let normalise_target = function
+  | "linux/x86_64" | "linux-x86_64" -> "linux/amd64"
+  | "linux/aarch64" | "linux-arm64" -> "linux/arm64"
+  | other -> other
+
+let is_linux_cross_target = function
+  | Some target ->
+    (match normalise_target (String.lowercase_ascii target) with
+     | "linux/amd64" | "linux/arm64" -> true
+     | _ -> false)
+  | None -> false
+
+let native_ffi_os = lazy (
+  match Result.map String.trim (Toolchain.capture "uname -s") with
+  | Ok "Darwin" -> Some Project.Macos
+  | Ok "Linux" -> Some Project.Linux
+  | _ -> None)
+
+(** Shared and target-specific C shim flags, in declaration order. *)
+let ffi_flags_of ?target ~root (proj : Project.project) =
+  let target_os = lazy (
+    if is_linux_cross_target target then Some Project.Linux
+    else match Option.map String.lowercase_ascii target with
+      | None | Some "native" -> Lazy.force native_ffi_os
+      | Some _ -> None)
+  in
+  let bindings = List.filter (fun (binding : Project.ffi_binding) ->
+      match binding.ffi_os with
+      | None -> true
+      | Some os -> Some os = Lazy.force target_os) proj.Project.ffi_bindings
+  in
+  let srcs = List.concat_map (fun (binding : Project.ffi_binding) ->
+    List.map (fun s ->
       let p = if Filename.is_relative s then Filename.concat root s else s in
-      " --ffi-c " ^ Filename.quote p) proj.Project.ffi_sources in
-  let links = List.map (fun l -> " --ffi-link " ^ Filename.quote l) proj.Project.ffi_link in
+      " --ffi-c " ^ Filename.quote p) binding.ffi_sources) bindings in
+  let links = List.concat_map (fun (binding : Project.ffi_binding) ->
+    List.map (fun l -> " --ffi-link " ^ Filename.quote l) binding.ffi_link) bindings in
   String.concat "" (srcs @ links)
 
 (** Full FFI flags for [proj]: the [[ffi]] C sources/links from [ffi_flags_of]
@@ -826,7 +857,7 @@ let ffi_flags_of ~root (proj : Project.project) =
     crate and a --ffi-link to its staticlib archive.  Shared by [forge build] and
     [forge test] so both link the same native shims.  Returns [Error] if the
     Rust build fails or its archive is missing. *)
-let ffi_flags_full ?(target_is_cross=false) (proj : Project.project) : (string, string) result =
+let ffi_flags_full ?target (proj : Project.project) : (string, string) result =
   let build_crate (frc : Project.ffi_rust_crate) =
     let crate_dir =
       if Filename.is_relative frc.Project.frc_path then
@@ -856,7 +887,7 @@ let ffi_flags_full ?(target_is_cross=false) (proj : Project.project) : (string, 
   let rust_link_flags_result =
     match proj.Project.ffi_rust with
     | [] -> Ok ""
-    | _ :: _ when target_is_cross ->
+    | _ :: _ when is_linux_cross_target target ->
       (* P1: the Rust crate is built for the host via `cargo build` (no --target),
          so it cannot link into a cross Linux binary. Fail loudly rather than
          silently producing a broken artifact. Cross Rust FFI (cargo-zigbuild)
@@ -874,7 +905,7 @@ let ffi_flags_full ?(target_is_cross=false) (proj : Project.project) : (string, 
   match rust_link_flags_result with
   | Error _ as e -> e
   | Ok rust_link_flags ->
-    Ok (ffi_flags_of ~root:proj.Project.root proj ^ rust_link_flags)
+    Ok (ffi_flags_of ?target ~root:proj.Project.root proj ^ rust_link_flags)
 
 (** Filename extension for a build's output, by target.  Shared by the project
     build and by the single-file [forge run FILE --compiled] path, which names
@@ -1112,12 +1143,6 @@ let protocol_flags ?(emit = true) ~root (sources : string list) : string =
     ^ (if emit then " --emit-protocols " ^ Filename.quote dir else "")
   end
 
-(** Cross-target aliases in the compiler's canonical form. *)
-let normalise_target = function
-  | "linux/x86_64" | "linux-x86_64" -> "linux/amd64"
-  | "linux/aarch64" | "linux-arm64" -> "linux/arm64"
-  | other -> other
-
 (** [topology_pools]: a topology app's build restricted to these pools
     ([march --topology-pools]); [output_suffix] names the artifact
     [<name><suffix>] so the builds of one topology do not overwrite each
@@ -1265,7 +1290,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
             Filename.concat build_dir (proj.Project.name ^ output_suffix ^ output_ext target) in
           (* FFI shim flags: [[ffi]] C sources/links plus, if declared, a built
              [[ffi.rust]] staticlib archive (shared with [forge test]). *)
-          match ffi_flags_full ~target_is_cross:(target_subdir <> "") proj with
+          match ffi_flags_full ?target proj with
           | Error msg -> Error msg
           | Ok ffi_flags ->
           (* Install npm packages declared in [js_deps] before JS compilation. *)
