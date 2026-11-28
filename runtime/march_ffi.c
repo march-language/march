@@ -59,6 +59,27 @@ march_slice march_str_borrow(march_value s) {
 }
 march_slice march_bytes_borrow(march_value b) { return march_str_borrow(b); }
 
+march_f32_slice march_f32_arr_borrow(march_value v) {
+    const char *arr = march_as_ptr(v);
+    if (!march_is_heap(v) || ((const march_hdr *)arr)->tag != MARCH_NATIVE_ARR_TAG ||
+        *(const uint8_t *)(arr + 24) != NATIVE_ELEM_F32) {
+        march_fatal("march_f32_arr_borrow: expected NativeF32Arr");
+    }
+    return (march_f32_slice){
+        (const float *)(arr + NATIVE_ARR_HDR), *(const int64_t *)(arr + 16)
+    };
+}
+
+march_value march_f32_arr_alloc(int64_t len, float **data) {
+    if (len < 0 || len > (INT64_MAX - NATIVE_ARR_HDR) / (int64_t)sizeof(float)) {
+        *data = NULL;
+        return 0;
+    }
+    char *arr = native_f32_arr_alloc_raw(len);
+    *data = (float *)(arr + NATIVE_ARR_HDR);
+    return march_from_ptr(arr);
+}
+
 int march_utf8_valid(const uint8_t *p, size_t len) {
     size_t i = 0;
     while (i < len) {
