@@ -1939,7 +1939,11 @@ let emit_module ~emit_expr
       let ret_llty =
         if ed.ed_raises then Llvm_ctx.llvm_ret_ty ctx (Llvm_calls.ok_payload_ty ed.ed_ret)
         else Llvm_ctx.llvm_ret_ty ctx ed.ed_ret in
-      let param_lltys = List.map (fun _t -> "ptr") ed.ed_params in
+      (* WebAssembly calls are signature-checked. Use the same representation
+         as the call emitter for a user extern, including native scalars. *)
+      let param_lltys =
+        if is_wasm_target target then List.map (Llvm_ctx.llvm_ty ctx) ed.ed_params
+        else List.map (fun _t -> "ptr") ed.ed_params in
       let param_lltys = if ed.ed_raises then "ptr" :: param_lltys else param_lltys in
       let params_str = String.concat ", " (List.mapi (fun i ty ->
           Printf.sprintf "%s %%%d" ty i) param_lltys) in

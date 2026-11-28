@@ -19,6 +19,11 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- WASM extern declarations use the same scalar and pointer types as their
+  call sites, so freestanding builds can link C functions with numeric arguments.
+
 ### Changed
 
 - **`Cap(IO.*)` values are retired** (object capabilities, phase 7b). A function no longer
