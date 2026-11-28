@@ -750,10 +750,6 @@ let test_project_multi_ffi_tables () =
   match Project.load_from_dir dir with
   | Error e -> Alcotest.failf "load failed: %s" e
   | Ok p ->
-    Alcotest.(check (list string)) "every table's sources, in order"
-      ["native/zip.c"; "native/db.c"; "native/db2.c"] p.Project.ffi_sources;
-    Alcotest.(check (list string)) "every table's links, in order"
-      ["-lz"; "-lsqlite3"] p.Project.ffi_link;
     Alcotest.(check (list (pair string string))) "every rust crate"
       [("native/a", "a"); ("native/b", "bee")]
       (List.map (fun (c : Project.ffi_rust_crate) -> (c.Project.frc_path, c.Project.frc_lib))
@@ -772,9 +768,86 @@ let test_project_single_ffi_table () =
   match Project.load_from_dir dir with
   | Error e -> Alcotest.failf "load failed: %s" e
   | Ok p ->
-    Alcotest.(check (list string)) "sources" ["native/s.c"] p.Project.ffi_sources;
-    Alcotest.(check (list string)) "link" ["-lm"] p.Project.ffi_link;
+    Alcotest.(check string) "sources and links"
+      " --ffi-c '/r/native/s.c' --ffi-link '-lm'" (Cmd_build.ffi_flags_of ~root:"/r" p);
     Alcotest.(check int) "no rust crate" 0 (List.length p.Project.ffi_rust)
+
+let test_project_os_ffi_tables () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml")
+    {|[package]
+name = "x"
+
+[[ffi]]
+sources = ["native/common.c"]
+link = ["-lz"]
+
+[[ffi]]
+os = "macos"
+link = ["-framework Accelerate"]
+
+[[ffi]]
+os = "linux"
+sources = ["native/linux.c"]
+link = ["-lopenblas"]
+
+[[ffi]]
+link = ["-lm"]
+|};
+  match Project.load_from_dir dir with
+  | Error e -> Alcotest.failf "load failed: %s" e
+  | Ok p ->
+    let untagged = " --ffi-c '/r/native/common.c' --ffi-link '-lz' --ffi-link '-lm'" in
+    let linux =
+      " --ffi-c '/r/native/common.c' --ffi-c '/r/native/linux.c' --ffi-link '-lz' --ffi-link '-lopenblas' --ffi-link '-lm'"
+    in
+    let native =
+      match Result.map String.trim (Toolchain.capture "uname -s") with
+      | Ok "Darwin" ->
+        " --ffi-c '/r/native/common.c' --ffi-link '-lz' --ffi-link '-framework Accelerate' --ffi-link '-lm'"
+      | Ok "Linux" -> linux
+      | _ -> untagged
+    in
+    let check = Alcotest.(check string) in
+    check "native flags in declaration order" native (Cmd_build.ffi_flags_of ~root:"/r" p);
+    check "explicit native" native (Cmd_build.ffi_flags_of ~target:"native" ~root:"/r" p);
+    List.iter (fun target ->
+      check target linux (Cmd_build.ffi_flags_of ~target ~root:"/r" p))
+      ["linux/amd64"; "linux/arm64"; "linux/x86_64"; "linux/aarch64"; "linux-arm64"];
+    List.iter (fun target ->
+      check target untagged (Cmd_build.ffi_flags_of ~target ~root:"/r" p))
+      ["js"; "wasm64-wasi"];
+    match Cmd_build.ffi_flags_full ~target:"linux/arm64" p with
+    | Error e -> Alcotest.failf "FFI flags failed: %s" e
+    | Ok flags ->
+      let expected =
+        Printf.sprintf " --ffi-c %s --ffi-c %s --ffi-link '-lz' --ffi-link '-lopenblas' --ffi-link '-lm'"
+          (Filename.quote (Filename.concat dir "native/common.c"))
+          (Filename.quote (Filename.concat dir "native/linux.c"))
+      in
+      check "cross build flags" expected flags
+
+let test_project_invalid_ffi_os () =
+  let dir = fresh_dir () in
+  let expected = "forge.toml:5: [ffi] os must be \"macos\" or \"linux\"" in
+  let check_error name = function
+    | Ok _ -> Alcotest.failf "%s accepted an invalid [ffi] os" name
+    | Error e -> Alcotest.(check string) name expected e
+  in
+  List.iter (fun value ->
+    write_file (Filename.concat dir "forge.toml")
+      ("[package]\nname = \"x\"\n\n[ffi]\nos = " ^ value ^ "\n");
+    check_error value (Project.load_from_dir dir))
+    ["\"darwin\""; "true"];
+  write_file (Filename.concat dir "test.march") "mod Probe do end\n";
+  let cwd = Sys.getcwd () in
+  Fun.protect ~finally:(fun () -> Unix.chdir cwd) (fun () ->
+    Unix.chdir dir;
+    check_error "test discovery" (Cmd_test.run ());
+    check_error "named test" (Cmd_test.run ~files:["test.march"] ());
+    check_error "named run" (Cmd_run.resolve_entry ~file:"test.march" ());
+    check_error "named query" (Cmd_query.run ["verify"; "test.march"]);
+    check_error "interactive" (Cmd_interactive.run ()))
 
 (* [package] pin_main: baked into the binary via `march --pin-main`. *)
 let test_project_pin_main_true () =
@@ -3640,6 +3713,8 @@ let () =
       Alcotest.test_case "gen-c: errors with no extern"      `Quick test_ffi_gen_c_no_extern;
       Alcotest.test_case "[[ffi]]: every table is used"      `Quick test_project_multi_ffi_tables;
       Alcotest.test_case "[ffi]: single table unchanged"     `Quick test_project_single_ffi_table;
+      Alcotest.test_case "[[ffi]]: native and cross OS selection" `Quick test_project_os_ffi_tables;
+      Alcotest.test_case "[ffi]: invalid OS selector" `Quick test_project_invalid_ffi_os;
     ];
     "hcr-cap-gate", [
       Alcotest.test_case "parse_manifest: tolerates legacy ROOT line, no phantom fn" `Quick test_parse_manifest_root_line_no_phantom_fn;

@@ -196,7 +196,7 @@ let build_patch c ~pflags ~build ~pools ~target : (artifact, string) result =
     Printf.sprintf "cd %s && %smarch --compile --compile-so --hot-reload %s --signing-pubkey %s%s --topology %s%s%s%s -o %s %s > %s 2>&1"
       (Filename.quote out) (Cmd_build.lib_path_env c.proj) (Filename.quote c.prefix) (Filename.quote c.pubkey) tflag
       (Filename.quote (Topology.digest_file ~root:c.root)) pools_flag
-      (Cmd_build.ffi_flags_of ~root:c.root c.proj) pflags (Filename.quote so) (Filename.quote entry) (Filename.quote log)
+      (Cmd_build.ffi_flags_of ?target:(build_target target) ~root:c.root c.proj) pflags (Filename.quote so) (Filename.quote entry) (Filename.quote log)
   in
   Printf.printf "building the %s patch for %s...\n%!" build target;
   if Sys.command cmd <> 0 then Error (Printf.sprintf "building build %s for %s failed; see %s" build target log)

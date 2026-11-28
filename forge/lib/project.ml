@@ -43,6 +43,15 @@ type archive_task = {
   task_module  : string;  (** relative path, e.g. "forge/cmd_new.march" *)
 }
 
+type ffi_os = Macos | Linux
+
+(** One [ffi] table. Sources are relative to the project root. *)
+type ffi_binding = {
+  ffi_os : ffi_os option;
+  ffi_sources : string list;
+  ffi_link : string list;
+}
+
 (** A Rust staticlib crate auto-built by `forge build`.
     Declared under `[ffi.rust]` in forge.toml:
       [ffi.rust]
@@ -103,12 +112,8 @@ type project = {
   archive_tasks : archive_task list;
   archive_deps  : (string * dep) list;
   preprocessors : (string * string) list;
-  ffi_sources   : string list;
-  (** [ffi] sources = [...]: C shim files to compile+link (relative to root),
-      concatenated over every [[ffi]] table in declaration order *)
-  ffi_link      : string list;
-  (** [ffi] link = [...]: extra linker flags, e.g. "-lz", concatenated over
-      every [[ffi]] table *)
+  ffi_bindings  : ffi_binding list;
+  (** [ffi] / [[ffi]] C sources and link flags, in declaration order. *)
   ffi_rust      : ffi_rust_crate list;
   (** [ffi.rust] / [[ffi.rust]]: Rust staticlib crates auto-built by forge
       build, in declaration order *)
@@ -375,7 +380,7 @@ let known_keys_of_section (name : string) : string list option =
   in
   match name with
   | "package" | "project" -> Some package_keys
-  | "ffi" -> Some [ "sources"; "link" ]
+  | "ffi" -> Some [ "os"; "sources"; "link" ]
   | "ffi.rust" -> Some [ "crate"; "lib" ]
   | "hot-reload" ->
     Some [ "socket"; "ssh_host"; "public_key"; "health_check_url"; "strategy";
@@ -493,16 +498,24 @@ let load_from root =
       | _ -> None
     ) (Toml.get_section doc "preprocessors")
   in
-  (* [ffi] / [[ffi]]: C shim sources + extra linker flags for FFI bindings.
-     A project binding several native libraries declares one [[ffi]] table
-     per library; every table's sources and links are used, in order.
-     ([Toml.get_section] returns only the FIRST table of a name, so a
-     second [[ffi]] used to be dropped without a word.) *)
-  let ffi_tables = Toml.get_all_sections doc "ffi" in
-  let ffi_sources =
-    List.concat_map (fun t -> Toml.get_string_list t "sources") ffi_tables in
-  let ffi_link =
-    List.concat_map (fun t -> Toml.get_string_list t "link") ffi_tables in
+  let ffi_bindings =
+    Toml.get_all_sections_at doc "ffi"
+    |> List.map (fun table ->
+      let ffi_os =
+        match Toml.find_at table "os" with
+        | None -> None
+        | Some (Toml.Str "macos", _) -> Some Macos
+        | Some (Toml.Str "linux", _) -> Some Linux
+        | Some (_, line) ->
+          failwith (Printf.sprintf "forge.toml:%d: [ffi] os must be \"macos\" or \"linux\"" line)
+      in
+      let strings key =
+        match Toml.get_string_list_at table key with
+        | Some (values, _) -> values
+        | None -> []
+      in
+      { ffi_os; ffi_sources = strings "sources"; ffi_link = strings "link" })
+  in
   (* [ffi.rust] / [[ffi.rust]]: Rust staticlib crates auto-built by forge
      build. Each archive is at <crate>/target/release/lib<lib>.a.
      `lib` defaults to the basename of the crate path if omitted. *)
@@ -570,7 +583,7 @@ let load_from root =
   { name; version; project_type = project_type_of_string type_str;
     description; author; root; entrypoint; js_entrypoint; march_req; license; repository; homepage;
     pin_main; deps; dev_deps; dev_only_deps; test_deps; dep_entries; patches; archive_tasks; archive_deps;
-    preprocessors; ffi_sources; ffi_link; ffi_rust; js_deps; hot_reload;
+    preprocessors; ffi_bindings; ffi_rust; js_deps; hot_reload;
     refine_rlimit; contracts_no_alloc }
 
 (** The project's entry file: [package] entrypoint when set, else the first
@@ -611,15 +624,17 @@ let load_from_dir dir =
   | Failure msg   -> Error msg
   | Toml.Parse_error msg -> Error msg
 
-let load () =
+(** Distinguish an absent manifest from an invalid project. *)
+let load_optional () =
   match find_forge_toml () with
-  | None -> Error "no forge.toml found in current directory or any parent"
-  | Some root ->
-    (try Ok (load_from root)
-     with
-     | Sys_error msg -> Error msg
-     | Failure msg   -> Error msg
-     | Toml.Parse_error msg -> Error msg)
+  | None -> Ok None
+  | Some root -> Result.map Option.some (load_from_dir root)
+
+let load () =
+  match load_optional () with
+  | Ok (Some proj) -> Ok proj
+  | Ok None -> Error "no forge.toml found in current directory or any parent"
+  | Error _ as e -> e
 
 (** Read a project's forge.lock into a [name -> coordinate] table: the commit
     for a git dep, the exact resolved version for a registry dep. This is the

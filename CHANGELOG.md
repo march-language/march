@@ -148,6 +148,8 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Forge supports OS-specific C FFI tables.** Set `os = "macos"` or
+  `os = "linux"` to select sources and linker flags for the build target.
 - **Freestanding wasm32 embedders can use a March tracing heap.** Compile
   the runtime with `-DMARCH_WASM_TRACING_HEAP` and link `march_wasm_heap.c`.
   Pass retained roots at host safepoints to reclaim and reuse linear memory.

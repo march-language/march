@@ -312,8 +312,8 @@ lib   = "demo_binding"         # [lib] name (default: basename of crate)
 ```
 
 A project that binds several native libraries declares one table per library
-with `[[ffi]]` (and `[[ffi.rust]]` for several crates). forge uses every
-table, in the order they appear:
+with `[[ffi]]` (and `[[ffi.rust]]` for several crates). Forge uses the
+applicable tables in declaration order:
 
 ```toml
 [[ffi]]
@@ -328,6 +328,26 @@ link    = ["-lsqlite3"]
 Editing a shim or any Rust source invalidates the content-addressed binary cache,
 so a rebuild relinks automatically. (Under the bare compiler the flags are
 `--ffi-c` / `--ffi-link`.)
+
+Set `os = "macos"` or `os = "linux"` on a C FFI table to select its sources
+and link flags for that operating system. Tables without `os` apply to all
+targets. Native builds use the host OS. Explicit Linux cross-targets use the
+Linux tables, and JavaScript and WebAssembly builds use only untagged tables.
+
+```toml
+[[ffi]]
+sources = ["native/blas.c"]
+
+[[ffi]]
+os = "macos"
+link = ["-framework Accelerate"]
+
+[[ffi]]
+os = "linux"
+link = ["-lopenblas"]
+```
+
+Linux builds require the OpenBLAS headers and libraries for the target.
 
 ---
 
