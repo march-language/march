@@ -19589,6 +19589,36 @@ let test_preamble_wrapper_delegates () =
   Alcotest.(check string) "Llvm_emit.emit_preamble wrapper matches Llvm_builtins.emit_preamble"
     (Buffer.contents buf_new) (Buffer.contents buf_old)
 
+let test_wasm32_signed_tagged_immediates () =
+  let open March_tir.Tir in
+  let module Llvm = March_tir.Llvm_emit in
+  let erased = mk_var "tagged" (TVar "_") in
+  let decode =
+    { fn_name = "decode"; fn_params = [erased]; fn_ret_ty = TInt;
+      fn_body = EAtom (AVar erased); fn_kind = FnNormal }
+  in
+  let n = mk_var "n" TInt in
+  let concrete =
+    { fn_name = "concrete"; fn_params = [n]; fn_ret_ty = TInt;
+      fn_body = EAtom (AVar n); fn_kind = FnNormal }
+  in
+  let closure_ty = TFn ([TInt], TInt) in
+  let make_closure =
+    { fn_name = "make_closure"; fn_params = []; fn_ret_ty = closure_ty;
+      fn_body = EAtom (AVar (mk_var "concrete" closure_ty)); fn_kind = FnNormal }
+  in
+  let m = mk_module [decode; concrete; make_closure] in
+  List.iter (fun (target, shift_ty) ->
+      let ir = Llvm.emit_module ~target m in
+      let shift_lines =
+        String.split_on_char '\n' ir
+        |> List.filter (fun line -> Test_helpers.contains (" = ashr " ^ shift_ty ^ " ") line)
+      in
+      Alcotest.(check int)
+        ("decode and closure trampoline shift at pointer width on " ^ Llvm.target_triple target)
+        2 (List.length shift_lines))
+    [ Llvm.Wasm32Unknown, "i32"; Llvm.Wasm32Wasi, "i32"; Llvm.Wasm64Wasi, "i64" ]
+
 (** A top-level fn used as a first-class value must NOT emit a fresh
     march_alloc(24) per materialization; it must reference one immortal
     static global instead. *)
@@ -22832,6 +22862,10 @@ let codegen_suites =
             test_capture_free_lambda_not_emitted_in_fns_fragment_repl_mode;
           Alcotest.test_case "capture-free lambda static closure global is not emitted under hot-reload" `Quick
             test_capture_free_lambda_not_emitted_under_hot_reload;
+        ] );
+      ( "wasm32_signed_immediates", [
+          Alcotest.test_case "erased Int and closure arguments preserve their sign" `Quick
+            test_wasm32_signed_tagged_immediates;
         ] );
       ( "compiler_robustness", [
           Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick

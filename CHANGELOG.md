@@ -1446,6 +1446,8 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Wasm32 preserves the sign of tagged integers.** Negative integers that fit in a
+  tagged pointer keep their sign when read from erased storage or passed through a closure.
 - Compiled string interpolation now links against the freestanding WebAssembly
   runtime when it combines three or more parts.
 
