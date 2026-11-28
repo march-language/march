@@ -1435,8 +1435,8 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
-- Capability-free programs targeting freestanding browser WebAssembly no
-  longer emit calls to the process environment's launch authority routine.
+- Programs with unscoped capability requests can call statically linked
+  host functions in freestanding WebAssembly without an environment-grant runtime.
 
 - Compiled calls now use the module alias in their own scope when a library
   and its caller reuse the same alias name for different modules.

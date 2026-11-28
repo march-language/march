@@ -11053,7 +11053,7 @@ let write_march_source ~name src_text =
   close_out oc;
   (project_root, main_exe, src, tmp)
 
-let test_browser_empty_launch_request () =
+let test_browser_unscoped_launch_request () =
   let emit_ir ~target source =
     let project_root, main_exe, src, _ = write_march_source ~name:"march_browser_launch" source in
     let ll = Filename.remove_extension src ^ ".ll" in
@@ -11069,6 +11069,19 @@ let test_browser_empty_launch_request () =
     (ir_count ir "define dllexport void @_start()" = 1);
   Alcotest.(check int) "an empty browser request omits the process grant lookup" 0
     (ir_count ir "@march_cap_grant_text(");
+  let ffi = {|mod BrowserSmoke do
+  needs IO.Foreign
+  extern "browser_host" : Cap(IO.Foreign) do
+    fn publish(value : String) : Unit = "host_publish"
+  end
+  fn main() : Unit needs IO.Foreign do publish("ready") end
+end
+|} in
+  let ir = emit_ir ~target:browser ffi in
+  Alcotest.(check int) "the unscoped browser entry reaches its static FFI" 1
+    (ir_count ir "call void @host_publish(");
+  Alcotest.(check int) "an unscoped browser request omits launch initialization" 0
+    (ir_count ir "call ptr @Authority.launch_init(");
   let scoped = {|mod BrowserSmoke do
   needs IO.FileRead
   fn main() : Unit needs IO.FileRead("/tmp/") do () end
@@ -22850,8 +22863,8 @@ let codegen_suites =
       ( "compiler_robustness", [
           Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick
             test_unreadable_sibling_dir_does_not_crash_check;
-          Alcotest.test_case "browser entry omits only empty launch requests" `Quick
-            test_browser_empty_launch_request;
+          Alcotest.test_case "browser entry omits launch initialization for unscoped requests" `Quick
+            test_browser_unscoped_launch_request;
         ] );
       ( "name_resolution", [
           Alcotest.test_case "qualified call not hijacked by another module's global import" `Quick
