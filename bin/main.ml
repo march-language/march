@@ -4969,8 +4969,14 @@ let compile filename =
               ~sites:March_tir.Lower.restrict_sites ~grants:March_tir.Lower.fn_grant_tbl) }
       else None
     in
+    let launch =
+      (* The freestanding browser has no process environment supplying
+         MARCH_GRANT. An empty request needs no launch authority setup. *)
+      parse_target !target_str <> March_tir.Llvm_emit.Wasm32Unknown
+      || !do_test || March_typecheck.Typecheck.launch_request desugared <> ("", false)
+    in
     let tir =
-      try March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) ~launch:true ?lazy_bodies desugared
+      try March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) ~launch ?lazy_bodies desugared
       with
       | March_errors.Errors.Diagnostic_exn d ->
         (* A positioned rejection of something the compiled backend does not
