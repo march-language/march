@@ -901,9 +901,8 @@ let _actor_mailboxes : (string, int * int) Hashtbl.t = Hashtbl.create 8
     module happened to be lowered first, which holds for the entry file's
     top-level aliases (processed after every other module) but NOT for an
     `alias` declared inside a non-entry (auto-discovered / stdlib) module
-    body, whose target sibling may be lowered afterward.  Global, matching
-    [_use_aliases]; explicit-alias short names rarely collide (same hijack
-    caveat as [_use_aliases], mitigated by first-wins registration). *)
+    body, whose target sibling may be lowered afterward. The lexical table
+    takes precedence over this program-wide fallback. *)
 let _module_aliases : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
 
 (** Snapshot of each module's [current_module_aliases] env field (keyed by its qualified
@@ -959,10 +958,9 @@ let alias_view = ref max_int   (* [max_int]: the live tables *)
    first ([Hashtbl.add]). *)
 let use_alias_log : (string, int * string option) Hashtbl.t = Hashtbl.create 0
 let module_alias_log : (string, int * string option) Hashtbl.t = Hashtbl.create 0
-(* Per-module tables are first-wins (a key is written once per table, so an
-   entry written after the view was absent at the view): key -> (the table,
-   clock). *)
-let module_import_log : (string, (string, string) Hashtbl.t * int) Hashtbl.t =
+(* Per-module tables: key -> (the table, clock, value before the write).
+   A module alias can replace a binding inherited from its parent. *)
+let module_import_log : (string, (string, string) Hashtbl.t * int * string option) Hashtbl.t =
   Hashtbl.create 0
 
 let reset_alias_history ~(on : bool) =
@@ -1000,16 +998,20 @@ let set_module_alias (k : string) (v : string) =
 let set_module_import (tbl : (string, string) Hashtbl.t) (k : string) (v : string) =
   if !alias_history then begin
     incr alias_clock;
-    Hashtbl.add module_import_log k (tbl, !alias_clock)
+    Hashtbl.add module_import_log k (tbl, !alias_clock, Hashtbl.find_opt tbl k)
   end;
   Hashtbl.replace tbl k v
 
 let find_module_import (tbl : (string, string) Hashtbl.t) (k : string) : string option =
-  if !alias_view <> max_int
-     && List.exists (fun (tb, t) -> tb == tbl && t > !alias_view)
-          (Hashtbl.find_all module_import_log k)
-  then None
-  else Hashtbl.find_opt tbl k
+  let cur = Hashtbl.find_opt tbl k in
+  if !alias_view = max_int then cur
+  else List.fold_left (fun acc (tb, t, prev) ->
+      if tb == tbl && t > !alias_view then prev else acc)
+      cur (Hashtbl.find_all module_import_log k)
+
+(* The trailing dot distinguishes a module prefix from an exact member name. *)
+let set_lexical_module_alias env short path =
+  set_module_import env.current_module_aliases (short ^ ".") path
 
 let _alias_candidates : (string, string list) Hashtbl.t = Hashtbl.create 64
 let _alias_reported   : (string, unit) Hashtbl.t = Hashtbl.create 16
@@ -1258,7 +1260,10 @@ let resolve_use_alias (env : env) (name : string) : string =
      | None -> name
      | Some i ->
        let head = String.sub name 0 i in
-       match find_global_as_of module_alias_log !_module_aliases head with
+       let path = match find_module_import env.current_module_aliases (head ^ ".") with
+         | Some _ as lexical -> lexical
+         | None -> find_global_as_of module_alias_log !_module_aliases head in
+       match path with
        | Some real_path ->
          real_path ^ String.sub name i (String.length name - i)
        | None -> name)
