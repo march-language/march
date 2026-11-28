@@ -150,6 +150,9 @@ git log is authoritative for exact commits.
 
 - **Forge supports OS-specific C FFI tables.** Set `os = "macos"` or
   `os = "linux"` to select sources and linker flags for the build target.
+- **Freestanding wasm32 embedders can use a March tracing heap.** Compile
+  the runtime with `-DMARCH_WASM_TRACING_HEAP` and link `march_wasm_heap.c`.
+  Pass retained roots at host safepoints to reclaim and reuse linear memory.
 
 - **Freestanding wasm32 embedders can supply their own allocator.** Compile the
   runtime with `-DMARCH_WASM_EXTERNAL_ALLOC` and link an implementation of
@@ -1451,6 +1454,8 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Programs with unscoped capability requests can call statically linked
+  host functions in freestanding WebAssembly without an environment-grant runtime.
 - **Wasm32 preserves the sign of tagged integers.** Negative integers that fit in a
   tagged pointer keep their sign when read from erased storage or passed through a closure.
 - Compiled string interpolation now links against the freestanding WebAssembly
