@@ -1604,6 +1604,7 @@ let emit_module ~emit_expr
   in
   let k_table = match k_table with Some t -> t | None -> Kind.of_module m in
   let ctx = Llvm_ctx.make_ctx ~fast_math ~pmap_threshold ~hot_reload ~hr_names
+      ~wasm32:(is_wasm32 target)
       ~type_defs:m.Tir.tm_types ~k_table () in
   (* Patch .so: hide all non-exported symbols so intra-.so PLT calls prefer the
      .so's own definitions over same-named symbols in the server binary.  This

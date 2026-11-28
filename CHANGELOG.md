@@ -1435,6 +1435,9 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Wasm32 preserves the sign of tagged integers.** Negative integers that fit in a
+  tagged pointer keep their sign when read from erased storage or passed through a closure.
+
 - Compiled calls now use the module alias in their own scope when a library
   and its caller reuse the same alias name for different modules.
 

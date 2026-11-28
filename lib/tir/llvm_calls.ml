@@ -426,7 +426,7 @@ let deep_drop_name ~(has_fn : string -> bool) (ty : Tir.ty) : string option =
   let name = Tir_names.drop_fn_prefix ^ Drop.mangle ty in
   if has_fn name then Some name else None
 
-let clo_wrap_define ?(frame_epoch = false) ?(drop_clo = false) ?(borrowed = []) ?(own_float = true)
+let clo_wrap_define ?(wasm32 = false) ?(frame_epoch = false) ?(drop_clo = false) ?(borrowed = []) ?(own_float = true)
     ?(deep_drops = []) wrap_name (param_ltys : string list) target_ret fn_name =
   let arg_names = List.mapi (fun i _ -> Printf.sprintf "%%a%d" i) param_ltys in
   (* A closure call consumes its heap arguments ([Clo_flags]), but the target
@@ -482,9 +482,11 @@ let clo_wrap_define ?(frame_epoch = false) ?(drop_clo = false) ?(borrowed = []) 
           and s = name ^ "s" and u = name ^ "u" in
           Buffer.add_string prologue (Printf.sprintf
             "  %s = ptrtoint ptr %s to i64\n  %s = and i64 %s, 1\n  \
-             %s = icmp ne i64 %s, 0\n  %s = ashr i64 %s, 1\n  \
-             %s = select i1 %s, i64 %s, i64 %s\n"
-            i name a i c a s i u c s i);
+             %s = icmp ne i64 %s, 0\n"
+            i name a i c a);
+          Llvm_ctx.emit_untag_shift ~wasm32
+            ~emit:(Printf.bprintf prologue "  %s\n") ~dst:s i;
+          Printf.bprintf prologue "  %s = select i1 %s, i64 %s, i64 %s\n" u c s i;
           "i64 " ^ u
         end else begin
           (* A `ptr` param may carry a Float box, which the caller keeps
