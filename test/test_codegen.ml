@@ -11832,6 +11832,53 @@ let nested_parent_call_entry_src () =
   "  end\n\
    end\n"
 
+let test_lexical_module_aliases () =
+  let project_root, main_exe, src, tmp = write_march_source ~name:"march_lexical_alias" {|mod Main do
+  needs IO.Console
+  alias AliasRight as Local
+  fn main() needs IO.Console do
+    println(int_to_string(Local.value()))
+    println(int_to_string(AliasLibrary.value()))
+    println(int_to_string(AliasLibrary.Inherited.value()))
+    println(int_to_string(AliasLibrary.Rebound.value()))
+  end
+end
+|} in
+  let lib_dir = Filename.concat tmp "lib" in
+  Unix.mkdir lib_dir 0o755;
+  List.iter (fun (file, source) ->
+    let out = open_out (Filename.concat lib_dir file) in
+    Fun.protect ~finally:(fun () -> close_out out) (fun () -> output_string out source))
+    [ "alias_left.march", {|mod AliasLeft do
+  fn value() : Int do 11 end
+end
+|};
+      "alias_right.march", {|mod AliasRight do
+  fn value() : Int do 29 end
+end
+|};
+      "alias_library.march", {|mod AliasLibrary do
+  alias AliasLeft as Local
+  fn value() : Int do Local.value() end
+  mod Inherited do
+    fn value() : Int do Local.value() end
+  end
+  mod Rebound do
+    alias AliasRight as Local
+    fn value() : Int do Local.value() end
+  end
+end
+|} ];
+  let bin = Filename.concat tmp "alias_bin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && MARCH_LIB_PATH=%s "
+                         (Filename.quote project_root) (Filename.quote lib_dir))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    Alcotest.(check string) "module aliases use their lexical target"
+      "29\n11\n11\n29" (read_cmd_output (Filename.quote bin))
+
 let test_nested_module_parent_call_lib_path_compiled () =
   let (project_root, main_exe, src, tmp, lib_dir) =
     write_nested_parent_lib_path_project ~name:"march_nested_parent" in
@@ -22781,6 +22828,8 @@ let codegen_suites =
             test_qualified_alias_no_cross_module_hijack;
           Alcotest.test_case "entry-file bulk import resolves partial-qualified call" `Quick
             test_entry_bulk_import_resolves_partial_qualified;
+          Alcotest.test_case "module aliases stay in their lexical scope" `Quick
+            test_lexical_module_aliases;
           Alcotest.test_case "registry record's bare-named sibling field type resolves" `Quick
             test_registry_record_field_bare_sibling_type_resolves;
         ] );

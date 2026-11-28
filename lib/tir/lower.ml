@@ -1338,20 +1338,12 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 register_aliases ctx_prefix;
                 register_aliases import_prefix
               | Ast.DAlias (ad, _) ->
-                (* `alias Long.Path as Short` INSIDE a module body.  The
-                   top-level DAlias handler (which builds exact !fns-scanned
-                   entries) is only reached for aliases at the entry file's
-                   top level; an alias in an auto-discovered/stdlib module
-                   body arrives here instead and was previously dropped by the
-                   [_ -> ()] catch-all, so `Short.member` never resolved to
-                   `Long.Path.member` and codegen emitted an undefined
-                   `_Short.member` symbol.  Register the order-independent
-                   prefix mapping (first-wins) — [resolve_use_alias]'s prefix
-                   fallback then rewrites references without needing the target
-                   sibling to have been lowered yet. *)
+                (* The lexical prefix maps [Short.member] to [Long.Path.member]
+                   even if the target module is lowered later. *)
                 let full_path =
                   String.concat "." (List.map (fun n -> n.Ast.txt) ad.alias_path) in
                 let short = ad.alias_name.Ast.txt in
+                Lower_state.set_lexical_module_alias mod_env short full_path;
                 if not (Hashtbl.mem !_module_aliases short) then
                   Lower_state.set_module_alias short full_path
               | Ast.DActor (_, name, actor_def, span) ->
@@ -1490,6 +1482,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
            entries above still win when present; this only backstops. *)
         (let full_path =
            String.concat "." (List.map (fun n -> n.Ast.txt) ad.alias_path) in
+         Lower_state.set_lexical_module_alias env short_name full_path;
          if not (Hashtbl.mem !_module_aliases short_name) then
            Lower_state.set_module_alias short_name full_path)
       | Ast.DDescribe _ | Ast.DOpts _ -> ())

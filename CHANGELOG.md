@@ -1435,6 +1435,9 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Compiled calls now use the module alias in their own scope when a library
+  and its caller reuse the same alias name for different modules.
+
 - **An overflow panic inside a local function names that function's own file and line.** A
   local function (`fn go(...)` inside another function) was reported at the declaration of
   whichever local function of the same name the compiler had processed last, so an Int
