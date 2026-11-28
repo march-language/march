@@ -1438,6 +1438,9 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Compiled string interpolation now links against the freestanding WebAssembly
+  runtime when it combines three or more parts.
+
 - Compiled calls now use the module alias in their own scope when a library
   and its caller reuse the same alias name for different modules.
 
