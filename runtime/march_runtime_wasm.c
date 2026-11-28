@@ -168,6 +168,34 @@ void *march_string_concat(void *a, void *b) {
     return result;
 }
 
+/* Interpolation passes a borrowed array of strings. Copy each part once so
+ * the bump allocator does not retain intermediate concatenated prefixes. */
+void *march_string_concat_n(int64_t n, void **parts) {
+    uint64_t length = 0;
+    for (int64_t i = 0; i < n; i++) {
+        const march_string *part = parts[i];
+        if (part->length < 0 ||
+            __builtin_add_overflow(length, (uint64_t)part->length, &length))
+            __builtin_trap();
+    }
+    if (length > SIZE_MAX - 8 || length >= INT64_MAX) __builtin_trap();
+
+    char *buffer = march_alloc(length + 1);
+    char *out = buffer;
+    for (int64_t i = 0; i < n; i++) {
+        const march_string *part = parts[i];
+        memcpy(out, part->data, part->length);
+        out += part->length;
+    }
+    *out = '\0';
+    return march_string_lit(buffer, length);
+}
+
+void *march_string_concat3(void *a, void *b, void *c) {
+    void *parts[] = { a, b, c };
+    return march_string_concat_n(3, parts);
+}
+
 int64_t march_string_byte_length(void *s) {
     return ((march_string *)s)->length;
 }
